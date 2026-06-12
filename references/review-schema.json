@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "xrev review result",
+  "description": "reviewer（既定: Codex）に強制する構造化レビュー出力の契約。自由作文のレビューを次工程に渡さないための機械可読フォーマット。",
+  "type": "object",
+  "properties": {
+    "verdict": {
+      "description": "全体判定。blocker（critical/high）が残るなら request_changes、無ければ approve。",
+      "enum": ["approve", "request_changes"]
+    },
+    "summary": {
+      "description": "レビュー全体の一行要約（任意。ADR の Discussion log 整形に使う）。",
+      "type": "string"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "severity": { "enum": ["critical", "high", "medium", "low", "nit"] },
+          "category": { "enum": ["bug", "security", "design", "perf", "style"] },
+          "message": { "type": "string" },
+          "suggested_fix": { "type": "string" }
+        },
+        "required": ["file", "severity", "category", "message"]
+      }
+    }
+  },
+  "required": ["verdict", "findings"]
+}

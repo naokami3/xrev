@@ -1,0 +1,16 @@
+{
+  "primary": "claude",
+  "reviewer": "codex",
+  "reviewer_pane_title": "Review Codex",
+  "keyword": "@xrev",
+  "max_iterations": 5,
+  "stop_at": "review",
+  "adr": false,
+  "transport": "cmux",
+  "severity_blockers": ["critical", "high"],
+  "medium_low_max_rounds": 2,
+  "read_screen_lines": 400,
+  "send_settle_seconds": 2,
+  "response_timeout_seconds": 180,
+  "response_poll_seconds": 3
+}
