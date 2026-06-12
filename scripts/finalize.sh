@@ -21,7 +21,30 @@ set -uo pipefail
 
 _die() { printf '[xrev/finalize] %s\n' "$*" >&2; exit 1; }
 
-MODE="${1:-review}"
+_dir() { cd "$(dirname "${BASH_SOURCE[0]}")" && pwd; }
+: "${XREV_CONFIG:=${CLAUDE_PLUGIN_ROOT:-$(_dir)/..}/config/xrev.default.json}"
+
+# config から stop_at の既定を読む（jq 非依存）。
+_cfg_stop_at() {
+  python3 - "$XREV_CONFIG" <<'PY' 2>/dev/null || printf 'review'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        print(json.load(f).get("stop_at", "review"))
+except Exception:
+    print("review")
+PY
+}
+
+# 到達点の解決（優先順位 高→低）:
+#   1) 引数 $1（その場指定。依頼文 / /xrev 引数 / 一拍確認の回答を Claude が渡す）
+#   2) 環境変数 XREV_STOP_AT（シェル/プロジェクト単位の既定上書き）
+#   3) config の stop_at（プロジェクト全体の既定）
+#   4) 最終フォールバック review（最も安全）
+MODE="${1:-}"
+[[ -n "$MODE" ]] || MODE="${XREV_STOP_AT:-}"
+[[ -n "$MODE" ]] || MODE="$(_cfg_stop_at)"
+[[ -n "$MODE" ]] || MODE="review"
 
 case "$MODE" in
   review)

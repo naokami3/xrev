@@ -83,6 +83,27 @@ xrev/
 **PR は必ずドラフト。** Ready 化・マージ・確定の最終トリガは人間が引く。これが「人間の最終チェックは
 必要」という要件の物理的な保証。
 
+### 到達点の設定方法（3段階）
+
+到達点は次の優先順で決まる（上が優先）。
+
+1. **その場で指定**（1 回限り）: 依頼文や `/xrev` 引数、または一拍確認への回答で伝える。
+   ```
+   このAPIを @xrev で commit まで進めて
+   /xrev pr --adr <対象>
+   ```
+2. **環境変数 `XREV_STOP_AT`**（シェル / プロジェクト単位の既定）:
+   ```bash
+   export XREV_STOP_AT=commit   # review / commit / pr
+   ```
+3. **`config/xrev.default.json` の `stop_at`**（プロジェクト全体の既定）:
+   ```json
+   { "stop_at": "review" }   // review / commit / pr
+   ```
+
+いずれも指定が無ければ最終フォールバックは `review`（最も安全）。ADR の有無も同様に
+`config` の `adr`（既定 `false`）と一拍確認で切り替える。
+
 ## 運用上の注意
 
 ### 作業を切り替えるときは Codex を再起動して履歴を切る

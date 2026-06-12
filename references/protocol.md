@@ -114,5 +114,14 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 | `response_poll_seconds` | `3` | 応答ポーリング間隔秒 |
 
 環境変数で個別上書き可: `XREV_CONFIG`, `XREV_REVIEWER_PANE_TITLE`, `XREV_REVIEWER_SURFACE`,
-`XREV_MAX_ITERATIONS`, `XREV_READ_SCREEN_LINES`, `XREV_SEND_SETTLE_SECONDS`,
+`XREV_MAX_ITERATIONS`, `XREV_STOP_AT`, `XREV_READ_SCREEN_LINES`, `XREV_SEND_SETTLE_SECONDS`,
 `XREV_RESPONSE_TIMEOUT_SECONDS`, `XREV_RESPONSE_POLL_SECONDS`。
+
+### 到達点（stop_at）の解決順
+
+`scripts/finalize.sh` は到達点を次の優先順で決める（高 → 低）:
+
+1. 引数（その場指定。依頼文 / `/xrev` 引数 / 一拍確認の回答を Claude が渡す）
+2. 環境変数 `XREV_STOP_AT`（シェル / プロジェクト単位の既定上書き）
+3. `config` の `stop_at`（プロジェクト全体の既定）
+4. `review`（最終フォールバック・最も安全）
