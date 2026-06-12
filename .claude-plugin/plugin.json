@@ -1,0 +1,20 @@
+{
+  "name": "xrev",
+  "version": "0.1.0",
+  "description": "設計段階からのクロスレビュー往復を自動運用する Claude Code プラグイン（Claude ⇄ Codex, cmux 経由）。収束後に review / commit / ドラフト PR を選べる。",
+  "author": {
+    "name": "naokami3"
+  },
+  "license": "MIT",
+  "keywords": [
+    "code-review",
+    "cross-review",
+    "ai-agents",
+    "agent-orchestration",
+    "codex",
+    "cmux"
+  ],
+  "skills": "./skills/",
+  "commands": "./commands/",
+  "hooks": "./hooks/hooks.json"
+}
