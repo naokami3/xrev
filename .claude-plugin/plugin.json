@@ -5,6 +5,8 @@
   "author": {
     "name": "naokami3"
   },
+  "homepage": "https://github.com/naokami3/xrev",
+  "repository": "https://github.com/naokami3/xrev",
   "license": "MIT",
   "keywords": [
     "code-review",

@@ -29,18 +29,75 @@ Claude Code プラグイン。
 
 ## インストール
 
-Claude Code のプラグインとして読み込む（プラグインディレクトリに配置、またはマーケットプレイス経由）。
+xrev は **Claude Code のプラグインマーケットプレイス**として配布する（npm 等のパッケージマネージャは
+使わない）。このリポジトリ自体がマーケットプレイスを兼ねており、ユーザーは 2 コマンドで導入できる。
 
+### A. 個人で入れる（最短）
+
+Claude Code 上で次を実行する:
+
+```text
+/plugin marketplace add naokami3/xrev
+/plugin install xrev@xrev-marketplace
 ```
-xrev/
-├── .claude-plugin/plugin.json   # プラグインメタ
-├── skills/xrev/SKILL.md         # 中核プレイブック
-├── commands/xrev.md             # /xrev（@xrev のフォールバック）
-├── hooks/                       # @xrev 検知フック
-├── scripts/                     # 配管・レビューループ・ADR・finalize
-├── config/xrev.default.json     # 既定設定
-└── references/                  # プロトコル詳細・レビュー出力契約
+
+- 1 行目: GitHub リポジトリ `naokami3/xrev` をマーケットプレイスとして登録（`owner/repo` 形式）。
+- 2 行目: その中の `xrev` プラグインをインストール。`defaultEnabled: true` のため有効化まで自動。
+- 反映されない場合は `/reload-plugins`（または再起動）。`/plugin list` で確認できる。
+
+更新は `/plugin marketplace update xrev-marketplace` → `/plugin install xrev@xrev-marketplace`。
+
+### B. チーム/プロジェクトに自動配布（宣言的）
+
+リポジトリの `.claude/settings.json` に次をコミットしておくと、その作業ツリーを開いた人に導入が促される
+（初回に「このリポジトリを信頼するか」の確認が出る）:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "xrev-marketplace": {
+      "source": { "source": "github", "repo": "naokami3/xrev" },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "xrev@xrev-marketplace": true
+  }
+}
 ```
+
+### C. ローカルで開発・試用
+
+clone 済みのこのディレクトリを直接マーケットプレイスに指定できる:
+
+```text
+/plugin marketplace add /path/to/xrev
+/plugin install xrev@xrev-marketplace
+```
+
+> 構成（参考）:
+> ```
+> xrev/
+> ├── .claude-plugin/
+> │   ├── plugin.json          # プラグインメタ
+> │   └── marketplace.json     # マーケットプレイス定義（同一リポジトリ兼用 / source: "./"）
+> ├── skills/xrev/SKILL.md     # 中核プレイブック
+> ├── commands/xrev.md         # /xrev（@xrev のフォールバック）
+> ├── hooks/                   # @xrev 検知フック
+> ├── scripts/                 # 配管・レビューループ・ADR・finalize
+> ├── config/xrev.default.json # 既定設定
+> └── references/              # プロトコル詳細・レビュー出力契約
+> ```
+
+> 注: 上記 A/B の `naokami3/xrev` は **GitHub に push 済みであること**が前提。まだの場合は先に
+> リポジトリを GitHub へ公開する（`gh repo create naokami3/xrev --public --source . --push` など）。
+
+### インストール後に必要なもの（プラグイン本体とは別）
+
+プラグインを入れただけでは往復は動かない。実際に使うには次が必要:
+
+- **cmux CLI を PATH に通す**（下記）。
+- **reviewer 用 Codex ペインをタイトル `Review Codex` で 1 枚**開く（[使い方](#使い方)）。
 
 ### cmux CLI の symlink 設定（必須）
 

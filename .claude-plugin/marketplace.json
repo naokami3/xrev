@@ -1,0 +1,24 @@
+{
+  "name": "xrev-marketplace",
+  "owner": {
+    "name": "naokami3",
+    "email": "n.kamimura1988@gmail.com"
+  },
+  "description": "xrev（設計段階からのクロスレビュー往復プラグイン）の配布マーケットプレイス",
+  "plugins": [
+    {
+      "name": "xrev",
+      "source": "./",
+      "description": "設計段階からのクロスレビュー往復を自動運用する Claude Code プラグイン（Claude ⇄ Codex, cmux 経由）。",
+      "version": "0.1.0",
+      "author": { "name": "naokami3" },
+      "homepage": "https://github.com/naokami3/xrev",
+      "repository": "https://github.com/naokami3/xrev",
+      "license": "MIT",
+      "keywords": ["code-review", "cross-review", "ai-agents", "codex", "cmux"],
+      "category": "development",
+      "displayName": "xrev — Cross Review",
+      "defaultEnabled": true
+    }
+  ]
+}
