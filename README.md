@@ -101,8 +101,24 @@ xrev/
    { "stop_at": "review" }   // review / commit / pr
    ```
 
-いずれも指定が無ければ最終フォールバックは `review`（最も安全）。ADR の有無も同様に
-`config` の `adr`（既定 `false`）と一拍確認で切り替える。
+いずれも指定が無ければ最終フォールバックは `review`（最も安全）。
+
+### ADR の設定（必要有無・出力ディレクトリ）
+
+ADR も同じ3段階で設定できる。
+
+- **必要有無**（既定 `off`）: 一拍確認の回答 → 環境変数 `XREV_ADR`（`true`/`false`）→ `config` の `adr`。
+  ```bash
+  export XREV_ADR=true
+  ```
+- **出力ディレクトリ**（既定 `docs/adr`）: `make-adr.sh` の引数 → 環境変数 `XREV_ADR_DIR`
+  → `config` の `adr_dir`。相対パスは対象リポジトリ基準、絶対パスも指定可。
+  ```bash
+  export XREV_ADR_DIR=docs/decisions
+  ```
+  ```json
+  { "adr": false, "adr_dir": "docs/adr" }
+  ```
 
 ## 運用上の注意
 

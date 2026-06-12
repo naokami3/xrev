@@ -6,6 +6,7 @@
   "max_iterations": 5,
   "stop_at": "review",
   "adr": false,
+  "adr_dir": "docs/adr",
   "transport": "cmux",
   "severity_blockers": ["critical", "high"],
   "medium_low_max_rounds": 2,

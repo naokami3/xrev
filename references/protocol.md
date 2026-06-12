@@ -105,7 +105,8 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 | `keyword` | `@xrev` | 発火キーワード |
 | `max_iterations` | `5` | 往復の安全弁（上限） |
 | `stop_at` | `review` | 到達点（review / commit / pr） |
-| `adr` | `false` | ADR 生成の既定 |
+| `adr` | `false` | ADR 生成の既定（必要有無） |
+| `adr_dir` | `docs/adr` | ADR の出力ディレクトリ（相対は対象リポジトリ基準 / 絶対パス可） |
 | `transport` | `cmux` | 配管実装の選択（将来の差し替え点） |
 | `severity_blockers` | `["critical","high"]` | 収束を妨げる severity |
 | `read_screen_lines` | `400` | read-screen で読む行数 |
@@ -114,8 +115,14 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 | `response_poll_seconds` | `3` | 応答ポーリング間隔秒 |
 
 環境変数で個別上書き可: `XREV_CONFIG`, `XREV_REVIEWER_PANE_TITLE`, `XREV_REVIEWER_SURFACE`,
-`XREV_MAX_ITERATIONS`, `XREV_STOP_AT`, `XREV_READ_SCREEN_LINES`, `XREV_SEND_SETTLE_SECONDS`,
-`XREV_RESPONSE_TIMEOUT_SECONDS`, `XREV_RESPONSE_POLL_SECONDS`。
+`XREV_MAX_ITERATIONS`, `XREV_STOP_AT`, `XREV_ADR`, `XREV_ADR_DIR`, `XREV_READ_SCREEN_LINES`,
+`XREV_SEND_SETTLE_SECONDS`, `XREV_RESPONSE_TIMEOUT_SECONDS`, `XREV_RESPONSE_POLL_SECONDS`。
+
+### ADR（必要有無・出力先）の解決順
+
+- 必要有無: 一拍確認の明示指定 → `XREV_ADR`（`true`/`false`）→ `config` の `adr` → `false`
+- 出力先: `make-adr.sh` の引数 → `XREV_ADR_DIR` → `config` の `adr_dir` → `docs/adr`
+  （相対は対象リポジトリ基準、絶対パスはそのまま）
 
 ### 到達点（stop_at）の解決順
 

@@ -33,7 +33,9 @@ AI コーディングエージェント同士に、**設計段階からクロス
 1. **到達点（stop_at）**: `review`（最も安全。コミットしない）/ `commit` / `pr`（ドラフト）。
    既定値は次の優先順で決まる: ユーザーの明示指定 → 環境変数 `XREV_STOP_AT` → `config` の `stop_at`
    → `review`。確認時は「現在の既定（config/環境変数の値）」を提示し、変えるか尋ねる。
-2. **ADR 生成**: する / しない（既定 `off`、`config` の `adr`）
+2. **ADR 生成**: する / しない。既定は ユーザーの明示指定 → 環境変数 `XREV_ADR`（`true`/`false`）
+   → `config` の `adr` → `false` の順で決まる。生成する場合の**出力ディレクトリ**も確認できる
+   （既定は `XREV_ADR_DIR` → `config` の `adr_dir` → `docs/adr`）。
 
 あわせて前提を確認・案内する:
 
@@ -119,14 +121,21 @@ loop: 設計フェーズと同じ分岐（converged / continue / escalate / inva
 - `transport_error`（送受信失敗）: `Review Codex` ペインの存在・タイトル・常駐を確認。
   `XREV_REVIEWER_SURFACE` 明示指定も検討。
 
-## 6. ADR 生成（`--adr`／確認で「する」を選んだ場合のみ）
+## 6. ADR 生成（必要有無の確認で「する」を選んだ場合のみ）
 
-`off` が既定。生成する場合のみ、往復ログ（誰が何を propose し、どう react し、最終的に何を decide したか）を
-素材 JSON にまとめて `scripts/make-adr.sh` に渡す。出力先は対象リポジトリの `docs/adr/ADR-NNN.md`。
+`off` が既定。生成有無は `XREV_ADR` → `config` の `adr` → `false` で既定が決まり、一拍確認で上書きできる。
+生成する場合のみ、往復ログ（誰が何を propose し、どう react し、最終的に何を decide したか）を
+素材 JSON にまとめて `scripts/make-adr.sh` に渡す。
 
 ```bash
+# 出力先は XREV_ADR_DIR → config の adr_dir → docs/adr の順で解決
 printf '%s' "$adr_material_json" | "${CLAUDE_PLUGIN_ROOT}/scripts/make-adr.sh"
+
+# 出力ディレクトリをその場指定する場合（相対は対象リポジトリ基準 / 絶対パスも可）
+printf '%s' "$adr_material_json" | "${CLAUDE_PLUGIN_ROOT}/scripts/make-adr.sh" docs/decisions
 ```
+
+出力ファイルは解決したディレクトリ配下の `ADR-NNN.md`（連番）。生成したパスが stdout に返る。
 
 ADR は **xrev が許容する唯一のファイル生成物**（「中間ファイル」ではなく「意図して残す成果物」）。
 素材 JSON の形は `scripts/make-adr.sh` 冒頭コメント参照（title/context/decision/consequences/discussion[]）。
