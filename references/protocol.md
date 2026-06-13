@@ -115,8 +115,17 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 | `response_poll_seconds` | `3` | 応答ポーリング間隔秒 |
 
 環境変数で個別上書き可: `XREV_CONFIG`, `XREV_REVIEWER_PANE_TITLE`, `XREV_REVIEWER_SURFACE`,
-`XREV_MAX_ITERATIONS`, `XREV_STOP_AT`, `XREV_ADR`, `XREV_ADR_DIR`, `XREV_READ_SCREEN_LINES`,
-`XREV_SEND_SETTLE_SECONDS`, `XREV_RESPONSE_TIMEOUT_SECONDS`, `XREV_RESPONSE_POLL_SECONDS`。
+`XREV_CMUX_BIN`, `XREV_MAX_ITERATIONS`, `XREV_STOP_AT`, `XREV_ADR`, `XREV_ADR_DIR`,
+`XREV_READ_SCREEN_LINES`, `XREV_SEND_SETTLE_SECONDS`, `XREV_RESPONSE_TIMEOUT_SECONDS`,
+`XREV_RESPONSE_POLL_SECONDS`。
+
+### 実行コンテキスト（重要）
+
+cmux ソケットは認証が要る。認証情報（`CMUX_SOCKET_PASSWORD` 等）・`CMUX_SOCKET_PATH`・`CMUX_SURFACE_ID`
+は **cmux ペイン内のシェルにのみ自動注入**される。よって xrev（primary）は cmux ペイン内で動かす。
+cmux の外（通常ターミナル）からは接続できず `transport.sh` は preflight で `exit 31` を返す。
+`transport.sh ping` で接続コンテキストを確認できる。`cmux` バイナリは PATH 優先、無ければアプリ同梱
+（`/Applications/cmux.app/Contents/Resources/bin/cmux`）を使う。`XREV_CMUX_BIN` で明示指定も可。
 
 ### ADR（必要有無・出力先）の解決順
 

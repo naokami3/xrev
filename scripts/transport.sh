@@ -67,6 +67,41 @@ SENTINEL_END='===XREV-JSON-END==='
 _log() { printf '[xrev/transport] %s\n' "$*" >&2; }
 
 # ── cmux 配管（ここだけが cmux に依存）─────────────────────────────────────────
+#
+# 【重要・実行コンテキスト】
+#   cmux のソケットは認証が要る。認証情報（CMUX_SOCKET_PASSWORD 等）と CMUX_SOCKET_PATH /
+#   CMUX_SURFACE_ID は「cmux ペイン内のシェル」で自動注入される。したがって xrev（primary）は
+#   cmux ペインの中で動かすこと。cmux の外（通常のターミナル）から実行するとソケットに弾かれる
+#   （Broken pipe）。外部から動かす必要がある場合は CMUX_SOCKET_PASSWORD を明示する。
+
+# cmux バイナリの解決:
+#   XREV_CMUX_BIN > PATH 上の cmux（ペイン内なら自動で通る）> アプリ同梱の絶対パス
+_resolve_cmux_bin() {
+  if [[ -n "${XREV_CMUX_BIN:-}" ]]; then printf '%s' "$XREV_CMUX_BIN"; return; fi
+  if command -v cmux >/dev/null 2>&1; then printf 'cmux'; return; fi
+  local app="/Applications/cmux.app/Contents/Resources/bin/cmux"
+  [[ -x "$app" ]] && { printf '%s' "$app"; return; }
+  printf 'cmux'  # 最後の手段（見つからなくてもエラーメッセージは _cmux_preflight で出す）
+}
+CMUX_BIN="$(_resolve_cmux_bin)"
+
+# cmux 呼び出しの一元ラッパ（差し替え点を1箇所に）
+_cmux() { "$CMUX_BIN" "$@"; }
+
+# 接続前チェック。ping が通らなければ実行コンテキストの問題を明示して止める。
+_cmux_preflight() {
+  if ! command -v "$CMUX_BIN" >/dev/null 2>&1 && [[ ! -x "$CMUX_BIN" ]]; then
+    _log "cmux CLI が見つかりません。cmux ペイン内で実行するか、XREV_CMUX_BIN で絶対パスを指定してください。"
+    return 30
+  fi
+  if ! _cmux ping >/dev/null 2>&1; then
+    _log "cmux ソケットに接続できません（ping 失敗）。"
+    _log "xrev は cmux ペインの中で実行してください（外部ターミナルからは認証情報が無く接続できません）。"
+    _log "外部から動かす場合は CMUX_SOCKET_PASSWORD（または --password）を設定してください。"
+    return 31
+  fi
+  return 0
+}
 
 # reviewer ペインの surface ref をタイトルから解決する。
 # 解決順:
@@ -82,7 +117,7 @@ _cmux_resolve_surface() {
   # cmux のバージョンで list コマンド名が揺れるため候補を順に試す。
   local listing="" cmd
   for cmd in "list-pane-surfaces" "list-panes" "list-surfaces"; do
-    listing="$(cmux "$cmd" --json 2>/dev/null)" || listing=""
+    listing="$(_cmux "$cmd" --json 2>/dev/null)" || listing=""
     [[ -n "$listing" ]] && break
   done
   if [[ -z "$listing" ]]; then
@@ -151,8 +186,8 @@ _cmux_send_text() {
   # （cmux send は \n を含めても自動実行されない場合があるため send-key enter で確定）
   local line
   while IFS= read -r line || [[ -n "$line" ]]; do
-    cmux send --surface "$surface" "$line" >/dev/null 2>&1 || return 6
-    cmux send-key --surface "$surface" enter >/dev/null 2>&1 || return 6
+    _cmux send --surface "$surface" "$line" >/dev/null 2>&1 || return 6
+    _cmux send-key --surface "$surface" enter >/dev/null 2>&1 || return 6
   done <<< "$text"
   return 0
 }
@@ -160,13 +195,13 @@ _cmux_send_text() {
 # reviewer ペインの最終確定入力（プロンプト送信）。本文を送り終えたあとに呼ぶ。
 _cmux_submit() {
   local surface="$1"
-  cmux send-key --surface "$surface" enter >/dev/null 2>&1 || return 7
+  _cmux send-key --surface "$surface" enter >/dev/null 2>&1 || return 7
 }
 
 # reviewer ペインの画面を読み取る（スクロールバック込み）。
 _cmux_read_screen() {
   local surface="$1"
-  cmux read-screen --surface "$surface" --scrollback --lines "$READ_LINES" 2>/dev/null
+  _cmux read-screen --surface "$surface" --scrollback --lines "$READ_LINES" 2>/dev/null
 }
 
 # ── 公開 API ─────────────────────────────────────────────────────────────────
@@ -176,6 +211,7 @@ _cmux_read_screen() {
 #   成功: 0 / JSON を stdout。失敗: 非ゼロ / stderr にログ。
 xrev_transport_review() {
   local payload="$1"
+  _cmux_preflight || return $?
   local surface
   surface="$(_cmux_resolve_surface)" || {
     _log "reviewer ペイン（タイトル: '$REVIEWER_PANE_TITLE'）を解決できませんでした。"
@@ -247,7 +283,10 @@ _xrev_sleep() { sleep "$1" 2>/dev/null || true; }
 # 直接実行されたら簡易セルフテスト（実機用）。source されたときは何もしない。
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   case "${1:-}" in
+    ping)
+      _cmux_preflight && echo "(cmux 接続OK: $CMUX_BIN)" >&2 ;;
     resolve)
+      _cmux_preflight || exit $?
       _cmux_resolve_surface && echo "(resolve ok)" >&2 ;;
     review)
       shift
@@ -255,6 +294,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     *)
       cat >&2 <<USAGE
 usage:
+  transport.sh ping                 # cmux 接続（実行コンテキスト）の確認
   transport.sh resolve              # reviewer surface の解決のみ確認
   transport.sh review "<payload>"   # 1往復だけ送って JSON を受ける
 USAGE
