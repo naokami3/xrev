@@ -106,71 +106,80 @@ _cmux_preflight() {
 # reviewer ペインの surface ref をタイトルから解決する。
 # 解決順:
 #   1) XREV_REVIEWER_SURFACE が指定されていればそれを優先（実機デバッグ用の明示指定）
-#   2) cmux の list 系コマンド(JSON)からタイトル一致の surface ref を引く
+#   2) `cmux tree --all --json` から、タイトルが一致する「サーフェス」の ref を引く
 # 解決できなければ非ゼロで失敗する（暴走防止：宛先不明のまま送らない）。
+#
+# 実機知見:
+#   - 全ペイン/ワークスペース横断で探すため tree --all を使う（list-pane-surfaces は
+#     呼び出し元ペインのサーフェスしか返さない）。
+#   - タイトルには実行中スピナー等の装飾接頭辞が付く（例 "⠂ Review Codex"）。
+#     先頭の非単語記号を正規化で除去し、完全一致 → 部分一致の順で照合する。
+#   - サーフェスは ref が "surface:" で始まり title を持つ object のみを対象にする
+#     （workspace/pane の ref を誤って拾わないため）。
 _cmux_resolve_surface() {
   if [[ -n "${XREV_REVIEWER_SURFACE:-}" ]]; then
     printf '%s' "$XREV_REVIEWER_SURFACE"
     return 0
   fi
 
-  # cmux のバージョンで list コマンド名が揺れるため候補を順に試す。
-  local listing="" cmd
-  for cmd in "list-pane-surfaces" "list-panes" "list-surfaces"; do
-    listing="$(_cmux "$cmd" --json 2>/dev/null)" || listing=""
-    [[ -n "$listing" ]] && break
-  done
+  local listing
+  listing="$(_cmux tree --all --json 2>/dev/null)" || listing=""
   if [[ -z "$listing" ]]; then
-    _log "cmux の pane 一覧取得に失敗（list-pane-surfaces / list-panes / list-surfaces すべて不可）"
+    # フォールバック（呼び出し元ペイン内に reviewer がいる構成のみ救済）
+    listing="$(_cmux list-pane-surfaces --json 2>/dev/null)" || listing=""
+  fi
+  if [[ -z "$listing" ]]; then
+    _log "cmux からサーフェス一覧を取得できません（tree --all / list-pane-surfaces 不可）"
     return 3
   fi
 
-  # JSON 形状差異に耐えるよう python3 で寛容にパース。
-  # title/name が REVIEWER_PANE_TITLE に一致するエントリの surface 参照を返す。
   # 一覧はヒアドキュメント stdin と競合するため環境変数 XREV_LISTING で渡す。
   XREV_LISTING="$listing" python3 - "$REVIEWER_PANE_TITLE" <<'PY'
-import json, os, sys
-want = sys.argv[1].strip().lower()
+import json, os, re, sys
 raw = os.environ.get("XREV_LISTING", "")
 try:
     data = json.loads(raw)
 except Exception:
     sys.exit(4)
 
-# あり得る形状: list / {"panes":[...]} / {"surfaces":[...]} などを総当たりで平坦化
-def candidates(obj):
+def norm(s):
+    # 小文字化 → 前後空白除去 → 先頭の非単語記号(スピナー等)と続く空白を除去
+    s = (s or "").strip().lower()
+    s = re.sub(r'^[\W_]+', '', s)
+    return s.strip()
+
+want = norm(sys.argv[1])
+
+# tree/list いずれの形状でも、ネストを総当たりで surface object だけ集める。
+# surface object = ref が "surface:" で始まり、title(str) を持つ dict。
+surfaces = []  # (title_normalized, ref)
+def walk(obj):
     if isinstance(obj, list):
         for x in obj:
-            yield from candidates(x)
+            walk(x)
     elif isinstance(obj, dict):
-        yield obj
+        ref = obj.get("ref")
+        title = obj.get("title")
+        if isinstance(ref, str) and ref.startswith("surface:") and isinstance(title, str):
+            surfaces.append((norm(title), ref))
         for v in obj.values():
             if isinstance(v, (list, dict)):
-                yield from candidates(v)
+                walk(v)
+walk(data)
 
-def title_of(d):
-    for k in ("title", "name", "surfaceTitle", "tabTitle", "label"):
-        if isinstance(d.get(k), str):
-            return d[k]
-    return None
-
-def ref_of(d):
-    # surface ref を表すフィールドの候補。refs 形式("surface:4")か uuid か index。
-    for k in ("surfaceRef", "surface", "ref", "surfaceId", "id"):
-        v = d.get(k)
-        if isinstance(v, str) and v:
-            return v if v.startswith("surface:") or "-" in v else ("surface:%s" % v)
-        if isinstance(v, int):
-            return "surface:%d" % v
-    return None
-
-for d in candidates(data):
-    t = title_of(d)
-    if t and t.strip().lower() == want:
-        r = ref_of(d)
-        if r:
-            print(r)
-            sys.exit(0)
+# 1) 完全一致（正規化後）
+for t, r in surfaces:
+    if t == want:
+        print(r); sys.exit(0)
+# 2) 部分一致（装飾やサフィックスを許容）
+matches = [(t, r) for t, r in surfaces if want and want in t]
+if len(matches) == 1:
+    print(matches[0][1]); sys.exit(0)
+if len(matches) > 1:
+    # 複数一致は曖昧。誤送信を避けるため候補を stderr に出して失敗。
+    sys.stderr.write("[xrev/transport] タイトル '%s' に複数のサーフェスが一致: %s\n"
+                     % (sys.argv[1], ", ".join("%s(%s)" % (r, t) for t, r in matches)))
+    sys.exit(6)
 sys.exit(5)
 PY
 }
