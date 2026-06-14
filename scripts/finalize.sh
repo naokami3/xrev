@@ -90,7 +90,7 @@ case "$MODE" in
     gh pr create --draft --base "$BASE" --head "$BRANCH" \
       --title "$TITLE" --body "${BODY:-（本文未設定）}" \
       || _die "ドラフト PR の作成に失敗しました。"
-    echo "[xrev/finalize] ドラフト PR を作成しました（base: $BASE / head: $BRANCH）。"
+    echo "[xrev/finalize] ドラフト PR を作成しました（base: ${BASE} / head: ${BRANCH}）。"
     echo "人間が内容を確認し、Ready for review / マージの最終トリガを引いてください。"
     ;;
 

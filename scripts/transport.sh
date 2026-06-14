@@ -184,20 +184,22 @@ sys.exit(5)
 PY
 }
 
-# reviewer ペインへ 1 メッセージ送信する。
-# cmux send は「常に 1 行」として扱うのが安全（複数行は別入力に割れて壊れる）ため、
-# 本文を base64 で 1 行に畳んで送り、reviewer 側で復元させる前提のラッパにはしない。
-# 代わりに「ヒアドキュメントを使わず、改行を含む payload はファイル経由ではなく
-# send を行単位で繰り返す」方式を取る（中間ファイル禁止の要件を守る）。
+# reviewer ペインへ本文を送る（確定はしない）。
+#
+# 設計判断:
+#   - 本文は「1回の cmux send」でまとめて送る。行ごとに Enter を送る方式は、対話型 TUI
+#     （Codex 等）では最初の行で送信が確定してしまうため採らない。本文送信と確定(Enter)を
+#     分離し、確定は _cmux_submit が 1 回だけ行う。
+#   - 空文字列を送ると cmux send が弾く（<text> 必須）ため、空本文はガードする。
+#   - 中間ファイルは使わない（要件）。本文は引数で渡す。
+#
+# 【実機検証が残る点】Codex の TUI が本文中の改行をどう扱うか（途中送信せず複数行を保持
+#   できるか）は Codex 側仕様に依存する。早期送信される場合は本文を 1 行へ畳む等の調整を
+#   この関数に閉じ込めて対応する（配管の局所化方針）。
 _cmux_send_text() {
   local surface="$1" text="$2"
-  # 改行ごとに send し、各行のあとに改行キーを送る。
-  # （cmux send は \n を含めても自動実行されない場合があるため send-key enter で確定）
-  local line
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    _cmux send --surface "$surface" "$line" >/dev/null 2>&1 || return 6
-    _cmux send-key --surface "$surface" enter >/dev/null 2>&1 || return 6
-  done <<< "$text"
+  [[ -n "$text" ]] || return 0
+  _cmux send --surface "$surface" "$text" >/dev/null 2>&1 || return 6
   return 0
 }
 
@@ -261,7 +263,7 @@ xrev_transport_review() {
     _log "cmux 上に該当タイトルの Codex ペインを 1 枚開いているか、XREV_REVIEWER_SURFACE で明示指定してください。"
     return 10
   }
-  _log "reviewer surface = $surface（title: '$REVIEWER_PANE_TITLE'）"
+  _log "reviewer surface = ${surface}（title: '${REVIEWER_PANE_TITLE}'）"
 
   # 送信前のベースライン：既に画面にある妥当ブロック数を数える。
   # 以降は「この数を超える＝新着の本物の応答が来た」をもって完了判定する。
