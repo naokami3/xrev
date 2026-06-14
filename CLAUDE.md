@@ -11,10 +11,11 @@ reviewer=Codex（レビュー専用・read-only）。往復は cmux のペイン
 ## コマンド
 
 ```bash
-scripts/transport.sh ping                 # cmux 接続確認（最初に必ず実行）
+bash tests/run.sh                         # ユニットテスト（cmux 不要・変更後は必ず実行）
+bash -n scripts/*.sh hooks/*.sh           # 構文チェック
+scripts/transport.sh ping                 # cmux 接続確認（cmux ペイン内で実行）
 scripts/transport.sh resolve              # reviewer ペインの宛先解決確認
-scripts/transport.sh review "<payload>"   # 1 往復の手動テスト
-bash -n scripts/*.sh hooks/*.sh           # 構文チェック（変更後は必ず実行）
+scripts/transport.sh review "<payload>"   # 1 往復の手動テスト（実機）
 ```
 
 利用者の導入: `/plugin marketplace add naokami3/xrev` →

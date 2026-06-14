@@ -29,7 +29,7 @@
 #
 set -uo pipefail
 
-_xrev_script_dir() { cd "$(dirname "${BASH_SOURCE[0]}")" && pwd; }
+_xrev_script_dir() { cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd; }
 SCRIPT_DIR="$(_xrev_script_dir)"
 : "${XREV_CONFIG:=${CLAUDE_PLUGIN_ROOT:-$SCRIPT_DIR/..}/config/xrev.default.json}"
 
@@ -47,14 +47,26 @@ except Exception:
 PY
 }
 
-ITER="${1:-1}"
-MAX_ITER="${XREV_MAX_ITERATIONS:-$(_cfg_int max_iterations 5)}"
-PAYLOAD="$(cat)"
+# 純粋関数（cmux 非依存・単体テスト可能）: 終端判定の中核。
+#   入力: transport 終了コード / parse 終了コード / blocker 件数 / 反復回数 / 上限
+#   出力(stdout): "<decision> <exit_code>"（副作用なし・exit しない）
+#   優先順位は固定: transport 失敗 > parse 失敗 > 収束 > 上限到達 > 継続
+_xrev_decide() {
+  local trc="$1" prc="$2" blockers="$3" iter="$4" max="$5"
+  if (( trc != 0 )); then echo "transport_error 22"; return 0; fi
+  if (( prc != 0 )); then echo "invalid 21"; return 0; fi
+  # critical/high が 0 → 収束。medium 以下は blocker でないため往復を止める（設計1.5）。
+  if [[ "$blockers" == "0" ]]; then echo "converged 0"; return 0; fi
+  # 安全弁：上限到達でも blocker が残る → 人間へエスカレーション。
+  if (( iter >= max )); then echo "escalate 20"; return 0; fi
+  # blocker が残り、上限未満 → Claude が修正して iteration+1 で再呼び出しすべき。
+  echo "continue 10"
+}
 
-_emit() {
-  # _emit <decision> <exit> <raw_json> <parsed_json>
-  local decision="$1" code="$2" raw="$3" parsed="$4"
-  python3 - "$decision" "$ITER" "$MAX_ITER" "$raw" "$parsed" <<'PY'
+# 決定 JSON を stdout に整形する（exit はしない・呼び出し側が制御）。
+_format_decision() {
+  # _format_decision <decision> <iter> <max> <raw_json> <parsed_json>
+  python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
 import json, sys
 decision, it, mx, raw, parsed = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], sys.argv[5]
 try:
@@ -79,35 +91,33 @@ out = {
 }
 print(json.dumps(out, ensure_ascii=False, indent=2))
 PY
-  exit "$code"
 }
 
-# ── 1 ラウンド実行 ───────────────────────────────────────────────────────────
-RAW="$(xrev_transport_review "$PAYLOAD")"
-TRANSPORT_RC=$?
-if (( TRANSPORT_RC != 0 )); then
-  _emit "transport_error" 22 "" ""
+# 1 ラウンドを実行する。
+#   $1 = iteration。payload は stdin。決定 JSON を stdout に出し、decision の exit コードで返る。
+#   transport の呼び出しは XREV_REVIEW_FN で差し替え可能（テストでスタブを注入するため）。
+_xrev_review_loop_run() {
+  local iter="${1:-1}"
+  local max="${XREV_MAX_ITERATIONS:-$(_cfg_int max_iterations 5)}"
+  local payload; payload="$(cat)"
+
+  local raw trc parsed prc blockers
+  raw="$("${XREV_REVIEW_FN:-xrev_transport_review}" "$payload")"; trc=$?
+  if (( trc == 0 )); then
+    parsed="$(printf '%s' "$raw" | "$SCRIPT_DIR/parse-review.sh")"; prc=$?
+    blockers="$(printf '%s' "$parsed" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("blockers",0))' 2>/dev/null || echo 99)"
+  else
+    raw=""; parsed=""; prc=0; blockers=0
+  fi
+
+  local decision code
+  read -r decision code <<< "$(_xrev_decide "$trc" "$prc" "$blockers" "$iter" "$max")"
+  _format_decision "$decision" "$iter" "$max" "$raw" "$parsed"
+  return "$code"
+}
+
+# 直接実行されたときだけ 1 ラウンドを回す。source 時（テスト）は関数定義のみ。
+if [[ "${BASH_SOURCE[0]:-}" == "${0}" ]]; then
+  _xrev_review_loop_run "${1:-1}"
+  exit $?
 fi
-
-PARSED="$(printf '%s' "$RAW" | "$SCRIPT_DIR/parse-review.sh")"
-PARSE_RC=$?
-if (( PARSE_RC != 0 )); then
-  # reviewer が契約に反した出力（自由作文・壊れた JSON）。次工程に渡さない。
-  _emit "invalid" 21 "$RAW" "$PARSED"
-fi
-
-BLOCKERS="$(printf '%s' "$PARSED" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("blockers",0))' 2>/dev/null || echo 99)"
-
-# ── 終端判定（機械的）─────────────────────────────────────────────────────────
-if [[ "$BLOCKERS" == "0" ]]; then
-  # critical/high が 0 → 収束。medium 以下は blocker でないため往復を止める（設計1.5）。
-  _emit "converged" 0 "$RAW" "$PARSED"
-fi
-
-if (( ITER >= MAX_ITER )); then
-  # 安全弁：上限到達でも blocker が残る → 人間へエスカレーション。
-  _emit "escalate" 20 "$RAW" "$PARSED"
-fi
-
-# blocker が残り、上限未満 → Claude が修正して iteration+1 で再呼び出しすべき。
-_emit "continue" 10 "$RAW" "$PARSED"

@@ -34,6 +34,7 @@ xrev のフェーズと進捗。詳細な設計は [architecture.md](architectur
 - [x] `review-loop` の decision 分岐（approve → converged / request_changes(high) → continue）
 - [x] 実機検証で判明した不具合の修正（list 範囲 → tree --all / タイトル装飾の正規化 /
       多バイト変数展開 / 空送信ガード / エコーの早期終了・古応答の誤検出）
+- [x] ユニットテスト整備（`tests/`、純粋ロジックの回帰防止・cmux 不要）
 - [ ] 実際の Codex 対話セッションでの最終確認
       - [ ] Codex TUI が複数行プロンプトを途中送信せず受け取れるか
       - [ ] センチネル囲みのスキーマ準拠 JSON を安定して返すか

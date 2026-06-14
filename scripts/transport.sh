@@ -116,25 +116,14 @@ _cmux_preflight() {
 #     先頭の非単語記号を正規化で除去し、完全一致 → 部分一致の順で照合する。
 #   - サーフェスは ref が "surface:" で始まり title を持つ object のみを対象にする
 #     （workspace/pane の ref を誤って拾わないため）。
-_cmux_resolve_surface() {
-  if [[ -n "${XREV_REVIEWER_SURFACE:-}" ]]; then
-    printf '%s' "$XREV_REVIEWER_SURFACE"
-    return 0
-  fi
-
-  local listing
-  listing="$(_cmux tree --all --json 2>/dev/null)" || listing=""
-  if [[ -z "$listing" ]]; then
-    # フォールバック（呼び出し元ペイン内に reviewer がいる構成のみ救済）
-    listing="$(_cmux list-pane-surfaces --json 2>/dev/null)" || listing=""
-  fi
-  if [[ -z "$listing" ]]; then
-    _log "cmux からサーフェス一覧を取得できません（tree --all / list-pane-surfaces 不可）"
-    return 3
-  fi
-
-  # 一覧はヒアドキュメント stdin と競合するため環境変数 XREV_LISTING で渡す。
-  XREV_LISTING="$listing" python3 - "$REVIEWER_PANE_TITLE" <<'PY'
+# 純粋関数（cmux 非依存・単体テスト可能）:
+#   cmux の tree/list JSON 文字列とタイトルから、一致するサーフェスの ref を解決する。
+#   $1 = 探すタイトル, $2 = JSON 文字列。成功時 ref を stdout、失敗時に非ゼロ。
+#   exit: 0=解決 / 4=JSON不正 / 5=未検出 / 6=複数一致(曖昧)。
+_resolve_surface_from_json() {
+  local title="$1" listing="$2"
+  # JSON はヒアドキュメント stdin と競合するため環境変数 XREV_LISTING で渡す。
+  XREV_LISTING="$listing" python3 - "$title" <<'PY'
 import json, os, re, sys
 raw = os.environ.get("XREV_LISTING", "")
 try:
@@ -182,6 +171,40 @@ if len(matches) > 1:
     sys.exit(6)
 sys.exit(5)
 PY
+}
+
+# reviewer ペインの surface ref をタイトルから解決する。
+# 解決順:
+#   1) XREV_REVIEWER_SURFACE が指定されていればそれを優先（実機デバッグ用の明示指定）
+#   2) `cmux tree --all --json` から、タイトルが一致する「サーフェス」の ref を引く
+#      （解析は純粋関数 _resolve_surface_from_json に委譲）
+# 解決できなければ非ゼロで失敗する（暴走防止：宛先不明のまま送らない）。
+#
+# 実機知見:
+#   - 全ペイン/ワークスペース横断で探すため tree --all を使う（list-pane-surfaces は
+#     呼び出し元ペインのサーフェスしか返さない）。
+#   - タイトルには実行中スピナー等の装飾接頭辞が付く（例 "⠂ Review Codex"）。
+#     先頭の非単語記号を正規化で除去し、完全一致 → 部分一致の順で照合する。
+#   - サーフェスは ref が "surface:" で始まり title を持つ object のみを対象にする
+#     （workspace/pane の ref を誤って拾わないため）。
+_cmux_resolve_surface() {
+  if [[ -n "${XREV_REVIEWER_SURFACE:-}" ]]; then
+    printf '%s' "$XREV_REVIEWER_SURFACE"
+    return 0
+  fi
+
+  local listing
+  listing="$(_cmux tree --all --json 2>/dev/null)" || listing=""
+  if [[ -z "$listing" ]]; then
+    # フォールバック（呼び出し元ペイン内に reviewer がいる構成のみ救済）
+    listing="$(_cmux list-pane-surfaces --json 2>/dev/null)" || listing=""
+  fi
+  if [[ -z "$listing" ]]; then
+    _log "cmux からサーフェス一覧を取得できません（tree --all / list-pane-surfaces 不可）"
+    return 3
+  fi
+
+  _resolve_surface_from_json "$REVIEWER_PANE_TITLE" "$listing"
 }
 
 # reviewer ペインへ本文を送る（確定はしない）。

@@ -18,8 +18,9 @@ xrev への貢献を歓迎します。以下は設計上の不変条件です。
 ## 開発メモ
 
 - スクリプトは bash + python3 のみに依存（`jq` は使わない）。
-- 変更後は `bash -n scripts/*.sh` で構文確認、可能なら各スクリプトを単体実行して検証する。
-- cmux を要する配管部分は実機（cmux 上の `Review Codex` ペイン）での検証が必要。
+- 変更後は `bash tests/run.sh`（ユニットテスト・cmux 不要）と `bash -n scripts/*.sh` を実行する。
+  純粋ロジックを変えたらテストも追加・更新する（詳細は [`tests/README.md`](tests/README.md)）。
+- cmux を要する配管の通し確認は実機（cmux 上の `Review Codex` ペイン）が必要。
 - コメント・コミットメッセージは日本語で記述する。
 
 ## コミット境界
