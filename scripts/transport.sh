@@ -26,7 +26,7 @@ set -uo pipefail
 # ── 設定読み込み ─────────────────────────────────────────────────────────────
 # XREV_CONFIG が未指定なら プラグイン同梱の既定 config を使う。
 _xrev_script_dir() {
-  cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+  cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd
 }
 : "${XREV_CONFIG:=${CLAUDE_PLUGIN_ROOT:-$(_xrev_script_dir)/..}/config/xrev.default.json}"
 
@@ -213,6 +213,40 @@ _cmux_read_screen() {
   _cmux read-screen --surface "$surface" --scrollback --lines "$READ_LINES" 2>/dev/null
 }
 
+# 画面テキストから「妥当な review JSON ブロック」を走査する。
+#   妥当 = SENTINEL_BEGIN..SENTINEL_END に挟まれ、中身が JSON として parse でき、
+#          dict かつ "verdict" を持つ（＝reviewer の本物の応答）。
+#   出力: 1行目=妥当ブロック数, 2行目以降=最後の妥当ブロックの中身。
+# これにより「プロンプトのエコー（センチネルだけで JSON 無し）」「テンプレート」
+# 「前ラウンドの古い応答」を機械的に区別できる（数の増分で新着を判定する）。
+_scan_review_blocks() {
+  XREV_SCREEN="$1" python3 - "$SENTINEL_BEGIN" "$SENTINEL_END" <<'PY'
+import os, sys, json
+begin, end = sys.argv[1], sys.argv[2]
+text = os.environ.get("XREV_SCREEN", "")
+blocks = []
+i = 0
+while True:
+    b = text.find(begin, i)
+    if b == -1:
+        break
+    e = text.find(end, b + len(begin))
+    if e == -1:
+        break
+    content = text[b + len(begin):e].strip()
+    i = e + len(end)
+    try:
+        obj = json.loads(content)
+    except Exception:
+        continue
+    if isinstance(obj, dict) and "verdict" in obj:
+        blocks.append(content)
+print(len(blocks))
+if blocks:
+    sys.stdout.write(blocks[-1])
+PY
+}
+
 # ── 公開 API ─────────────────────────────────────────────────────────────────
 
 # xrev_transport_review <payload_text>
@@ -229,68 +263,58 @@ xrev_transport_review() {
   }
   _log "reviewer surface = $surface（title: '$REVIEWER_PANE_TITLE'）"
 
+  # 送信前のベースライン：既に画面にある妥当ブロック数を数える。
+  # 以降は「この数を超える＝新着の本物の応答が来た」をもって完了判定する。
+  local before_count
+  before_count="$(_scan_review_blocks "$(_cmux_read_screen "$surface")" | head -1)"
+  [[ "$before_count" =~ ^[0-9]+$ ]] || before_count=0
+
   # reviewer への指示を payload に前置きし、JSON をセンチネルで挟ませる。
+  # 注意: プロンプト内にセンチネル文字列は出るが、その間に「妥当な JSON」は置かない。
+  #       これによりエコーされても妥当ブロックとして誤検出されない。
   local framed
   framed="$(cat <<EOF
 $payload
 
 ---
-上記をレビューし、結果を必ず次の2行のセンチネルで挟んで出力してください。
-センチネルの外には何も書かないでください。JSON は references/review-schema.json に準拠。
-$SENTINEL_BEGIN
-{ ここに verdict と findings[] を持つ JSON }
-$SENTINEL_END
+上記をレビューし、結果を必ず次の2つのマーカー行で挟んで出力してください。
+マーカーの間には JSON だけを置き、マーカーの外や JSON の前後に説明文を書かないこと。
+JSON は verdict（approve | request_changes）と findings[] を持ち、各 finding は
+file / severity（critical|high|medium|low|nit）/ category（bug|security|design|perf|style）/ message を必須とする。
+開始マーカー: $SENTINEL_BEGIN
+終了マーカー: $SENTINEL_END
 EOF
 )"
 
   _cmux_send_text "$surface" "$framed" || { _log "送信に失敗しました。"; return 11; }
   _cmux_submit "$surface" || true
 
-  # 応答待ち：END センチネルが画面に出るまでポーリング。
-  local waited=0 screen=""
-  # settle（送信直後の反映待ち）
+  # 応答待ち：妥当ブロック数が before_count を超える（新着）まで待つ。
+  local waited=0 screen scan count block
   _xrev_sleep "$SETTLE_SECS"
   while (( waited < RESP_TIMEOUT )); do
     screen="$(_cmux_read_screen "$surface")"
-    if printf '%s' "$screen" | grep -qF "$SENTINEL_END"; then
-      break
+    scan="$(_scan_review_blocks "$screen")"
+    count="$(printf '%s' "$scan" | head -1)"
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    if (( count > before_count )); then
+      block="$(printf '%s' "$scan" | tail -n +2)"
+      printf '%s\n' "$block"
+      return 0
     fi
     _xrev_sleep "$RESP_POLL"
     waited=$(( waited + RESP_POLL ))
   done
 
-  if ! printf '%s' "$screen" | grep -qF "$SENTINEL_END"; then
-    _log "reviewer の応答がタイムアウトしました（${RESP_TIMEOUT}s）。"
-    return 12
-  fi
-
-  # 最後のセンチネル対をスクリーンから抽出して JSON を取り出す。
-  local json
-  json="$(XREV_SCREEN="$screen" python3 - "$SENTINEL_BEGIN" "$SENTINEL_END" <<'PY'
-import os, sys
-begin, end = sys.argv[1], sys.argv[2]
-text = os.environ.get("XREV_SCREEN", "")
-# 最後の begin..end ブロックを採用（往復で複数回出るため最新を使う）
-b = text.rfind(begin)
-if b == -1:
-    sys.exit(20)
-e = text.find(end, b)
-if e == -1:
-    sys.exit(21)
-block = text[b + len(begin):e].strip()
-print(block)
-PY
-)" || { _log "センチネル間の JSON 抽出に失敗しました。"; return 13; }
-
-  printf '%s\n' "$json"
-  return 0
+  _log "reviewer の応答がタイムアウトしました（${RESP_TIMEOUT}s, 新しい妥当 JSON ブロックなし）。"
+  return 12
 }
 
 # sleep ラッパ（フォアグラウンド sleep が制限される環境向けの薄い抽象）。
 _xrev_sleep() { sleep "$1" 2>/dev/null || true; }
 
 # 直接実行されたら簡易セルフテスト（実機用）。source されたときは何もしない。
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+if [[ "${BASH_SOURCE[0]:-}" == "${0}" ]]; then
   case "${1:-}" in
     ping)
       _cmux_preflight && echo "(cmux 接続OK: $CMUX_BIN)" >&2 ;;
