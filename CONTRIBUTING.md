@@ -23,6 +23,22 @@ xrev への貢献を歓迎します。以下は設計上の不変条件です。
 - cmux を要する配管の通し確認は実機（cmux 上の `Review Codex` ペイン）が必要。
 - コメント・コミットメッセージは日本語で記述する。
 
+## テストの強制（多層）
+
+コードの追加・修正時にテストを必ず通すよう、3 層で強制している。共通ゲートは
+`tools/verify.sh`（構文チェック + JSON 妥当性 + `tests/run.sh`）。
+
+1. **git pre-commit フック** — `scripts/ hooks/ tools/ config/ tests/` をステージしてコミットすると
+   `tools/verify.sh` が走り、失敗ならコミット中止。コードを変えたのにテスト未更新なら注意喚起する。
+   - 有効化（クローン後に一度）: `bash tools/install-hooks.sh`（`core.hooksPath=.githooks` を設定）。
+   - 緊急回避: `git commit --no-verify`（CI は回避できない）。
+2. **CI（GitHub Actions）** — `.github/workflows/ci.yml` が push / PR で `tools/verify.sh` を実行する
+   越えられないゲート。
+3. **Claude Code フック** — `.claude/settings.json`:
+   - PostToolUse（Edit/Write）で編集した `.sh` の構文・`.json` の妥当性を即時チェック。
+   - Stop で、監視対象に変更があるとき `tools/verify.sh` を実行し、失敗なら終了前に差し戻す
+     （`stop_hook_active` で無限ループを防止）。
+
 ## コミット境界
 
 - 1 コミット = 1 つの論理的変更。レビュー指摘の修正は元の変更にまとめ、別コミットにしない。

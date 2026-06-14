@@ -1,0 +1,19 @@
+name: CI
+
+# コードの追加・修正がリモートに来たら必ずテストを通す（マージ前の最終ゲート）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: バージョン確認
+        run: |
+          bash --version | head -1
+          python3 --version
+      - name: 検証（構文 + JSON + ユニットテスト）
+        run: bash tools/verify.sh

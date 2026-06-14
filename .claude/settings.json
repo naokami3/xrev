@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/tools/claude-posttooluse.sh",
+            "timeout": 30,
+            "statusMessage": "構文チェック中…"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/tools/claude-stop.sh",
+            "timeout": 120,
+            "statusMessage": "テスト検証中…"
+          }
+        ]
+      }
+    ]
+  }
+}

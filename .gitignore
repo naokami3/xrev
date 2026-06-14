@@ -4,3 +4,6 @@
 .DS_Store
 *.swp
 *~
+
+# 個人ローカル設定（チーム共有しない）。.claude/settings.json は追跡する。
+.claude/settings.local.json

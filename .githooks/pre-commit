@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#
+# pre-commit — コミット前にテストを強制するローカルゲート。
+#
+#   scripts/ hooks/ tests/ tools/ config/ のいずれかがステージされているときだけ、
+#   共通ゲート tools/verify.sh（構文 + JSON + テスト）を実行する。失敗ならコミットを中止。
+#   さらに、コードを変えたのにテストを変えていない場合は注意喚起する（非ブロック）。
+#
+#   有効化: git config core.hooksPath .githooks（tools/install-hooks.sh でも可）
+#
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+staged="$(git diff --cached --name-only)"
+[ -n "$staged" ] || exit 0
+
+# 監視対象がステージされているか
+if ! printf '%s\n' "$staged" | grep -qE '^(scripts|hooks|tools|config)/|^tests/'; then
+  exit 0
+fi
+
+echo "[pre-commit] コード変更を検知。検証を実行します（tools/verify.sh）…"
+if ! bash "$ROOT/tools/verify.sh"; then
+  echo "[pre-commit] 検証に失敗したためコミットを中止しました。" >&2
+  echo "             修正して再度コミットしてください（緊急時は git commit --no-verify で回避可能）。" >&2
+  exit 1
+fi
+
+# コード(scripts/hooks/tools)を変えたのに tests/ の更新が無ければ注意喚起（非ブロック）
+if printf '%s\n' "$staged" | grep -qE '^(scripts|hooks|tools)/' \
+   && ! printf '%s\n' "$staged" | grep -qE '^tests/'; then
+  echo "[pre-commit] 注意: コードを変更しましたが tests/ の更新がありません。" >&2
+  echo "             テストの追加・更新が必要か確認してください（tests/README.md）。" >&2
+fi
+
+echo "[pre-commit] 検証 OK。"
+exit 0
