@@ -1,5 +1,7 @@
 # xrev
 
+[![CI](https://github.com/naokami3/xrev/actions/workflows/ci.yml/badge.svg)](https://github.com/naokami3/xrev/actions/workflows/ci.yml)
+
 **設計段階からのクロスレビュー往復**を、人間の操作なしで AI コーディングエージェント同士に行わせる
 Claude Code プラグイン。
 
