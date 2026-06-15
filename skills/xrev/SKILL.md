@@ -92,9 +92,12 @@ loop:
 printf '%s' "$payload" | "${CLAUDE_PLUGIN_ROOT}/scripts/review-loop.sh" "$ITER"
 ```
 
-出力 JSON の `decision` を見て上の分岐を行う。`findings[]` に修正対象の指摘（file/line/severity/
-category/message/suggested_fix）が入る。**修正反映（コードやプランの編集）は primary である自分が行う**
-— スクリプトはコードを書き換えない。
+**分岐は必ず stdout の JSON の `decision` フィールドで行う（終了コードでは判断しない）。**
+review-loop.sh の終了コードは「レビューが完了したか」だけを表し、`continue`/`escalate` も含む
+完了系は **exit 0**。`invalid`=21 / `transport_error`=22 のみ非ゼロ。Bash ツール経由だと非ゼロが
+「Error」表示になるが、`continue`(正常系)は exit 0 なので誤判定しない。`findings[]` に修正対象の指摘
+（file/line/severity/category/message/suggested_fix）が入る。**修正反映（コードやプランの編集）は
+primary である自分が行う** — スクリプトはコードを書き換えない。
 
 ### 往復を無限に続けない（終端の機械判定）
 

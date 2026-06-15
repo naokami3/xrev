@@ -25,7 +25,12 @@
 #       "findings": [...],          # continue/invalid 時に Claude が修正対象に使う
 #       "raw_review": "<reviewerの生JSON>"
 #     }
-#   終了コード: decision に対応（converged=0 / continue=10 / escalate=20 / invalid=21 / transport_error=22）
+#   分岐は必ず stdout の JSON の `decision` を読んで行う（exit code ではなく）。
+#   終了コードは「レビューが完了したか」だけを表す:
+#     0  = レビュー完了（decision = converged / continue / escalate のいずれか）
+#     21 = invalid（reviewer 契約違反でレビュー取得できず）
+#     22 = transport_error（送受信失敗でレビュー取得できず）
+#   ＝ continue/escalate も exit 0。非ゼロを一律エラー扱いする呼び出し元での誤判定を避けるため。
 #
 set -uo pipefail
 
@@ -51,16 +56,23 @@ PY
 #   入力: transport 終了コード / parse 終了コード / blocker 件数 / 反復回数 / 上限
 #   出力(stdout): "<decision> <exit_code>"（副作用なし・exit しない）
 #   優先順位は固定: transport 失敗 > parse 失敗 > 収束 > 上限到達 > 継続
+#
+# 【終了コードの方針】decision の詳細は常に stdout の JSON で返す。exit code は
+#   「レビューが綺麗に完了したか」だけを表す:
+#     0  = レビュー完了（converged / continue / escalate）。JSON の decision を読んで分岐する。
+#     21 = invalid（reviewer が契約違反の出力。レビューを取得できず）
+#     22 = transport_error（送受信失敗。レビューを取得できず）
+#   こうすることで「continue は正常なのに非ゼロでエラー扱いされる」誤判定を避ける。
 _xrev_decide() {
   local trc="$1" prc="$2" blockers="$3" iter="$4" max="$5"
   if (( trc != 0 )); then echo "transport_error 22"; return 0; fi
   if (( prc != 0 )); then echo "invalid 21"; return 0; fi
   # critical/high が 0 → 収束。medium 以下は blocker でないため往復を止める（設計1.5）。
   if [[ "$blockers" == "0" ]]; then echo "converged 0"; return 0; fi
-  # 安全弁：上限到達でも blocker が残る → 人間へエスカレーション。
-  if (( iter >= max )); then echo "escalate 20"; return 0; fi
-  # blocker が残り、上限未満 → Claude が修正して iteration+1 で再呼び出しすべき。
-  echo "continue 10"
+  # 安全弁：上限到達でも blocker が残る → 人間へエスカレーション（レビュー自体は完了=exit 0）。
+  if (( iter >= max )); then echo "escalate 0"; return 0; fi
+  # blocker が残り、上限未満 → Claude が修正して iteration+1 で再呼び出しすべき（exit 0）。
+  echo "continue 0"
 }
 
 # 決定 JSON を stdout に整形する（exit はしない・呼び出し側が制御）。

@@ -104,15 +104,19 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 
 ## 4. 終了コード設計
 
-### `scripts/review-loop.sh`（decision と 1:1）
+### `scripts/review-loop.sh`
+
+**分岐は必ず stdout の JSON の `decision` で行う**（exit code ではない）。exit code は
+「レビューを綺麗に完了できたか」だけを表す。これにより「`continue` は正常なのに非ゼロで
+エラー扱いされる」誤判定（非ゼロを一律エラーとみなす Bash 呼び出し等）を避ける。
 
 | decision          | exit | 意味 |
 |-------------------|------|------|
 | `converged`       | 0    | blocker 0 件。収束。 |
-| `continue`        | 10   | blocker 残・上限未満。primary が修正して `ITER+1` で再実行。 |
-| `escalate`        | 20   | 上限到達でも blocker 残。人間へエスカレーション。 |
-| `invalid`         | 21   | reviewer 出力が契約違反（スキーマ不一致 / 壊れた JSON）。 |
-| `transport_error` | 22   | 送受信失敗（ペイン解決不可・タイムアウト等）。 |
+| `continue`        | 0    | blocker 残・上限未満。primary が修正して `ITER+1` で再実行（正常系）。 |
+| `escalate`        | 0    | 上限到達でも blocker 残。人間へエスカレーション（レビューは完了）。 |
+| `invalid`         | 21   | reviewer 出力が契約違反（スキーマ不一致 / 壊れた JSON）→ レビュー取得できず。 |
+| `transport_error` | 22   | 送受信失敗（ペイン解決不可・タイムアウト等）→ レビュー取得できず。 |
 
 ### `scripts/parse-review.sh`
 

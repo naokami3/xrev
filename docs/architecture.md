@@ -62,8 +62,9 @@ xrev/
 - 宛先は `cmux tree --all --json` でタイトル → surface を**動的解決**する（再起動で surface ID が
   変わってもタイトルは不変、という前提）。
 - 接続不可は preflight（ping）で検知し `transport.sh` が `exit 31` を返して明示停止する。
-- `review-loop.sh` の decision と exit は 1:1:
-  `converged`=0 / `continue`=10 / `escalate`=20 / `invalid`=21 / `transport_error`=22。
+- `review-loop.sh` の分岐は stdout の JSON の `decision` で行う。exit code は「レビュー完了か」だけ:
+  完了系（`converged`/`continue`/`escalate`）=0 / `invalid`=21 / `transport_error`=22
+  （`continue` 等の正常系を非ゼロにしないことで、Bash 呼び出し等での誤エラー判定を避ける）。
 
 severity（blocker の定義）・act ラベル・各スクリプトの内部終了コード・設定キー一覧は
 [`../references/protocol.md`](../references/protocol.md) を参照。
