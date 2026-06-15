@@ -50,9 +50,13 @@
 
 ### reviewer 出力の例
 
+実際は1行コンパクトで返させる（読みやすさのため整形して例示）。トップレベルに依頼の
+`round_id` を含めること（応答検出の相関に使う）:
+
 ```
 ===XREV-JSON-BEGIN===
 {
+  "round_id": "r3c98be8691dfd20",
   "verdict": "request_changes",
   "summary": "宛先解決が再起動で壊れる懸念",
   "findings": [
@@ -123,8 +127,10 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 |------|------|
 | 10   | reviewer ペイン解決失敗（タイトル不一致 / 一覧取得不可） |
 | 11   | 送信失敗 |
-| 12   | 応答タイムアウト |
-| 13   | センチネル間 JSON 抽出失敗 |
+| 12   | 応答タイムアウト（round_id 一致の新着なし） |
+| 13   | 切り詰め検出（ペースト文字数が送信長と不一致） |
+| 30   | cmux CLI が見つからない |
+| 31   | cmux 接続不可（preflight 失敗・ペイン外実行） |
 
 ## 5. 設定キー一覧（`config/xrev.default.json`）
 
@@ -140,15 +146,20 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 | `adr_dir` | `docs/adr` | ADR の出力ディレクトリ（相対は対象リポジトリ基準 / 絶対パス可） |
 | `transport` | `cmux` | 配管実装の選択（将来の差し替え点） |
 | `severity_blockers` | `["critical","high"]` | 収束を妨げる severity |
+| `medium_low_max_rounds` | `2` | medium 以下の指摘に付き合う上限周回（助言値。収束は blocker 0 件で機械判定するためスクリプトは消費せず、スキルが運用指針として参照する） |
 | `read_screen_lines` | `400` | read-screen で読む行数 |
-| `send_settle_seconds` | `2` | 送信直後の反映待ち秒 |
+| `send_settle_seconds` | `2` | 送信（submit）後の反映待ち秒 |
+| `submit_settle_seconds` | `1` | submit 前のペースト描画待ちの基準秒（本文長に比例・上限8s） |
+| `chunk_size` | `0` | 1物理行の分割送信サイズ（0=分割なし・一括送信） |
 | `response_timeout_seconds` | `180` | 応答待ちタイムアウト秒 |
 | `response_poll_seconds` | `3` | 応答ポーリング間隔秒 |
 
 環境変数で個別上書き可: `XREV_CONFIG`, `XREV_REVIEWER_PANE_TITLE`, `XREV_REVIEWER_SURFACE`,
 `XREV_CMUX_BIN`, `XREV_MAX_ITERATIONS`, `XREV_STOP_AT`, `XREV_ADR`, `XREV_ADR_DIR`,
-`XREV_READ_SCREEN_LINES`, `XREV_SEND_SETTLE_SECONDS`, `XREV_RESPONSE_TIMEOUT_SECONDS`,
-`XREV_RESPONSE_POLL_SECONDS`。
+`XREV_READ_SCREEN_LINES`, `XREV_SEND_SETTLE_SECONDS`, `XREV_SUBMIT_SETTLE_SECONDS`,
+`XREV_CHUNK_SIZE`, `XREV_CONTENT_TYPE`, `XREV_ROUND_ID`, `XREV_RESPONSE_TIMEOUT_SECONDS`,
+`XREV_RESPONSE_POLL_SECONDS`。`XREV_CONTENT_TYPE`/`XREV_ROUND_ID` は通常自動決定で、テスト・
+デバッグ時のみ明示する。
 
 ### 実行コンテキスト（重要）
 

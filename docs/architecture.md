@@ -24,9 +24,14 @@ xrev/
 │   ├── make-adr.sh            # 往復ログ → ADR 整形（ADR 生成 on のときのみ）。出力先は引数/env/config/既定で解決
 │   └── finalize.sh            # 到達点分岐 review/commit/pr。PR は --draft 固定
 ├── config/xrev.default.json   # 既定設定（設定キー一覧は protocol.md）
-└── references/
-    ├── protocol.md            # メッセージ書式・センチネル・act ラベル・終了コード・設定キーの正典
-    └── review-schema.json     # reviewer 出力契約（JSON Schema）
+├── references/
+│   ├── protocol.md            # 送信プロトコル・act ラベル・終了コード・設定キーの正典
+│   └── review-schema.json     # reviewer 出力契約（JSON Schema）
+├── tools/                     # 開発用(テスト強制): verify.sh / claude-posttooluse.sh / claude-stop.sh / install-hooks.sh
+├── tests/                     # ユニットテスト(cmux 不要・bash+python3): run.sh / lib.sh / test_*.sh
+├── docs/                      # architecture.md / roadmap.md / security-design.md / adr/（ADR-NNN）
+├── .githooks/pre-commit       # コミット前にテストを強制（core.hooksPath）
+└── .github/workflows/ci.yml   # CI（push / PR で tools/verify.sh を実行）
 ```
 
 ## 設計原則
@@ -45,13 +50,15 @@ xrev/
 
 ## transport プロトコル要約
 
-詳細仕様は [`../references/protocol.md`](../references/protocol.md) を正典とする。要点のみ:
+詳細仕様は [`../references/protocol.md`](../references/protocol.md) と [ADR-001](adr/ADR-001.md) を
+正典とする。要点のみ:
 
-- reviewer には結果を 2 行のセンチネル（`===XREV-JSON-BEGIN===` / `===XREV-JSON-END===`）で挟んだ
-  JSON で返させる。これにより対話モード画面のノイズから機械的に JSON を切り出せる。
-- **応答検出は新着の妥当 JSON ブロック方式**: センチネル間が JSON として妥当かつ `verdict` を持つ
-  ブロックだけを本物とみなす。送信前のブロック数をベースラインにし、新着が出るまで待つことで、
-  プロンプトのエコー・テンプレート・前ラウンドの古い応答を除外する。
+- **送信は1物理行エンコード**（ADR-001）。完全自動 submit のため、複数行 payload を「画面上は1物理行・
+  意味上は複数行」に変換して送る（`content_type` で plain=`<XREV-NL>` / diff・code=番号付き line framing）。
+  cmux が `\n`/`\t` を実改行/実タブへ展開する事実への対処。本文の制御トークンは可逆エスケープする。
+- **応答検出は round_id 相関**: reviewer の JSON にトップレベル `round_id` を返させ、全画面を de-wrap
+  （TUI 折り返し除去）→ JSON を raw_decode 走査 → round_id 一致の妥当ブロックだけを採用する。
+  マーカー折り返し・前ラウンド残存・未完成 JSON に強い。
 - 宛先は `cmux tree --all --json` でタイトル → surface を**動的解決**する（再起動で surface ID が
   変わってもタイトルは不変、という前提）。
 - 接続不可は preflight（ping）で検知し `transport.sh` が `exit 31` を返して明示停止する。

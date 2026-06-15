@@ -30,7 +30,7 @@ xrev のフェーズと進捗。詳細な設計は [architecture.md](architectur
 - [x] cmux ペイン内での配管検証（接続 preflight）
 - [x] 宛先解決（`tree --all`、スピナー等の装飾タイトルの正規化）
 - [x] 送信（本文一括送信＋Enter 分離）
-- [x] 応答検出（新着の妥当 JSON ブロック方式）
+- [x] 応答検出（round_id 相関・全画面 de-wrap → raw_decode 走査）
 - [x] `review-loop` の decision 分岐（approve → converged / request_changes(high) → continue）
 - [x] 実機検証で判明した不具合の修正（list 範囲 → tree --all / タイトル装飾の正規化 /
       多バイト変数展開 / 空送信ガード / エコーの早期終了・古応答の誤検出 /

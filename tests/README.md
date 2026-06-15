@@ -18,13 +18,15 @@ bash tests/run.sh parse scan # 名前に parse / scan を含むテストだけ
 |---------|------|
 | `lib.sh` | アサートヘルパ（`assert_eq` / `assert_rc` / `assert_contains` / `json_get` 等） |
 | `run.sh` | ランナー（`test_*.sh` を集約実行・集計） |
-| `test_parse_review.sh` | `parse-review.sh`: 妥当性検証・severity 集計・blocker 算出（config 依存） |
-| `test_scan_blocks.sh` | `transport.sh::_scan_review_blocks`: エコー/テンプレ/古応答/新着の区別 |
+| `test_parse_review.sh` | `parse-review.sh`: 妥当性検証・severity 集計・blocker 算出・型/enum 検証（config 依存） |
+| `test_scan_blocks.sh` | `transport.sh::_scan_review_blocks`: de-wrap・raw_decode 走査・round_id 相関・未完成JSON除外 |
+| `test_encode.sh` | `transport.sh::_build_framed_line`/`_detect_content_type`/`_compute_submit_settle`: 1物理行エンコード・トークン衝突回避・content_type 判定 |
 | `test_resolve_surface.sh` | `transport.sh::_resolve_surface_from_json`: スピナー正規化・完全/部分/複数一致・surface 限定 |
-| `test_review_loop.sh` | `review-loop.sh::_xrev_decide`（終端判定）＋ transport スタブ注入による統合 |
+| `test_review_loop.sh` | `review-loop.sh::_xrev_decide`/`_format_decision`＋ transport スタブ注入による統合 |
 | `test_make_adr.sh` | `make-adr.sh`: ADR 連番・出力先解決（引数/env/config/絶対/相対） |
-| `test_finalize.sh` | `finalize.sh`: stop_at 解決順・review/commit（一時 git）/pr 経路 |
+| `test_finalize.sh` | `finalize.sh`: stop_at 解決順・review/commit（一時 git）/pr 経路（fake gh で --draft 検証） |
 | `test_hook.sh` | `hooks/user-prompt-submit.sh`: `@xrev` 検知時のみ注入・無ければ沈黙 |
+| `test_dev_hooks.sh` | `tools/claude-posttooluse.sh`/`claude-stop.sh`: 構文/JSON チェック・変更検知・ループ防止 |
 
 ## テスト容易化のためのリファクタ
 
