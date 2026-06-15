@@ -157,9 +157,17 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 環境変数で個別上書き可: `XREV_CONFIG`, `XREV_REVIEWER_PANE_TITLE`, `XREV_REVIEWER_SURFACE`,
 `XREV_CMUX_BIN`, `XREV_MAX_ITERATIONS`, `XREV_STOP_AT`, `XREV_ADR`, `XREV_ADR_DIR`,
 `XREV_READ_SCREEN_LINES`, `XREV_SEND_SETTLE_SECONDS`, `XREV_SUBMIT_SETTLE_SECONDS`,
-`XREV_CHUNK_SIZE`, `XREV_CONTENT_TYPE`, `XREV_ROUND_ID`, `XREV_RESPONSE_TIMEOUT_SECONDS`,
-`XREV_RESPONSE_POLL_SECONDS`。`XREV_CONTENT_TYPE`/`XREV_ROUND_ID` は通常自動決定で、テスト・
-デバッグ時のみ明示する。
+`XREV_CHUNK_SIZE`, `XREV_CONTENT_TYPE`, `XREV_ROUND_ID`, `XREV_SEND_RETRIES`,
+`XREV_RESPONSE_TIMEOUT_SECONDS`, `XREV_RESPONSE_POLL_SECONDS`。
+`XREV_CONTENT_TYPE`/`XREV_ROUND_ID` は通常自動決定で、テスト・デバッグ時のみ明示する。
+
+### 送信の堅牢化（実機知見）
+
+送信先が Codex のとき、**ビジー（前応答の処理中）や入力欄の残留（テキスト/ペーストチップ）**が
+あると `cmux send` が非ゼロで失敗する（`cmux send` 自体の長さ上限ではない。プレーンシェルへは
+長文も成功する）。そのため `_cmux_send_line` は **送信前に入力欄をクリア（ctrl-u/backspace）し、
+失敗時は待って再試行**する（既定 5 回・`XREV_SEND_RETRIES`）。残留が混入したまま送ると prompt が
+壊れるため、クリアと、応答検出側のペースト文字数照合（切り詰め検出）で二重に守る。
 
 ### 実行コンテキスト（重要）
 

@@ -343,11 +343,31 @@ _compute_submit_settle() {
   printf '%s' "$settle"
 }
 
+# reviewer ペインの入力欄をクリアする（残留テキスト/ペーストチップの除去）。best-effort。
+# ctrl-u（行クリア）と backspace（ペーストチップ削除）のみ使う。ctrl-c/Escape は
+# 生成を中断し得るので使わない（アイドル化はしない=実行中の処理は止めない）。
+_cmux_clear_input() {
+  local surface="$1" _i
+  for _i in 1 2 3; do _cmux send-key --surface "$surface" ctrl-u >/dev/null 2>&1 || true; done
+  for _i in 1 2 3 4 5 6; do _cmux send-key --surface "$surface" backspace >/dev/null 2>&1 || true; done
+}
+
 # 1物理行を reviewer 入力欄へ送る（確定はしない）。cmux 依存。
+# 【実機知見】送信先が Codex のとき、ビジー（前応答の処理中）や入力欄の残留（テキスト/
+#   ペーストチップ）があると cmux send が非ゼロで失敗する。cmux send 自体の長さ上限ではない
+#   （プレーンシェルへは長文も成功）。そこで「送信前にクリア → 失敗なら待って再試行」する。
 # （長大時のチャンク送信は XREV_CHUNK_SIZE で将来対応。既定は一括送信）
 _cmux_send_line() {
-  local surface="$1" line="$2"
-  _cmux send --surface "$surface" "$line" >/dev/null 2>&1 || return 6
+  local surface="$1" line="$2" tries=0 max="${XREV_SEND_RETRIES:-5}"
+  _cmux_clear_input "$surface"          # 残留を除去してから送る（混入による prompt 破壊を防ぐ）
+  while (( tries < max )); do
+    _cmux send --surface "$surface" "$line" >/dev/null 2>&1 && return 0
+    # 失敗：busy/残留の可能性 → 少し待ち、再度クリアして再試行（busy 解消を待つ）。
+    tries=$(( tries + 1 ))
+    _xrev_sleep 2
+    _cmux_clear_input "$surface"
+  done
+  return 6
 }
 
 # 送信本文が入力欄に欠落なく到達したかを判定する（切り詰め検出）。
