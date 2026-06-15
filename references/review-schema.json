@@ -4,6 +4,10 @@
   "description": "reviewer（既定: Codex）に強制する構造化レビュー出力の契約。自由作文のレビューを次工程に渡さないための機械可読フォーマット。",
   "type": "object",
   "properties": {
+    "round_id": {
+      "description": "任意。依頼の round_id をそのまま返すと、送信側が応答を機械的に相関づけられる（古い/別ラウンドの誤検出防止）。",
+      "type": "string"
+    },
     "verdict": {
       "description": "全体判定。blocker（critical/high）が残るなら request_changes、無ければ approve。",
       "enum": ["approve", "request_changes"]

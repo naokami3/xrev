@@ -207,26 +207,7 @@ _cmux_resolve_surface() {
   _resolve_surface_from_json "$REVIEWER_PANE_TITLE" "$listing"
 }
 
-# reviewer ペインへ本文を送る（確定はしない）。
-#
-# 設計判断:
-#   - 本文は「1回の cmux send」でまとめて送る。行ごとに Enter を送る方式は、対話型 TUI
-#     （Codex 等）では最初の行で送信が確定してしまうため採らない。本文送信と確定(Enter)を
-#     分離し、確定は _cmux_submit が 1 回だけ行う。
-#   - 空文字列を送ると cmux send が弾く（<text> 必須）ため、空本文はガードする。
-#   - 中間ファイルは使わない（要件）。本文は引数で渡す。
-#
-# 【実機検証が残る点】Codex の TUI が本文中の改行をどう扱うか（途中送信せず複数行を保持
-#   できるか）は Codex 側仕様に依存する。早期送信される場合は本文を 1 行へ畳む等の調整を
-#   この関数に閉じ込めて対応する（配管の局所化方針）。
-_cmux_send_text() {
-  local surface="$1" text="$2"
-  [[ -n "$text" ]] || return 0
-  _cmux send --surface "$surface" "$text" >/dev/null 2>&1 || return 6
-  return 0
-}
-
-# reviewer ペインの最終確定入力（プロンプト送信）。本文を送り終えたあとに呼ぶ。
+# reviewer ペインの最終確定入力（プロンプト送信）。本文（1物理行）を送り終えたあとに呼ぶ。
 _cmux_submit() {
   local surface="$1"
   _cmux send-key --surface "$surface" enter >/dev/null 2>&1 || return 7
@@ -244,11 +225,14 @@ _cmux_read_screen() {
 #   出力: 1行目=妥当ブロック数, 2行目以降=最後の妥当ブロックの中身。
 # これにより「プロンプトのエコー（センチネルだけで JSON 無し）」「テンプレート」
 # 「前ラウンドの古い応答」を機械的に区別できる（数の増分で新着を判定する）。
+# 画面テキストから妥当な review JSON ブロックを走査する。
+#   $1 = 画面テキスト, $2(任意) = 期待 round_id（指定時はそれを含むブロックのみ採用）。
 _scan_review_blocks() {
-  XREV_SCREEN="$1" python3 - "$SENTINEL_BEGIN" "$SENTINEL_END" <<'PY'
+  XREV_SCREEN="$1" XREV_EXPECT_ROUND_ID="${2:-}" python3 - "$SENTINEL_BEGIN" "$SENTINEL_END" <<'PY'
 import os, sys, json
 begin, end = sys.argv[1], sys.argv[2]
 text = os.environ.get("XREV_SCREEN", "")
+expect_rid = os.environ.get("XREV_EXPECT_ROUND_ID", "")
 
 def parse_block(raw):
     # 対話型 TUI（Codex 等）は長い行を物理的に折り返し、各行にガター字下げを付けるため、
@@ -276,19 +260,86 @@ while True:
         break
     obj = parse_block(text[b + len(begin):e])
     i = e + len(end)
-    if obj is not None:
-        # 下流（parse-review）が確実に読めるよう、正規化したクリーンな JSON を保持する。
-        blocks.append(json.dumps(obj, ensure_ascii=False))
+    if obj is None:
+        continue
+    # round_id 指定時は一致するブロックだけを本物とみなす（古い/別ラウンドの誤検出を防ぐ）。
+    if expect_rid and str(obj.get("round_id", "")) != expect_rid:
+        continue
+    # 下流（parse-review）が確実に読めるよう、正規化したクリーンな JSON を保持する。
+    blocks.append(json.dumps(obj, ensure_ascii=False))
 print(len(blocks))
 if blocks:
     sys.stdout.write(blocks[-1])
 PY
 }
 
+# 純粋関数（cmux 非依存・テスト可能）: payload を「画面上は1物理行・意味上は複数行」に
+# エンコードし、reviewer への指示と出力契約を含む完全な1行メッセージを stdout に返す。
+#   $1 = content_type(plain|unified_diff|code|markdown), $2 = round_id, $3 = payload
+# 実機知見に基づく不変条件:
+#   - cmux send は \n,\t を実改行/実タブへ自動展開するため、本文の \ と tab をトークン化する。
+#   - 改行は plain なら <XREV-NL>、framed なら "|| LNNNN:" の行境界へ畳む（実改行を送らない）。
+#   - 末尾に END_ROUND_<id> を置き切り詰めを検出可能にする。
+_build_framed_line() {
+  XREV_BUILD_PAYLOAD="$3" python3 - "$1" "$2" "$SENTINEL_BEGIN" "$SENTINEL_END" <<'PY'
+import os, sys
+ct, rid, sb, se = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+body = os.environ.get("XREV_BUILD_PAYLOAD", "")
+# 1) cmux に展開される文字を無害化（\ と tab をトークン化）
+body = body.replace("\\", "<XREV-BS>").replace("\t", "<XREV-TAB>")
+lines = body.split("\n")
+if ct == "plain":
+    enc = "PAYLOAD_PLAIN || " + " <XREV-NL> ".join(lines)
+else:
+    recs = " ".join("|| L%04d: %s" % (i + 1, ln) for i, ln in enumerate(lines))
+    enc = "PAYLOAD_FRAMED content_type=%s lines=%d %s" % (ct, len(lines), recs)
+instr = ("これはエンコードされたレビュー依頼です。復元規則: <XREV-NL>=改行 / "
+         "'|| LNNNN:'=行境界(framed時) / <XREV-BS>=バックスラッシュ / <XREV-TAB>=タブ。"
+         "これらを元の複数行に復元して内容を理解し、批判的にレビューしてください。")
+out = ("出力は必ず %s と %s の2行マーカーで挟み、間には1行コンパクトJSONのみを置くこと"
+       "(マーカー外・JSON前後に説明文を書かない)。JSONはトップレベルに round_id(=\"%s\") と "
+       "verdict(approve|request_changes) と findings[] を持ち、各 finding は "
+       "file/severity(critical|high|medium|low|nit)/category(bug|security|design|perf|style)/message を必須とする。"
+       % (sb, se, rid))
+line = "XREV_REVIEW round_id=%s :: %s :: %s :: %s :: END_ROUND_%s" % (rid, instr, out, enc, rid)
+# 保険: エンコード後に実改行/タブが残らないよう最終中和
+line = line.replace("\n", " <XREV-NL> ").replace("\t", "<XREV-TAB>")
+sys.stdout.write(line)
+PY
+}
+
+# payload の content_type を推定する（純粋）。diff っぽければ unified_diff、それ以外は plain。
+# 誤判定を避けるため、hunk ヘッダ等の明確な兆候があるときだけ unified_diff にする。
+_detect_content_type() {
+  if printf '%s' "$1" | grep -qE '^(@@ |diff --git |\+\+\+ |--- )'; then
+    printf 'unified_diff'
+  else
+    printf 'plain'
+  fi
+}
+
+# submit 前の描画待ち秒を本文長から決める（純粋）。長いほど長く待つ（上限8s）。
+_compute_submit_settle() {
+  local len="$1" base extra settle
+  base="${XREV_SUBMIT_SETTLE_SECONDS:-$(_cfg submit_settle_seconds 1)}"
+  [[ "$base" =~ ^[0-9]+$ ]] || base=1
+  extra=$(( len / 2000 ))
+  settle=$(( base + extra ))
+  (( settle > 8 )) && settle=8
+  printf '%s' "$settle"
+}
+
+# 1物理行を reviewer 入力欄へ送る（確定はしない）。cmux 依存。
+# （長大時のチャンク送信は XREV_CHUNK_SIZE で将来対応。既定は一括送信）
+_cmux_send_line() {
+  local surface="$1" line="$2"
+  _cmux send --surface "$surface" "$line" >/dev/null 2>&1 || return 6
+}
+
 # ── 公開 API ─────────────────────────────────────────────────────────────────
 
 # xrev_transport_review <payload_text>
-#   payload_text を reviewer に渡し、SENTINEL で挟まれた JSON を stdout に返す。
+#   payload を 1物理行にエンコードして reviewer へ送り、round_id 一致の SENTINEL JSON を返す。
 #   成功: 0 / JSON を stdout。失敗: 非ゼロ / stderr にログ。
 xrev_transport_review() {
   local payload="$1"
@@ -301,39 +352,29 @@ xrev_transport_review() {
   }
   _log "reviewer surface = ${surface}（title: '${REVIEWER_PANE_TITLE}'）"
 
-  # 送信前のベースライン：既に画面にある妥当ブロック数を数える。
-  # 以降は「この数を超える＝新着の本物の応答が来た」をもって完了判定する。
+  # round_id（ラウンド識別子）と content_type を決め、payload を1物理行にエンコードする。
+  local round_id ct line
+  round_id="${XREV_ROUND_ID:-r$(date +%s 2>/dev/null)$RANDOM}"
+  ct="${XREV_CONTENT_TYPE:-$(_detect_content_type "$payload")}"
+  line="$(_build_framed_line "$ct" "$round_id" "$payload")"
+  _log "round_id=${round_id} content_type=${ct} len=${#line}"
+
+  # 送信前ベースライン：この round_id に一致する妥当ブロック数（通常0、防御的に数える）。
   local before_count
-  before_count="$(_scan_review_blocks "$(_cmux_read_screen "$surface")" | head -1)"
+  before_count="$(_scan_review_blocks "$(_cmux_read_screen "$surface")" "$round_id" | head -1)"
   [[ "$before_count" =~ ^[0-9]+$ ]] || before_count=0
 
-  # reviewer への指示を payload に前置きし、JSON をセンチネルで挟ませる。
-  # 注意: プロンプト内にセンチネル文字列は出るが、その間に「妥当な JSON」は置かない。
-  #       これによりエコーされても妥当ブロックとして誤検出されない。
-  local framed
-  framed="$(cat <<EOF
-$payload
-
----
-上記をレビューし、結果を必ず次の2つのマーカー行で挟んで出力してください。
-マーカーの間には JSON だけを置き、マーカーの外や JSON の前後に説明文を書かないこと。
-JSON は改行・インデントなしの「1行コンパクト形式」で出力すること（pretty-print しない）。
-JSON は verdict（approve | request_changes）と findings[] を持ち、各 finding は
-file / severity（critical|high|medium|low|nit）/ category（bug|security|design|perf|style）/ message を必須とする。
-開始マーカー: $SENTINEL_BEGIN
-終了マーカー: $SENTINEL_END
-EOF
-)"
-
-  _cmux_send_text "$surface" "$framed" || { _log "送信に失敗しました。"; return 11; }
+  # 1物理行を送信 → 描画待ち → Enter 1回で確定。
+  _cmux_send_line "$surface" "$line" || { _log "送信に失敗しました。"; return 11; }
+  _xrev_sleep "$(_compute_submit_settle "${#line}")"
   _cmux_submit "$surface" || true
 
-  # 応答待ち：妥当ブロック数が before_count を超える（新着）まで待つ。
+  # 応答待ち：round_id 一致の新着妥当ブロックが出るまで待つ。
   local waited=0 screen scan count block
   _xrev_sleep "$SETTLE_SECS"
   while (( waited < RESP_TIMEOUT )); do
     screen="$(_cmux_read_screen "$surface")"
-    scan="$(_scan_review_blocks "$screen")"
+    scan="$(_scan_review_blocks "$screen" "$round_id")"
     count="$(printf '%s' "$scan" | head -1)"
     [[ "$count" =~ ^[0-9]+$ ]] || count=0
     if (( count > before_count )); then
@@ -345,7 +386,7 @@ EOF
     waited=$(( waited + RESP_POLL ))
   done
 
-  _log "reviewer の応答がタイムアウトしました（${RESP_TIMEOUT}s, 新しい妥当 JSON ブロックなし）。"
+  _log "reviewer の応答がタイムアウトしました（${RESP_TIMEOUT}s, round_id=${round_id} の新着なし）。"
   return 12
 }
 

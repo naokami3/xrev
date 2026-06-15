@@ -12,6 +12,8 @@
   "medium_low_max_rounds": 2,
   "read_screen_lines": 400,
   "send_settle_seconds": 2,
+  "submit_settle_seconds": 1,
+  "chunk_size": 0,
   "response_timeout_seconds": 180,
   "response_poll_seconds": 3
 }

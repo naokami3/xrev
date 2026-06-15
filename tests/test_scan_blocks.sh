@@ -65,3 +65,16 @@ assert_rc "verdict のみは parse-review が弾く(rc1)" 1 "$?"
 # 10) 複数の有効ブロック混在 → 件数を正しく数え最後を返す（4/5 の補強：3 件）
 multi="$B"$'\n{"verdict":"approve","findings":[]}\n'"$E"$'\n--\n'"$B"$'\n{"verdict":"request_changes","findings":[]}\n'"$E"$'\n--\n'"$B"$'\n{"verdict":"approve","findings":[]}\n'"$E"
 assert_eq "有効ブロック 3 件を数える" "3" "$(_scan_review_blocks "$multi" | head -1)"
+
+# 11) round_id フィルタ: 期待 round_id 指定時は一致ブロックのみ採用
+rid_match="$B"$'\n{"round_id":"rX","verdict":"approve","findings":[]}\n'"$E"
+rid_other="$B"$'\n{"round_id":"rY","verdict":"approve","findings":[]}\n'"$E"
+assert_eq "round_id 一致は採用(1件)" "1" "$(_scan_review_blocks "$rid_match" "rX" | head -1)"
+assert_eq "round_id 不一致は不採用(0件)" "0" "$(_scan_review_blocks "$rid_other" "rX" | head -1)"
+assert_eq "round_id 欠落ブロックは期待指定時に不採用(0件)" "0" \
+  "$(_scan_review_blocks "$B"$'\n{"verdict":"approve","findings":[]}\n'"$E" "rX" | head -1)"
+# 古いラウンド(rY)と新ラウンド(rX)が混在 → rX 指定で新ラウンドだけ拾う
+mix="$rid_other"$'\n--\n'"$rid_match"
+assert_eq "混在から round_id=rX のみ採用(1件)" "1" "$(_scan_review_blocks "$mix" "rX" | head -1)"
+# 期待 round_id 未指定なら従来どおり全採用（後方互換）
+assert_eq "round_id 未指定は従来どおり採用" "1" "$(_scan_review_blocks "$rid_match" | head -1)"
