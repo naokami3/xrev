@@ -239,6 +239,13 @@ expect_rid = os.environ.get("XREV_EXPECT_ROUND_ID", "")
 # TUI の折り返し＋ガター字下げを除く（各行 strip して連結）。
 dw = "".join(line.strip() for line in text.splitlines())
 
+# 走査上限（暴走・誤検出の防御）。read-screen は行数で有界だが、念のため末尾側のみを対象に
+# サイズ上限をかけ、検出件数にも上限を設ける（最新の応答は末尾に出るため末尾優先）。
+MAX_SCAN = 500000
+MAX_BLOCKS = 200
+if len(dw) > MAX_SCAN:
+    dw = dw[-MAX_SCAN:]
+
 dec = json.JSONDecoder()
 blocks = []
 i, n = 0, len(dw)
@@ -257,6 +264,8 @@ while i < n:
         if expect_rid and str(obj.get("round_id", "")) != expect_rid:
             continue
         blocks.append(json.dumps(obj, ensure_ascii=False))
+        if len(blocks) > MAX_BLOCKS:
+            blocks.pop(0)  # 末尾優先で件数を有界に保つ
 print(len(blocks))
 if blocks:
     sys.stdout.write(blocks[-1])
@@ -275,7 +284,15 @@ _build_framed_line() {
 import os, sys
 ct, rid, sb, se = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 body = os.environ.get("XREV_BUILD_PAYLOAD", "")
-# 1) cmux に展開される文字を無害化（\ と tab をトークン化）
+
+# 1) 制御トークン衝突の回避（可逆エスケープ）。本文に元から含まれる制御トークンを、
+#    導入子 XREVQ で始まるリテラル表記へ退避する。導入子自身を最初に二重化して衝突回避。
+#    （reviewer は復元規則に従い、XREVQ 列を区切りでなく本文の文字列として読む）
+body = body.replace("XREVQ", "XREVQXREVQ")
+for tok, esc in (("<XREV-NL>", "XREVQnl"), ("<XREV-BS>", "XREVQbs"),
+                 ("<XREV-TAB>", "XREVQtab"), ("END_ROUND_", "XREVQer"), ("|| L", "XREVQll")):
+    body = body.replace(tok, esc)
+# 2) cmux が実改行/実タブへ展開する文字をトークン化（退避後に行うので衝突しない）
 body = body.replace("\\", "<XREV-BS>").replace("\t", "<XREV-TAB>")
 lines = body.split("\n")
 if ct == "plain":
@@ -285,6 +302,9 @@ else:
     enc = "PAYLOAD_FRAMED content_type=%s lines=%d %s" % (ct, len(lines), recs)
 instr = ("これはエンコードされたレビュー依頼です。復元規則: <XREV-NL>=改行 / "
          "'|| LNNNN:'=行境界(framed時) / <XREV-BS>=バックスラッシュ / <XREV-TAB>=タブ。"
+         "XREVQ で始まる列は本文のリテラル文字列(区切りではない): "
+         "XREVQnl='<XREV-NL>' / XREVQbs='<XREV-BS>' / XREVQtab='<XREV-TAB>' / "
+         "XREVQer='END_ROUND_' / XREVQll='|| L' / XREVQXREVQ='XREVQ'。"
          "これらを元の複数行に復元して内容を理解し、批判的にレビューしてください。")
 out = ("出力は必ず %s と %s の2行マーカーで挟み、間には1行コンパクトJSONのみを置くこと"
        "(マーカー外・JSON前後に説明文を書かない)。JSONはトップレベルに round_id(=\"%s\") と "
@@ -298,11 +318,15 @@ sys.stdout.write(line)
 PY
 }
 
-# payload の content_type を推定する（純粋）。diff っぽければ unified_diff、それ以外は plain。
-# 誤判定を避けるため、hunk ヘッダ等の明確な兆候があるときだけ unified_diff にする。
+# payload の content_type を推定する（純粋）。
+#   - unified diff の明確な兆候（hunk ヘッダ等）→ unified_diff
+#   - コードフェンス ``` を含む → code（行構造が重要なので framed に寄せる）
+#   - それ以外 → plain
 _detect_content_type() {
   if printf '%s' "$1" | grep -qE '^(@@ |diff --git |\+\+\+ |--- )'; then
     printf 'unified_diff'
+  elif printf '%s' "$1" | grep -qF '```'; then
+    printf 'code'
   else
     printf 'plain'
   fi
@@ -326,6 +350,25 @@ _cmux_send_line() {
   _cmux send --surface "$surface" "$line" >/dev/null 2>&1 || return 6
 }
 
+# 送信本文が入力欄に欠落なく到達したかを判定する（切り詰め検出）。
+#   stdout: "ok"（到達確認）/ "truncated"（文字数不一致＝切り詰め）/ "unknown"（確認不能）
+# Codex の TUI は長いペーストを「[Pasted Content N chars]」へ畳むため、END_ROUND マーカーは
+# 画面に出ない。その代わり表示される文字数 N が送信長と一致するかで欠落を検出する。
+# 短いペーストはインライン表示されるので、その場合は de-wrap して末尾マーカーで確認する。
+_check_paste_intact() {
+  local surface="$1" elen="$2" marker="$3" screen
+  screen="$(_cmux_read_screen "$surface")"
+  XREV_ELEN="$elen" XREV_MARK="$marker" python3 -c '
+import os, sys, re
+elen = int(os.environ["XREV_ELEN"]); mark = os.environ["XREV_MARK"]
+dw = "".join(l.strip() for l in sys.stdin.read().splitlines())
+m = re.search(r"Pasted Content\s+(\d+)\s+chars", dw)
+if m:
+    print("ok" if int(m.group(1)) == elen else "truncated"); sys.exit(0)
+print("ok" if mark in dw else "unknown")
+' <<<"$screen"
+}
+
 # ── 公開 API ─────────────────────────────────────────────────────────────────
 
 # xrev_transport_review <payload_text>
@@ -343,8 +386,10 @@ xrev_transport_review() {
   _log "reviewer surface = ${surface}（title: '${REVIEWER_PANE_TITLE}'）"
 
   # round_id（ラウンド識別子）と content_type を決め、payload を1物理行にエンコードする。
+  # round_id は高エントロピー（衝突でスクロールバックの過去応答と混同しないため）。
   local round_id ct line
-  round_id="${XREV_ROUND_ID:-r$(date +%s 2>/dev/null)$RANDOM}"
+  round_id="${XREV_ROUND_ID:-$(python3 -c 'import secrets;print("r"+secrets.token_hex(8))' 2>/dev/null)}"
+  [[ -n "$round_id" ]] || round_id="r$$$RANDOM$RANDOM"
   ct="${XREV_CONTENT_TYPE:-$(_detect_content_type "$payload")}"
   line="$(_build_framed_line "$ct" "$round_id" "$payload")"
   _log "round_id=${round_id} content_type=${ct} len=${#line}"
@@ -354,9 +399,23 @@ xrev_transport_review() {
   before_count="$(_scan_review_blocks "$(_cmux_read_screen "$surface")" "$round_id" | head -1)"
   [[ "$before_count" =~ ^[0-9]+$ ]] || before_count=0
 
-  # 1物理行を送信 → 描画待ち → Enter 1回で確定。
+  # 1物理行を送信 → 描画待ち → 切り詰め検出 → Enter 1回で確定。
   _cmux_send_line "$surface" "$line" || { _log "送信に失敗しました。"; return 11; }
   _xrev_sleep "$(_compute_submit_settle "${#line}")"
+  # 切り詰め検出: 入力欄に送信本文が欠落なく到達したかを確認する。
+  #   確認できた(ok) → submit / 文字数不一致(truncated) → 中止 / 確認不能(unknown) → 警告して続行。
+  # 確認不能で中止すると正常な往復まで壊すため、確実な不一致のときだけ失敗にする。
+  local end_marker="END_ROUND_${round_id}" intact="unknown" t=0
+  while (( t < 8 )); do
+    intact="$(_check_paste_intact "$surface" "${#line}" "$end_marker")"
+    [[ "$intact" == "ok" || "$intact" == "truncated" ]] && break
+    _xrev_sleep 1; t=$(( t + 1 ))
+  done
+  if [[ "$intact" == "truncated" ]]; then
+    _log "ペースト文字数が送信長(${#line})と一致しません。切り詰めの恐れがあるため中止します。"
+    return 13
+  fi
+  [[ "$intact" == "ok" ]] || _log "ペースト到達を確認できませんでした（確認不能）。続行します。"
   _cmux_submit "$surface" || true
 
   # 応答待ち：round_id 一致の新着妥当ブロックが出るまで待つ。
