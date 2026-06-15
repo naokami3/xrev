@@ -220,53 +220,43 @@ _cmux_read_screen() {
 }
 
 # 画面テキストから「妥当な review JSON ブロック」を走査する。
-#   妥当 = SENTINEL_BEGIN..SENTINEL_END に挟まれ、中身が JSON として parse でき、
-#          dict かつ "verdict" を持つ（＝reviewer の本物の応答）。
-#   出力: 1行目=妥当ブロック数, 2行目以降=最後の妥当ブロックの中身。
-# これにより「プロンプトのエコー（センチネルだけで JSON 無し）」「テンプレート」
-# 「前ラウンドの古い応答」を機械的に区別できる（数の増分で新着を判定する）。
-# 画面テキストから妥当な review JSON ブロックを走査する。
 #   $1 = 画面テキスト, $2(任意) = 期待 round_id（指定時はそれを含むブロックのみ採用）。
+#   出力: 1行目=妥当ブロック数, 2行目以降=最後の妥当ブロックの中身（正規化 JSON）。
+#
+# 【実機知見・堅牢化】センチネルの begin/end 対照合には依存しない。理由は2つ:
+#   (1) 指示文に書いたセンチネル文字列が画面で折り返され、対照合が壊れて本物の応答を
+#       巨大ブロックに飲み込むことがある。
+#   (2) スクロールバックに前ラウンドの応答が残る。
+# 代わりに「全画面を de-wrap（各行 strip して連結＝TUI 折り返しとガター除去）→ JSON を
+# raw_decode で走査 → dict かつ verdict を持ち（round_id 指定時は一致する）ものだけ採用」する。
+# 完成した JSON だけが parse できるため、ストリーミング途中の未完成応答も自然に除外される。
 _scan_review_blocks() {
-  XREV_SCREEN="$1" XREV_EXPECT_ROUND_ID="${2:-}" python3 - "$SENTINEL_BEGIN" "$SENTINEL_END" <<'PY'
+  XREV_SCREEN="$1" XREV_EXPECT_ROUND_ID="${2:-}" python3 <<'PY'
 import os, sys, json
-begin, end = sys.argv[1], sys.argv[2]
 text = os.environ.get("XREV_SCREEN", "")
 expect_rid = os.environ.get("XREV_EXPECT_ROUND_ID", "")
 
-def parse_block(raw):
-    # 対話型 TUI（Codex 等）は長い行を物理的に折り返し、各行にガター字下げを付けるため、
-    # 画面から読んだ生テキストは JSON 文字列の途中に改行が入り json.loads に失敗する。
-    # 1) まず素のままパース（cmux が論理行で返した場合）
-    # 2) 失敗時は「各行の前後空白を除去して連結」で折り返し＋ガターを取り除いて再パース
-    #    （Codex には JSON を1行コンパクトで出すよう指示しているので、行の前後空白＝TUI 由来）
-    for cand in (raw, "".join(line.strip() for line in raw.splitlines())):
-        try:
-            o = json.loads(cand)
-        except Exception:
-            continue
-        if isinstance(o, dict) and "verdict" in o:
-            return o
-    return None
+# TUI の折り返し＋ガター字下げを除く（各行 strip して連結）。
+dw = "".join(line.strip() for line in text.splitlines())
 
+dec = json.JSONDecoder()
 blocks = []
-i = 0
-while True:
-    b = text.find(begin, i)
-    if b == -1:
-        break
-    e = text.find(end, b + len(begin))
-    if e == -1:
-        break
-    obj = parse_block(text[b + len(begin):e])
-    i = e + len(end)
-    if obj is None:
+i, n = 0, len(dw)
+while i < n:
+    if dw[i] != "{":
+        i += 1
         continue
-    # round_id 指定時は一致するブロックだけを本物とみなす（古い/別ラウンドの誤検出を防ぐ）。
-    if expect_rid and str(obj.get("round_id", "")) != expect_rid:
+    try:
+        obj, end = dec.raw_decode(dw, i)
+    except Exception:
+        i += 1
         continue
-    # 下流（parse-review）が確実に読めるよう、正規化したクリーンな JSON を保持する。
-    blocks.append(json.dumps(obj, ensure_ascii=False))
+    i = end
+    if isinstance(obj, dict) and "verdict" in obj:
+        # round_id 指定時は一致するものだけ（古い/別ラウンドの誤検出を防ぐ）。
+        if expect_rid and str(obj.get("round_id", "")) != expect_rid:
+            continue
+        blocks.append(json.dumps(obj, ensure_ascii=False))
 print(len(blocks))
 if blocks:
     sys.stdout.write(blocks[-1])

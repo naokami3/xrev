@@ -51,9 +51,12 @@ assert_eq "返却JSONがパース可能で verdict を持つ" "request_changes" 
 assert_contains "折り返し文字列が連結復元される" \
   "$(printf '%s' "$out" | tail -n +2)" "途中で折り返されてガター字下げ"
 
-# 8) 開始マーカーのみで終了マーカーが無い（応答が途中）→ 0 件
-assert_eq "END 欠落のブロックは未完成として 0 件" "0" \
-  "$(_scan_review_blocks "$B"$'\n{"verdict":"approve","findings":[]}\nまだ続いている' | head -1)"
+# 8) ストリーミング途中の未完成 JSON（閉じ括弧が無い）→ parse できないため 0 件
+assert_eq "未完成JSON(閉じ括弧なし)は 0 件" "0" \
+  "$(_scan_review_blocks "$B"$'\n{"verdict":"approve","findings":[{"file":"a"\n（生成途中…）' | head -1)"
+# 完成した JSON は END マーカーが無くても検出される（完成=parse 可能で判定）
+ok_no_end='{"verdict":"approve","findings":[]} 後続テキスト'
+assert_eq "END マーカー無しでも完成JSONは 1 件" "1" "$(_scan_review_blocks "$ok_no_end" | head -1)"
 
 # 9) verdict だけ持つ JSON（findings 欠落）→ scan は本物扱い(1件)するが…
 out="$(_scan_review_blocks "$B"$'\n{"verdict":"approve"}\n'"$E")"
