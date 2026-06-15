@@ -12,7 +12,8 @@
 set -uo pipefail
 
 event="$(cat)"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+# ROOT は通常リポジトリルート。テストでは XREV_STOP_ROOT で差し替え可能（変更検知を決定論化）。
+ROOT="${XREV_STOP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}"
 
 stop_active="$(printf '%s' "$event" | python3 -c 'import json,sys
 try: print(str(json.load(sys.stdin).get("stop_hook_active",False)).lower())
