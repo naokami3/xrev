@@ -249,6 +249,22 @@ _scan_review_blocks() {
 import os, sys, json
 begin, end = sys.argv[1], sys.argv[2]
 text = os.environ.get("XREV_SCREEN", "")
+
+def parse_block(raw):
+    # 対話型 TUI（Codex 等）は長い行を物理的に折り返し、各行にガター字下げを付けるため、
+    # 画面から読んだ生テキストは JSON 文字列の途中に改行が入り json.loads に失敗する。
+    # 1) まず素のままパース（cmux が論理行で返した場合）
+    # 2) 失敗時は「各行の前後空白を除去して連結」で折り返し＋ガターを取り除いて再パース
+    #    （Codex には JSON を1行コンパクトで出すよう指示しているので、行の前後空白＝TUI 由来）
+    for cand in (raw, "".join(line.strip() for line in raw.splitlines())):
+        try:
+            o = json.loads(cand)
+        except Exception:
+            continue
+        if isinstance(o, dict) and "verdict" in o:
+            return o
+    return None
+
 blocks = []
 i = 0
 while True:
@@ -258,14 +274,11 @@ while True:
     e = text.find(end, b + len(begin))
     if e == -1:
         break
-    content = text[b + len(begin):e].strip()
+    obj = parse_block(text[b + len(begin):e])
     i = e + len(end)
-    try:
-        obj = json.loads(content)
-    except Exception:
-        continue
-    if isinstance(obj, dict) and "verdict" in obj:
-        blocks.append(content)
+    if obj is not None:
+        # 下流（parse-review）が確実に読めるよう、正規化したクリーンな JSON を保持する。
+        blocks.append(json.dumps(obj, ensure_ascii=False))
 print(len(blocks))
 if blocks:
     sys.stdout.write(blocks[-1])
@@ -304,6 +317,7 @@ $payload
 ---
 上記をレビューし、結果を必ず次の2つのマーカー行で挟んで出力してください。
 マーカーの間には JSON だけを置き、マーカーの外や JSON の前後に説明文を書かないこと。
+JSON は改行・インデントなしの「1行コンパクト形式」で出力すること（pretty-print しない）。
 JSON は verdict（approve | request_changes）と findings[] を持ち、各 finding は
 file / severity（critical|high|medium|low|nit）/ category（bug|security|design|perf|style）/ message を必須とする。
 開始マーカー: $SENTINEL_BEGIN

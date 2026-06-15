@@ -25,7 +25,7 @@ xrev のフェーズと進捗。詳細な設計は [architecture.md](architectur
 - [x] マーケットプレイス配布対応（同一リポジトリ兼用 `marketplace.json`、`/plugin` で導入可能）
 - [x] GitHub `naokami3/xrev` へ push 済み
 
-## フェーズ 4: 実機検証 🟡 進行中
+## フェーズ 4: 実機検証 ✅ 完了
 
 - [x] cmux ペイン内での配管検証（接続 preflight）
 - [x] 宛先解決（`tree --all`、スピナー等の装飾タイトルの正規化）
@@ -33,11 +33,13 @@ xrev のフェーズと進捗。詳細な設計は [architecture.md](architectur
 - [x] 応答検出（新着の妥当 JSON ブロック方式）
 - [x] `review-loop` の decision 分岐（approve → converged / request_changes(high) → continue）
 - [x] 実機検証で判明した不具合の修正（list 範囲 → tree --all / タイトル装飾の正規化 /
-      多バイト変数展開 / 空送信ガード / エコーの早期終了・古応答の誤検出）
+      多バイト変数展開 / 空送信ガード / エコーの早期終了・古応答の誤検出 /
+      TUI 折り返し＋ガター字下げの de-wrap）
 - [x] ユニットテスト整備（`tests/`、純粋ロジックの回帰防止・cmux 不要）
-- [ ] 実際の Codex 対話セッションでの最終確認
-      - [ ] Codex TUI が複数行プロンプトを途中送信せず受け取れるか
-      - [ ] センチネル囲みのスキーマ準拠 JSON を安定して返すか
+- [x] **実際の Codex 対話セッションでの最終確認**
+      - [x] Codex TUI が複数行プロンプトを受理する（送信成立）
+      - [x] センチネル囲みのスキーマ準拠 JSON を返し、TUI 折り返しを de-wrap して安定取得できる
+      - [x] 送信 → 検出 → parse → decision(continue) まで end-to-end 成立
 
 ## 将来の検討事項
 
