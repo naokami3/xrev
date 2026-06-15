@@ -48,3 +48,24 @@ _stub_fail() { return 12; }
 out="$(printf '%s' "ダミー差分" | XREV_REVIEW_FN=_stub_fail _xrev_review_loop_run 1)"; rc=$?
 assert_rc "transport 失敗で rc=22" 22 "$rc"
 assert_eq "decision=transport_error" "transport_error" "$(printf '%s' "$out" | json_get decision)"
+
+# ── _format_decision（純粋）: 異常系で壊れず既定値の決定JSONを出す ──
+# raw も parsed も壊れている（transport_error/invalid 相当）→ 既定値で整形できる
+out="$(_format_decision transport_error 1 5 "" "")"
+assert_eq "空 raw/parsed でも decision を保持" "transport_error" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "空時 blockers 既定 0" "0" "$(printf '%s' "$out" | json_get blockers)"
+assert_eq "空時 verdict は null" "null" "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["verdict"]))')"
+
+# 壊れた JSON 文字列を渡しても例外で死なず既定にフォールバック
+out="$(_format_decision invalid 2 5 "これはJSONでない" "これも壊れている")"
+assert_eq "壊れた raw でも decision=invalid" "invalid" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "壊れた parsed でも blockers=0" "0" "$(printf '%s' "$out" | json_get blockers)"
+assert_eq "raw_review は渡した生文字列を保持" "これはJSONでない" "$(printf '%s' "$out" | json_get raw_review)"
+
+# 正常: parsed の counts/blockers と raw の findings を決定JSONに反映
+raw='{"verdict":"request_changes","findings":[{"file":"a","severity":"high","category":"bug","message":"m"}],"summary":"要約"}'
+parsed='{"valid":true,"verdict":"request_changes","counts":{"critical":0,"high":1,"medium":0,"low":0,"nit":0},"blockers":1,"total":1}'
+out="$(_format_decision continue 1 5 "$raw" "$parsed")"
+assert_eq "正常時 blockers を parsed から反映" "1" "$(printf '%s' "$out" | json_get blockers)"
+assert_eq "正常時 summary を raw から反映" "要約" "$(printf '%s' "$out" | json_get summary)"
+assert_eq "正常時 findings を raw から反映" "a" "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["findings"][0]["file"])')"

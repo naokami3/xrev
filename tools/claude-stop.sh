@@ -25,7 +25,8 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   [ -z "$changes" ] && exit 0   # コード変更なし → 何もしない
 fi
 
-out="$(bash "$ROOT/tools/verify.sh" 2>&1)"; rc=$?
+# 検証コマンドは XREV_VERIFY_CMD で差し替え可能（テストでスタブを注入するため）。
+out="$(bash "${XREV_VERIFY_CMD:-$ROOT/tools/verify.sh}" 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] && exit 0
 
 # テスト/検証が失敗

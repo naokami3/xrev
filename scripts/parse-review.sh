@@ -64,6 +64,7 @@ if not isinstance(findings, list):
     fail("findings が配列でない")
 
 levels = ["critical", "high", "medium", "low", "nit"]
+categories = ["bug", "security", "design", "perf", "style"]
 counts = {lv: 0 for lv in levels}
 for i, f in enumerate(findings):
     if not isinstance(f, dict):
@@ -71,10 +72,21 @@ for i, f in enumerate(findings):
     sev = f.get("severity")
     if sev not in counts:
         fail("findings[%d].severity が不正: %r" % (i, sev))
-    # 必須フィールドの最低限チェック（file/category/message）
+    # 必須フィールドの存在チェック（file/category/message）
     for req in ("file", "category", "message"):
         if req not in f:
             fail("findings[%d] に必須フィールド %s が無い" % (i, req))
+    # 型・enum チェック（review-schema.json 準拠）
+    if not isinstance(f.get("file"), str):
+        fail("findings[%d].file が文字列でない" % i)
+    if not isinstance(f.get("message"), str):
+        fail("findings[%d].message が文字列でない" % i)
+    if f.get("category") not in categories:
+        fail("findings[%d].category が不正: %r" % (i, f.get("category")))
+    if "line" in f and not isinstance(f.get("line"), int):
+        fail("findings[%d].line が整数でない" % i)
+    if "suggested_fix" in f and not isinstance(f.get("suggested_fix"), str):
+        fail("findings[%d].suggested_fix が文字列でない" % i)
     counts[sev] += 1
 
 blockers = sum(counts[s] for s in counts if s in blockers_set)

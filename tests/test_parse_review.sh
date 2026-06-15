@@ -39,6 +39,34 @@ assert_rc "必須フィールド欠落は rc=1" 1 "$rc"
 out="$(printf '%s' '{"verdict":"request_changes","findings":[{"file":"a","severity":"blocker","category":"bug","message":"x"}]}' | "$PR")"; rc=$?
 assert_rc "severity 不正は rc=1" 1 "$rc"
 
+# category enum 違反 → valid=false（schema 準拠の strict 化）
+out="$(printf '%s' '{"verdict":"request_changes","findings":[{"file":"a","severity":"high","category":"typo","message":"x"}]}' | "$PR")"; rc=$?
+assert_rc "category enum 違反は rc=1" 1 "$rc"
+
+# file が非文字列 → valid=false
+out="$(printf '%s' '{"verdict":"request_changes","findings":[{"file":123,"severity":"high","category":"bug","message":"x"}]}' | "$PR")"; rc=$?
+assert_rc "file が非文字列は rc=1" 1 "$rc"
+
+# message が非文字列 → valid=false
+out="$(printf '%s' '{"verdict":"request_changes","findings":[{"file":"a","severity":"high","category":"bug","message":42}]}' | "$PR")"; rc=$?
+assert_rc "message が非文字列は rc=1" 1 "$rc"
+
+# line が整数でない → valid=false
+out="$(printf '%s' '{"verdict":"request_changes","findings":[{"file":"a","line":"3","severity":"high","category":"bug","message":"x"}]}' | "$PR")"; rc=$?
+assert_rc "line が非整数は rc=1" 1 "$rc"
+
+# findings が配列でない → valid=false
+out="$(printf '%s' '{"verdict":"approve","findings":{}}' | "$PR")"; rc=$?
+assert_rc "findings が非配列は rc=1" 1 "$rc"
+
+# findings 要素が object でない → valid=false
+out="$(printf '%s' '{"verdict":"request_changes","findings":["x"]}' | "$PR")"; rc=$?
+assert_rc "findings 要素が非objectは rc=1" 1 "$rc"
+
+# 任意項目 line/suggested_fix が正しい型なら通る
+out="$(printf '%s' '{"verdict":"request_changes","findings":[{"file":"a","line":3,"severity":"high","category":"bug","message":"x","suggested_fix":"y"}]}' | "$PR")"; rc=$?
+assert_rc "正しい型の line/suggested_fix は rc=0" 0 "$rc"
+
 # blocker 集合は config 依存: severity_blockers を medium だけにすると medium が blocker になる
 tmpcfg="$(mktemp)"; python3 -c 'import json;d=json.load(open("'"$DEFAULT_CONFIG"'"));d["severity_blockers"]=["medium"];json.dump(d,open("'"$tmpcfg"'","w"))'
 out="$(printf '%s' "$payload" | XREV_CONFIG="$tmpcfg" "$PR")"

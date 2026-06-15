@@ -50,3 +50,18 @@ assert_eq "返却JSONがパース可能で verdict を持つ" "request_changes" 
 # 折り返しで割れた文字列が復元される（改行とガターが除去される）
 assert_contains "折り返し文字列が連結復元される" \
   "$(printf '%s' "$out" | tail -n +2)" "途中で折り返されてガター字下げ"
+
+# 8) 開始マーカーのみで終了マーカーが無い（応答が途中）→ 0 件
+assert_eq "END 欠落のブロックは未完成として 0 件" "0" \
+  "$(_scan_review_blocks "$B"$'\n{"verdict":"approve","findings":[]}\nまだ続いている' | head -1)"
+
+# 9) verdict だけ持つ JSON（findings 欠落）→ scan は本物扱い(1件)するが…
+out="$(_scan_review_blocks "$B"$'\n{"verdict":"approve"}\n'"$E")"
+assert_eq "verdict のみでも scan は 1 件（防御は下流の parse-review が担う）" "1" "$(printf '%s' "$out" | head -1)"
+# …下流の parse-review に渡すと findings 非配列で invalid になる（多層防御）
+printf '%s' "$out" | tail -n +2 | XREV_CONFIG="$DEFAULT_CONFIG" "$SCRIPTS/parse-review.sh" >/dev/null 2>&1
+assert_rc "verdict のみは parse-review が弾く(rc1)" 1 "$?"
+
+# 10) 複数の有効ブロック混在 → 件数を正しく数え最後を返す（4/5 の補強：3 件）
+multi="$B"$'\n{"verdict":"approve","findings":[]}\n'"$E"$'\n--\n'"$B"$'\n{"verdict":"request_changes","findings":[]}\n'"$E"$'\n--\n'"$B"$'\n{"verdict":"approve","findings":[]}\n'"$E"
+assert_eq "有効ブロック 3 件を数える" "3" "$(_scan_review_blocks "$multi" | head -1)"
