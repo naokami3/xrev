@@ -50,7 +50,7 @@ assert_contains "本文中の <XREV-NL> は退避される" "$out" "AXREVQnlB"
 assert_eq "散文は plain" "plain" "$(_detect_content_type 'これは設計の説明文です')"
 assert_eq "hunk ヘッダがあれば unified_diff" "unified_diff" "$(_detect_content_type "$(printf '@@ -1 +1 @@\n-a\n+b')")"
 assert_eq "diff --git も unified_diff" "unified_diff" "$(_detect_content_type "$(printf 'diff --git a b\n+x')")"
-assert_eq "先頭が箇条書きのハイフンだけなら plain（誤判定しない）" "plain" "$(_detect_content_type "$(printf '- 項目1\n- 項目2')")"
+assert_eq "先頭が箇条書きのハイフンだけなら plain（誤判定しない）" "plain" "$(_detect_content_type "$(printf -- '- 項目1\n- 項目2')")"
 assert_eq "コードフェンスを含むと code" "code" "$(_detect_content_type "$(printf '説明\n```python\nx=1\n```')")"
 
 # ── submit 待機の長さ比例 ──
