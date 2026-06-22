@@ -12,8 +12,12 @@
 #   2) codex を exec で起動する（このシェルを codex に置き換える＝サーフェス直下プロセスが codex 単独になり、
 #      Phase1 の宛先解決＋送信ゲート（同一WS・実tty・直下=codex のプロセス証明）が確実に通る）。
 #
-# 【なぜ「実ターミナル内」か】cmux のエージェント統合パネル（--type agent-session）は PTY を持たず
-#   read-screen 不可なので xrev の transport では使えない。必ず通常のシェル端末で起動すること。
+# 【なぜ「実ターミナル内」か】cmux のエージェント統合パネル（--type agent-session）は xrev の宛先解決の
+#   契約外。必ず通常のシェル端末で起動すること。
+#
+# 【ensure-reviewer との関係】これは「ユーザーが既に開いた端末をその場で reviewer にする」手動経路。
+#   primary が自分のWSにペインを新規生成する自動経路は `transport.sh ensure-reviewer`。タイトル・codex バイナリ
+#   解決は transport.sh の同じ設定（REVIEWER_PANE_TITLE / XREV_CODEX_BIN）を共有し、仕様の乖離を避ける。
 #
 set -uo pipefail
 

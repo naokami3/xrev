@@ -71,6 +71,11 @@ xrev/
   `codex` か、`exit 17`）。詳細・終了コード(14-17)は [`../references/protocol.md`](../references/protocol.md)。
 - **ループ安全弁(round_state)**: review-loop が `round_state{iter,transport_attempts,reference_fallbacks}` を出し、
   primary が次回へ渡す。通算 transport 上限超・iter 巻戻し・状態不正は送信前に `escalate`(fail closed)。
+- **reviewer 自動生成(Phase1c)**: `transport.sh ensure-reviewer` が「同一WSに使える reviewer があれば採用・無ければ
+  1枚だけ生成」する(冪等)。生成は caller の WS を明示した `new-pane --type terminal` ＋ 所有 surface UUID 固定 ＋
+  `exec codex` ＋ read-screen probe 起動確認。競合は ${TMPDIR} の mkdir ロックで直列化(回収しない=stale レース排除、
+  競合期限切れは exit20)。既定 `reviewer_autocreate=ask`。インストール利用者がスクリプトのパスを知らずとも reviewer が
+  用意される。
 - **参照モード(Phase2)**: `reviewer_reads_workspace` かつ同一WS解決時のみ、diff 本文の代わりにファイル参照を送り、
   reviewer 取得 diff の**内容ハッシュ一致**を採用前に検証する（不一致は `reference_unverified`→inline 再試行）。
   別WS/別worktreeの誤レビューはハッシュ不一致で自動的に弾く。詳細は [`../references/protocol.md`](../references/protocol.md)。

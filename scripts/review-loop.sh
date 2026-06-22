@@ -139,7 +139,8 @@ except Exception:
 REASONS = {
     3: "cmux_unavailable", 10: "resolve_failed", 11: "send_failed", 12: "timeout",
     13: "truncated", 14: "non_terminal", 15: "ws_mismatch", 16: "ambiguous",
-    17: "process_mismatch", 30: "cmux_not_found", 31: "not_in_pane",
+    17: "process_mismatch", 19: "autocreate_failed", 20: "reviewer_contention",
+    30: "cmux_not_found", 31: "not_in_pane",
 }
 out = {
     "decision": decision,

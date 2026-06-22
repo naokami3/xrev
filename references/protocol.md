@@ -122,7 +122,7 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 `transport_error` の決定 JSON には `transport_exit_code`（transport の生終了コード）と `transport_reason`
 （安定文字列）を含める。外部 exit は 22 のままだが、primary はこの reason で利用者向け修正案を機械的に選べる:
 `cmux_unavailable`/`resolve_failed`/`send_failed`/`timeout`/`truncated`/`non_terminal`/`ws_mismatch`/
-`ambiguous`/`process_mismatch`/`cmux_not_found`/`not_in_pane`。
+`ambiguous`/`process_mismatch`/`autocreate_failed`/`reviewer_contention`/`cmux_not_found`/`not_in_pane`。
 
 **ループ安全弁（round_state・Phase1b）**: review-loop は決定 JSON に `round_state`（`{iter, transport_attempts}`）
 を含める。primary は**この round_state を次回呼び出しの `XREV_ROUND_STATE`(JSON) にそのまま渡す契約**。
@@ -151,6 +151,9 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | 15   | ワークスペース不整合（caller WS 特定不能 / 解決後に WS が変化 / 明示が別WS） |
 | 16   | 同一WS内で reviewer タイトルが複数一致（曖昧） |
 | 17   | プロセス証明失敗（対象 surface の直下プロセスが許可名でない / top 取得不可） |
+| 18   | 参照モードなのに同一WS解決でない（reference モードを拒否し inline へ切替を促す） |
+| 19   | reviewer 自動生成は試みたが codex の起動を確認できなかった（autocreate_failed） |
+| 20   | reviewer 生成の競合で期限切れ（別 primary が生成中 or 残留ロック→人間。reviewer_contention） |
 | 30   | cmux CLI が見つからない |
 | 31   | cmux 接続不可（preflight 失敗・ペイン外実行） |
 
@@ -171,6 +174,8 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | `adr_dir` | `docs/adr` | ADR の出力ディレクトリ（相対は対象リポジトリ基準 / 絶対パス可） |
 | `transport` | `cmux` | 配管実装の選択（将来の差し替え点） |
 | `reviewer_process` | `codex` | 送信前プロセス証明で対象 surface の直下に在るべきプロセス名 |
+| `reviewer_autocreate` | `ask` | reviewer ペインの自動生成方針。`ask`(スキルが一拍確認で確認後生成)/`auto`(無確認で生成)/`off`(生成せず案内) |
+| `reviewer_create_timeout_seconds` | `30` | 自動生成時の codex 起動確認・競合待ちの上限秒 |
 | `allow_global_resolve` | `false` | `CMUX_SURFACE_ID` 未注入時のグローバル解決を許すか（危険・opt-in） |
 | `allow_cross_ws` | `false` | 明示サーフェスが呼び出し元と別WSでも送信を許すか（危険・opt-in） |
 | `severity_blockers` | `["critical","high"]` | 収束を妨げる severity |
@@ -189,7 +194,8 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 `XREV_RESPONSE_TIMEOUT_SECONDS`, `XREV_RESPONSE_POLL_SECONDS`,
 `XREV_REVIEWER_PROCESS`, `XREV_ALLOW_GLOBAL_RESOLVE`, `XREV_ALLOW_CROSS_WS`,
 `XREV_MAX_TRANSPORT_ATTEMPTS`, `XREV_ROUND_STATE`, `XREV_CODEX_BIN`,
-`XREV_REFERENCE_MODE`, `XREV_EXPECT_DIFF_HASH`, `XREV_EXPECT_HEAD`, `XREV_MAX_REFERENCE_FALLBACKS`。
+`XREV_REFERENCE_MODE`, `XREV_EXPECT_DIFF_HASH`, `XREV_EXPECT_HEAD`, `XREV_MAX_REFERENCE_FALLBACKS`,
+`XREV_REVIEWER_AUTOCREATE`, `XREV_REVIEWER_CREATE_TIMEOUT_SECONDS`。
 `XREV_CONTENT_TYPE`/`XREV_ROUND_ID` は通常自動決定で、テスト・デバッグ時のみ明示する。
 
 ### 送信の堅牢化（実機知見）
@@ -199,6 +205,26 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 長文も成功する）。そのため `_cmux_send_line` は **送信前に入力欄をクリア（ctrl-u/backspace）し、
 失敗時は待って再試行**する（既定 5 回・`XREV_SEND_RETRIES`）。残留が混入したまま送ると prompt が
 壊れるため、クリアと、応答検出側のペースト文字数照合（切り詰め検出）で二重に守る。
+
+### reviewer ペインの自動生成（Phase1c: create-if-missing・冪等）
+
+`transport.sh ensure-reviewer` は「同一WSに使える reviewer があれば採用、無ければ1枚だけ生成」する（冪等）。
+マーケット導入ユーザーがスクリプトのパスを知らなくても、何も手実行せず reviewer が用意されることを狙う。
+設計は 4 ラウンドのクロスレビューで収束。
+
+- **分類**: resolve＋probe で `present`/`absent`/`ambiguous`(16)/`non_terminal`(14)/`process_mismatch`(17) を判別。
+  既存が**壊れ(14)/曖昧(16)/別物(17)**のときは**作り直さず人間へ**（誤って二重生成しない）。
+- **生成は absent のときだけ**: caller の WS UUID を明示して `cmux new-pane --type terminal --workspace <WS>` で生成し、
+  **new-pane が返した surface UUID を所有物に固定**（title は一意でないので生成判定に使わない）→ `rename-tab` で
+  規約タイトル → `send 'exec <shell-safe quoted codex>'` → read-screen probe 成功＋直下=codex で起動確認（上限超は 19）。
+- **競合の直列化**: WS UUID 鍵の `mkdir` ロック（${TMPDIR}/xrev-reviewer-<wsuuid>.lock・**リポジトリには作らない**）を
+  原子取得。**ロックは回収しない**（stale 回収レースを構造的に排除）。取れない側は**奪わず** deadline まで
+  read+codex 確認済みの present を待ち、期限切れは `exit 20`（残留ロックは案内に従い手動削除）。これで複数 primary
+  同時実行でも「1枚だけ生成・他は採用」へ収束する。
+- **モード**: `reviewer_autocreate` = `ask`(既定)/`auto`/`off`。`ask` はスキルが一拍確認で「作成しますか？」を確認して
+  から `auto` 相当で呼ぶ（ペイン生成はレイアウトを変える副作用のため暴発させない）。`off` は生成せず案内のみ。
+- 手動経路 `scripts/start-reviewer.sh`（既に開いた端末をその場で reviewer にする）とはタイトル・codex バイナリ解決を
+  共有し、仕様の乖離を避ける。
 
 ### 参照モード（Phase2: コンテキスト削減・diff 本文を送らない）
 

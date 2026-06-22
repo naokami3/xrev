@@ -12,6 +12,8 @@
   "adr_dir": "docs/adr",
   "transport": "cmux",
   "reviewer_process": "codex",
+  "reviewer_autocreate": "ask",
+  "reviewer_create_timeout_seconds": 30,
   "allow_global_resolve": false,
   "allow_cross_ws": false,
   "severity_blockers": ["critical", "high"],

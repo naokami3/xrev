@@ -60,6 +60,10 @@ REVIEWER_PROCESS="${XREV_REVIEWER_PROCESS:-$(_cfg reviewer_process 'codex')}"
 # 安全側既定の opt-in。CMUX_SURFACE_ID 未注入時のみグローバル解決を許す / 明示サーフェスの別WS送信を許す。
 ALLOW_GLOBAL_RESOLVE="${XREV_ALLOW_GLOBAL_RESOLVE:-$(_cfg allow_global_resolve 'false')}"
 ALLOW_CROSS_WS="${XREV_ALLOW_CROSS_WS:-$(_cfg allow_cross_ws 'false')}"
+# reviewer ペインの自動生成（create-if-missing）。ask(既定)/auto/off。生成の起動確認・競合待ちの上限秒。
+REVIEWER_AUTOCREATE="${XREV_REVIEWER_AUTOCREATE:-$(_cfg reviewer_autocreate 'ask')}"
+CREATE_TIMEOUT="${XREV_REVIEWER_CREATE_TIMEOUT_SECONDS:-$(_cfg reviewer_create_timeout_seconds 30)}"
+[[ "$CREATE_TIMEOUT" =~ ^[0-9]+$ ]] || CREATE_TIMEOUT=30
 READ_LINES="${XREV_READ_SCREEN_LINES:-$(_cfg read_screen_lines 400)}"
 SETTLE_SECS="${XREV_SEND_SETTLE_SECONDS:-$(_cfg send_settle_seconds 2)}"
 RESP_TIMEOUT="${XREV_RESPONSE_TIMEOUT_SECONDS:-$(_cfg response_timeout_seconds 180)}"
@@ -656,6 +660,156 @@ print("ok" if mark in dw else "unknown")
 ' <<<"$screen"
 }
 
+# ── Phase1c: reviewer ペインの create-if-missing 自動生成（@xrev 承認設計）───────────
+#
+# 設計（4ラウンドのクロスレビューで収束）の要点:
+#   - 冪等: 同一WSに使える reviewer があれば採用、無ければ1枚だけ生成。
+#   - 競合は WS UUID 鍵の mkdir ロック（原子取得）で直列化。ロックは**回収しない**（stale 回収レースを構造的に排除）。
+#     取れない側は奪わず deadline まで present を待ち、期限切れは exit20 で人間へ（残留ロックは案内に従い手動削除）。
+#   - 生成所有物は new-pane が返した surface UUID に固定（title は一意でないので生成判定に使わない）。
+#   - read/send は workspace+surface UUID 指定（実機修正）。read-screen probe 成功＋直下=codex で起動確認。
+
+# シェルに渡す値を単一引数として安全にクォート（XREV_CODEX_BIN 注入対策）。printf %q は shell-safe。
+_xrev_shquote() { printf '%q' "$1"; }
+
+# 呼び出し元(CMUX_SURFACE_ID)の所属ワークスペース UUID を返す。
+_xrev_caller_ws() {
+  [[ -n "${CMUX_SURFACE_ID:-}" ]] || return 1
+  local tree loc
+  tree="$(_cmux_tree_uuids)"; [[ -n "$tree" ]] || return 1
+  loc="$(XREV_LISTING="$tree" _locate_surface "$CMUX_SURFACE_ID")" || return 1
+  printf '%s' "$(printf '%s' "$loc" | cut -f3)"
+}
+
+# 同一WSの reviewer の状態を分類する（_cmux_resolve_surface ＋ probe）。
+#   stdout: present|absent|ambiguous|non_terminal|process_mismatch|ws_error|transient
+#   exit:   0(present) / 10(absent) / 16(ambiguous) / 14(non_terminal) / 17(process_mismatch) / 15(ws_error) / 1(transient)
+# present のときグローバル _XREV_RES_* に解決結果が入る。
+_xrev_classify_reviewer() {
+  _XREV_RES_REF=""
+  _cmux_resolve_surface >/dev/null; local rc=$?
+  case "$rc" in
+    0) : ;;
+    10) printf 'absent'; return 10 ;;
+    16) printf 'ambiguous'; return 16 ;;
+    15) printf 'ws_error'; return 15 ;;
+    # 重要: absent(10)以外の解決失敗(tree取得不能 exit3 等)を absent に正規化しない。
+    # 「不在を証明できない」障害で create-if-missing を発火させる fail-open を防ぐ。
+    *)  printf 'transient'; return 1 ;;
+  esac
+  local term; term="$(_probe_terminal_usable "$_XREV_RES_REF")"
+  case "$term" in
+    usable) ;;
+    non_terminal) printf 'non_terminal'; return 14 ;;
+    *) printf 'transient'; return 1 ;;   # gone/transient は過渡。待機側で再評価
+  esac
+  if _verify_reviewer_process "$_XREV_RES_REF"; then
+    printf 'present'; return 0
+  fi
+  printf 'process_mismatch'; return 17
+}
+
+# ロックパス（TMPDIR 配下・WS UUID 鍵。リポジトリには絶対に作らない）。
+_xrev_lock_path() {
+  local ws="$1" base safe
+  base="${TMPDIR:-/tmp}"; base="${base%/}"
+  safe="$(printf '%s' "$ws" | tr -c 'A-Za-z0-9' '_')"
+  printf '%s/xrev-reviewer-%s.lock' "$base" "$safe"
+}
+
+# 生成本体: caller WS に terminal ペインを作り、所有 surface UUID を固定して codex を起動・確認する。
+# 成功で _XREV_RES_* に生成結果を入れて 0、起動確認失敗で 19。
+_xrev_create_reviewer() {
+  local ws="$1" codex="${XREV_CODEX_BIN:-codex}"
+  command -v "$codex" >/dev/null 2>&1 || { _log "codex バイナリ '$codex' が見つかりません（XREV_CODEX_BIN で指定可）。"; return 19; }
+  local out nrc ref
+  # new-pane の rc を確認し、成功時の stdout のみから surface を抽出する（失敗メッセージの誤抽出を防ぐ）。
+  out="$(_cmux new-pane --type terminal --workspace "$ws" --focus false 2>/dev/null)"; nrc=$?
+  (( nrc == 0 )) || { _log "reviewer ペインの生成(new-pane)に失敗しました（rc=$nrc）。"; return 19; }
+  ref="$(printf '%s' "$out" | grep -oE 'surface:[0-9]+' | head -1)"
+  [[ -n "$ref" ]] || { _log "new-pane 出力から surface を特定できません: $out"; return 19; }
+  # 生成 surface の UUID を tree から固定（＝所有物。以後この UUID にだけ作用する）。
+  local tree loc sf
+  tree="$(_cmux_tree_uuids)"
+  loc="$(XREV_LISTING="$tree" _locate_surface "$ref")" || { _log "生成した surface($ref)を特定できません。"; return 19; }
+  sf="$(printf '%s' "$loc" | cut -f2)"
+  _XREV_RES_REF="$ref"; _XREV_RES_UUID="$sf"; _XREV_RES_WS="$ws"; _XREV_RES_PATH="created"; _XREV_RES_SAMEWS=1
+  _cmux rename-tab --surface "$sf" "$REVIEWER_PANE_TITLE" >/dev/null 2>&1 || true
+  # codex を exec で起動（shell-safe にクォート）。
+  _cmux send --workspace "$ws" --surface "$sf" "exec $(_xrev_shquote "$codex")" >/dev/null 2>&1
+  _cmux send-key --workspace "$ws" --surface "$sf" enter >/dev/null 2>&1
+  # 起動確認（同一試行内で read+top）。所有 UUID にだけ作用。
+  local deadline=$(( SECONDS + CREATE_TIMEOUT )) term
+  while (( SECONDS < deadline )); do
+    _xrev_sleep 1
+    term="$(_probe_terminal_usable "$_XREV_RES_REF")"
+    if [[ "$term" == "usable" ]] && _verify_reviewer_process "$_XREV_RES_REF"; then
+      _log "reviewer を生成しました（surface=$ref, title='$REVIEWER_PANE_TITLE'）。"
+      return 0
+    fi
+  done
+  _log "reviewer 生成: codex の起動を確認できませんでした（surface uuid=$_XREV_RES_UUID）。"
+  return 19
+}
+
+# 公開: 同一WSの reviewer を保証する（あれば採用・無ければ生成）。stdout に採用 surface ref。
+# exit: 0 / 10(absent かつ autocreate=off) / 14/16/17(既存が壊れ/曖昧/別物→人間) / 15(ws不明) /
+#       19(生成したが起動確認失敗) / 20(競合で期限切れ→人間)。
+xrev_ensure_reviewer() {
+  _cmux_preflight || return $?
+  # 注意: classify は _XREV_RES_* グローバルをセットするため $() で捕捉しない（サブシェルで失われる）。
+  local rc
+  _xrev_classify_reviewer >/dev/null; rc=$?
+  case "$rc" in
+    0)  printf '%s' "$_XREV_RES_REF"; return 0 ;;
+    10) : ;;  # absent → 生成判断へ
+    16) _log "同一WSに reviewer が複数あり曖昧です。作成せず確認してください。"; return 16 ;;
+    14) _log "同一WSの reviewer が実ターミナルでありません（壊れ）。作成せず確認してください。"; return 14 ;;
+    17) _log "同一WSの reviewer の直下プロセスが '$REVIEWER_PROCESS' ではありません。作成せず確認してください。"; return 17 ;;
+    15) _log "呼び出し元のワークスペースを特定できません（cmux ペイン内で実行してください）。"; return 15 ;;
+    # 一時障害(tree取得不能等)は「不在を証明できない」ので生成しない。再試行/人間判断に委ねる。
+    *)  _log "reviewer の状態を確認できませんでした（一時障害）。生成せず中止します。"; return 11 ;;
+  esac
+  if [[ "$REVIEWER_AUTOCREATE" == "off" ]]; then
+    _log "reviewer が見つかりません（autocreate=off）。reviewer 用の codex ペインを用意してください。"
+    return 10
+  fi
+  local ws; ws="$(_xrev_caller_ws)" || { _log "呼び出し元のワークスペースを特定できません。"; return 15; }
+  local lock; lock="$(_xrev_lock_path "$ws")"
+  if mkdir "$lock" 2>/dev/null; then
+    _XREV_LOCK="$lock"
+    printf '%s' "$$" > "$lock/pid" 2>/dev/null || true
+    trap '[[ -n "${_XREV_LOCK:-}" ]] && rm -rf "$_XREV_LOCK" 2>/dev/null' EXIT INT TERM
+    # ロック下で再確認（ダブルチェック）。生成するのは **absent(10) のときだけ**。
+    # この間に他/人間が壊れ(14)・曖昧(16)・別物(17)を作っていたら作り直さず返す。一時障害(transient)も生成しない。
+    _xrev_classify_reviewer >/dev/null; rc=$?
+    if (( rc != 10 )); then
+      rm -rf "$lock"; _XREV_LOCK=""; trap - EXIT INT TERM
+      case "$rc" in
+        0)  printf '%s' "$_XREV_RES_REF"; return 0 ;;
+        16|14|17|15) return "$rc" ;;
+        *)  _log "ロック下で reviewer 状態を確認できませんでした（一時障害）。生成せず中止します。"; return 11 ;;
+      esac
+    fi
+    _xrev_create_reviewer "$ws"; rc=$?
+    rm -rf "$lock"; _XREV_LOCK=""; trap - EXIT INT TERM
+    if (( rc == 0 )); then printf '%s' "$_XREV_RES_REF"; return 0; fi
+    return "$rc"
+  fi
+  # 競合: 奪わず deadline まで present（read+codex 確認済み）だけを待つ。
+  local deadline=$(( SECONDS + CREATE_TIMEOUT ))
+  while (( SECONDS < deadline )); do
+    _xrev_sleep "$(( (RANDOM % 2) + 1 ))"
+    _xrev_classify_reviewer >/dev/null; rc=$?
+    if (( rc == 0 )); then printf '%s' "$_XREV_RES_REF"; return 0; fi
+    # absent/transient/non_terminal/process_mismatch/ambiguous は生成中の過渡かもしれないので待つ。
+  done
+  _log "reviewer 生成の競合で期限切れです（別 primary が生成中か、残留ロックの可能性）。"
+  _log "残留ロックなら、このパスのみを安全に解除してください（rm -rf は使わない）:"
+  _log "  rm -f \"$lock/pid\" 2>/dev/null; rmdir \"$lock\" 2>/dev/null"
+  return 20
+}
+
 # ── 公開 API ─────────────────────────────────────────────────────────────────
 
 # xrev_transport_review <payload_text>
@@ -833,6 +987,9 @@ print(json.dumps({
       (( _rc == 0 )) || exit "$_rc"
       [[ -n "$_h" ]] || exit 1
       printf '%s\n' "$_h" ;;
+    ensure-reviewer)
+      # 同一WSの reviewer を保証（あれば採用・無ければ生成）。採用 surface ref を stdout に出す。
+      xrev_ensure_reviewer; exit $? ;;
     review)
       shift
       xrev_transport_review "${1:-テスト payload}" ;;
@@ -844,6 +1001,7 @@ usage:
   transport.sh resolve --json       # 解決結果＋検証状態を JSON で返す（診断契約）
   transport.sh set-title "<title>"  # 呼び出し元タブのタイトルを設定（起動ヘルパ用）
   transport.sh diff-hash [<range>]  # 参照モードの決定論 diff ハッシュ（既定 HEAD）
+  transport.sh ensure-reviewer      # 同一WSの reviewer を保証（あれば採用・無ければ生成）
   transport.sh review "<payload>"   # 1往復だけ送って JSON を受ける
 USAGE
       exit 64 ;;
