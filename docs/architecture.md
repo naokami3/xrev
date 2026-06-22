@@ -63,6 +63,9 @@ xrev/
 - 宛先は **呼び出し元と同一ワークスペースにスコープ**して解決する（`cmux tree --all --json --id-format both`
   を `CMUX_SURFACE_ID` で辿り、同一WS内でタイトル一致する surface を選ぶ）。複数WSに同名 `Review Codex` が
   あっても別WSへ誤配送しない。`active`/`focused` は使わない。役割識別はタイトル一致 or 明示指定のみ。
+- read-screen/send/send-key は **`--workspace <ws_uuid> --surface <surface_uuid>` で指定**する（短縮 ref だと
+  別WS文脈で `Surface is not a terminal` になる実機知見）。`tty` フィールドは読み取り可否の指標ではなく、
+  唯一の受入条件は read-screen probe の成否。
 - 送信前ゲートで誤配送・shell 誤実行を防ぐ: ①送信直前の UUID 同一性・WS 所属の再検証 → ②端末性プリフライト
   （read-screen 可否、`exit 14`）→ ③**プロセス証明**（`cmux top --processes` で対象 surface の直下プロセスが
   `codex` か、`exit 17`）。詳細・終了コード(14-17)は [`../references/protocol.md`](../references/protocol.md)。

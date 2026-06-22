@@ -155,3 +155,12 @@ _CAP=""
 assert_rc "CMUX_SURFACE_ID 無し → rc31(設定不可)" 31 "$rc"
 
 eval "$_orig_cmux_fn"  # _cmux スタブを元に戻す
+
+# ── _xrev_build_addr（read/send の宛先指定。実機修正: workspace+surface UUID で解決）──
+# 短縮 ref だけだと別WS文脈で "Surface is not a terminal" になるため、UUID があれば workspace+surface UUID を使う。
+_XREV_RES_WS="ws-uuid"; _XREV_RES_UUID="sf-uuid"
+_xrev_build_addr "surface:99"
+assert_eq "UUID あり → workspace+surface UUID で指定" "--workspace ws-uuid --surface sf-uuid" "${_XREV_ADDR[*]}"
+_XREV_RES_WS=""; _XREV_RES_UUID=""
+_xrev_build_addr "surface:99"
+assert_eq "UUID なし → 従来 ref で指定(後方互換)" "--surface surface:99" "${_XREV_ADDR[*]}"

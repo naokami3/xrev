@@ -263,6 +263,12 @@ cmux に流さず、reviewer に「自分で diff を取得してレビュー」
 `transport.sh resolve --json` は機械可読の診断契約（`{ok, exit_code, surface_ref, surface_uuid, workspace,
 resolve_path}`）を返す。`resolve_path` は `explicit|same_ws|global`。
 
+**read-screen/send/send-key は `--workspace <workspace_uuid> --surface <surface_uuid>` で指定する（実機知見）**:
+短縮 ref（`surface:N`）や surface UUID 単独だと、呼び出し元と別ワークスペースの文脈で cmux が surface を
+TerminalPanel として解決できず `Surface is not a terminal` を返す（＝ワークスペース文脈が要る）。UUID が取れない
+グローバルフォールバック経路のみ従来の `--surface <ref>` に縮退する。**`tty` フィールドは読み取り可否の指標では
+ない**（シェル統合が報告するメタデータに過ぎない）。読めるかどうかの唯一の受入条件は read-screen probe の成否。
+
 > **参照モード（diff 本文を送らずファイル参照を渡す方式）は別節「参照モード（Phase2）」**を参照。
 > Phase1 の宛先解決＋送信ゲートが前提（同一WS解決時のみ参照モードを許可）。
 

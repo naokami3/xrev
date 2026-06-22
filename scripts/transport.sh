@@ -426,12 +426,27 @@ _cmux_resolve_surface() {
   return 15
 }
 
+# cmux の宛先指定引数を _XREV_ADDR 配列に構築する（実機知見・@xrev/Codex 診断）。
+# read-screen/send/send-key は短縮 ref だけだと「呼び出し元と別ワークスペースの文脈」で surface を
+# TerminalPanel として解決できず "Surface is not a terminal" になる。**workspace UUID + surface UUID** で
+# 指定すると確実に解決できる（実機確認: ref/surfaceUUID 単独は失敗、workspace+surfaceUUID は成功）。
+# UUID が無い経路（global フォールバック・テスト）は従来どおり ref を使う。
+_xrev_build_addr() {
+  local fallback_ref="$1"
+  if [[ -n "${_XREV_RES_WS:-}" && -n "${_XREV_RES_UUID:-}" ]]; then
+    _XREV_ADDR=(--workspace "$_XREV_RES_WS" --surface "$_XREV_RES_UUID")
+  else
+    _XREV_ADDR=(--surface "$fallback_ref")
+  fi
+}
+
 # read-screen の成否で端末性を判定（cmux 依存）。端末でないこと(=14)と宛先消失(=15)を分離する。
-#   usable: 成功（空でも可） / non_terminal: "not a terminal"（恒久・実ターミナルでない）/
-#   gone: "not found"（送信直前に surface 消失＝同一性喪失） / transient: 一時失敗
+# 重要: tty フィールドは見ない（PTY 判定として不正確。read-screen の成否が唯一の受入条件）。
+#   usable: 成功（空でも可） / non_terminal: "not a terminal" / gone: "not found"(消失) / transient: 一時失敗
 _probe_terminal_usable() {
   local surface="$1" err rc
-  err="$(_cmux read-screen --surface "$surface" --lines 1 2>&1 1>/dev/null)"; rc=$?
+  _xrev_build_addr "$surface"
+  err="$(_cmux read-screen "${_XREV_ADDR[@]}" --lines 1 2>&1 1>/dev/null)"; rc=$?
   if (( rc == 0 )); then printf 'usable'; return 0; fi
   if printf '%s' "$err" | grep -qiE 'not a terminal'; then printf 'non_terminal'; return 0; fi
   if printf '%s' "$err" | grep -qiE 'not[_ ]?found'; then printf 'gone'; return 0; fi
@@ -458,13 +473,15 @@ _verify_reviewer_process() {
 # reviewer ペインの最終確定入力（プロンプト送信）。本文（1物理行）を送り終えたあとに呼ぶ。
 _cmux_submit() {
   local surface="$1"
-  _cmux send-key --surface "$surface" enter >/dev/null 2>&1 || return 7
+  _xrev_build_addr "$surface"
+  _cmux send-key "${_XREV_ADDR[@]}" enter >/dev/null 2>&1 || return 7
 }
 
 # reviewer ペインの画面を読み取る（スクロールバック込み）。
 _cmux_read_screen() {
   local surface="$1"
-  _cmux read-screen --surface "$surface" --scrollback --lines "$READ_LINES" 2>/dev/null
+  _xrev_build_addr "$surface"
+  _cmux read-screen "${_XREV_ADDR[@]}" --scrollback --lines "$READ_LINES" 2>/dev/null
 }
 
 # 画面テキストから「妥当な review JSON ブロック」を走査する。
@@ -596,8 +613,9 @@ _compute_submit_settle() {
 # 生成を中断し得るので使わない（アイドル化はしない=実行中の処理は止めない）。
 _cmux_clear_input() {
   local surface="$1" _i
-  for _i in 1 2 3; do _cmux send-key --surface "$surface" ctrl-u >/dev/null 2>&1 || true; done
-  for _i in 1 2 3 4 5 6; do _cmux send-key --surface "$surface" backspace >/dev/null 2>&1 || true; done
+  _xrev_build_addr "$surface"
+  for _i in 1 2 3; do _cmux send-key "${_XREV_ADDR[@]}" ctrl-u >/dev/null 2>&1 || true; done
+  for _i in 1 2 3 4 5 6; do _cmux send-key "${_XREV_ADDR[@]}" backspace >/dev/null 2>&1 || true; done
 }
 
 # 1物理行を reviewer 入力欄へ送る（確定はしない）。cmux 依存。
@@ -608,8 +626,9 @@ _cmux_clear_input() {
 _cmux_send_line() {
   local surface="$1" line="$2" tries=0 max="${XREV_SEND_RETRIES:-5}"
   _cmux_clear_input "$surface"          # 残留を除去してから送る（混入による prompt 破壊を防ぐ）
+  _xrev_build_addr "$surface"
   while (( tries < max )); do
-    _cmux send --surface "$surface" "$line" >/dev/null 2>&1 && return 0
+    _cmux send "${_XREV_ADDR[@]}" "$line" >/dev/null 2>&1 && return 0
     # 失敗：busy/残留の可能性 → 少し待ち、再度クリアして再試行（busy 解消を待つ）。
     tries=$(( tries + 1 ))
     _xrev_sleep 2
