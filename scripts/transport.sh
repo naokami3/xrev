@@ -329,7 +329,11 @@ _cmux_top_processes() { _cmux top --all --processes --format tsv 2>/dev/null; }
 _cmux_set_title() {
   local title="$1"
   [[ -n "${CMUX_SURFACE_ID:-}" ]] || { _log "CMUX_SURFACE_ID が無いためタイトル設定できません（cmux ペイン内で実行してください）。"; return 31; }
-  _cmux rename-tab --surface "$CMUX_SURFACE_ID" "$title"
+  # rename-tab も workspace 文脈が要る場合がある（短縮 ref/uuid 単独で "Tab not found" になる実機知見）。
+  # 自分のペインのリネームなので CMUX_WORKSPACE_ID が注入されていれば併せて渡す。
+  local addr=(--surface "$CMUX_SURFACE_ID")
+  [[ -n "${CMUX_WORKSPACE_ID:-}" ]] && addr=(--workspace "$CMUX_WORKSPACE_ID" "${addr[@]}")
+  _cmux rename-tab "${addr[@]}" "$title"
 }
 
 # ── 参照モード(Phase2): 決定論的 diff ハッシュ ───────────────────────────────────
@@ -734,8 +738,11 @@ _xrev_create_reviewer() {
   loc="$(XREV_LISTING="$tree" _locate_surface "$ref")" || { _log "生成した surface($ref)を特定できません。"; return 19; }
   sf="$(printf '%s' "$loc" | cut -f2)"
   _XREV_RES_REF="$ref"; _XREV_RES_UUID="$sf"; _XREV_RES_WS="$ws"; _XREV_RES_PATH="created"; _XREV_RES_SAMEWS=1
-  _cmux rename-tab --surface "$sf" "$REVIEWER_PANE_TITLE" >/dev/null 2>&1 || true
   # codex を exec で起動（shell-safe にクォート）。
+  # 【実機知見】タブのリネームは「codex 起動の前」に行うと、codex が起動時に cwd 由来の名前(例 "xrev")で
+  #   タブ名を上書きしてしまい、reviewer_pane_title が定着しない（→ 次回の title 解決が当たらず冪等性が崩れる）。
+  #   そのため rename は**起動確認の後**に行う（post-startup rename は上書きされず定着することを実機確認）。
+  #   また rename-tab も read/send 同様 workspace+surface UUID 指定が必要（短縮 ref/uuid 単独は "Tab not found"）。
   _cmux send --workspace "$ws" --surface "$sf" "exec $(_xrev_shquote "$codex")" >/dev/null 2>&1
   _cmux send-key --workspace "$ws" --surface "$sf" enter >/dev/null 2>&1
   # 起動確認（同一試行内で read+top）。所有 UUID にだけ作用。
@@ -744,6 +751,10 @@ _xrev_create_reviewer() {
     _xrev_sleep 1
     term="$(_probe_terminal_usable "$_XREV_RES_REF")"
     if [[ "$term" == "usable" ]] && _verify_reviewer_process "$_XREV_RES_REF"; then
+      # 起動確認後にリネーム（codex のタブ名上書きを上書きし返して定着させる）。失敗は致命でない
+      # （当該セッションは UUID で操作できる）が、冪等性のため診断ログは残す。
+      _cmux rename-tab --workspace "$ws" --surface "$sf" "$REVIEWER_PANE_TITLE" >/dev/null 2>&1 \
+        || _log "reviewer タブのリネームに失敗しました（title 解決の冪等性に影響しうる。UUID 解決は可能）。"
       _log "reviewer を生成しました（surface=$ref, title='$REVIEWER_PANE_TITLE'）。"
       return 0
     fi

@@ -225,6 +225,10 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
   から `auto` 相当で呼ぶ（ペイン生成はレイアウトを変える副作用のため暴発させない）。`off` は生成せず案内のみ。
 - 手動経路 `scripts/start-reviewer.sh`（既に開いた端末をその場で reviewer にする）とはタイトル・codex バイナリ解決を
   共有し、仕様の乖離を避ける。
+- **タブ名は codex 起動の「後」に設定する（実機知見）**: codex は起動時にタブ名を cwd 由来の名前で上書きするため、
+  起動前に rename しても定着しない。生成は「起動確認 → rename」の順にする。`rename-tab` も read/send 同様
+  `--workspace <ws_uuid> --surface <surface_uuid>` 指定が要る（短縮 ref/uuid 単独は `Tab not found`）。これにより
+  reviewer_pane_title が定着し、次回の title 解決が当たる（create-if-missing の冪等性を保つ）。
 
 ### 参照モード（Phase2: コンテキスト削減・diff 本文を送らない）
 
