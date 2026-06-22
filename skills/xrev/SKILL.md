@@ -138,6 +138,34 @@ loop: 設計フェーズと同じ分岐（converged / continue / escalate / inva
 `continue` のたびに、自分が指摘を反映してコードを編集し、`payload` は**前回からの差分だけ**にして
 `ITER += 1` で再実行する（毎回全文を送らない。Codex 側が履歴を持っている）。
 
+各ラウンドの決定 JSON の `round_state` を**次回の `XREV_ROUND_STATE` にそのまま渡す**（ループ安全弁。3章参照）。
+
+### コンテキスト削減：参照モード（Phase2・reviewer が同一作業ディレクトリを読めるとき）
+
+`reviewer_reads_workspace=true` かつ宛先が**同一WS解決(resolve_path=same_ws)**のときだけ使える。実装フェーズで
+diff 本文を送らず、reviewer に自分で diff を取得させてコンテキストを削減する。設計フェーズは常に inline。
+
+手順（往復の前に。**primary と reviewer は同一コード `transport.sh diff-hash` を使う**＝単一の真実源）:
+
+```bash
+T="${CLAUDE_PLUGIN_ROOT}/scripts/transport.sh"
+RANGE="HEAD"                                  # 未コミット全変更。ブランチは <baseOID>...<headOID>（解決済みOID）
+EXPECT_HASH="$("$T" diff-hash "$RANGE")"      # 期待 diff ハッシュ（単一の真実源）
+EXPECT_HEAD="$(git rev-parse HEAD)"           # 期待 基底 HEAD OID（diff 一致だけでは基底相違を防げないため必須）
+# 参照 payload を組む（diff 本文は入れない）: 実装要約 + 変更ファイル一覧(git diff --name-only) +
+#   reviewer への指示:「自分の作業ツリーで `<Tの絶対パス> diff-hash <RANGE>` を実行し、その出力を
+#   reference_context.diff_hash に、`git rev-parse HEAD` を reference_context.head に、mode:"reference"・
+#   status:"verified" を入れて返す。ファイルは変更しないこと」。
+printf '%s' "$payload" | \
+  XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH="$EXPECT_HASH" XREV_EXPECT_HEAD="$EXPECT_HEAD" \
+  XREV_ROUND_STATE="$prev_round_state" "${CLAUDE_PLUGIN_ROOT}/scripts/review-loop.sh" "$ITER"
+```
+
+分岐に `reference_unverified` が増える: reviewer の reference_context（mode/status/head/diff_hash）が期待と不一致＝別対象を
+見た or 同一WS外、とみなし、**同一 ITER を inline（diff 本文を送る通常方式）で再試行**する（`XREV_REFERENCE_MODE` を
+付けずに再呼び出し）。フォールバックが `max_reference_fallbacks` を超えると `escalate` になるので人間へ。**安定窓**:
+参照 payload 送信〜応答まで作業ツリーを編集しないこと。前提（同一WS・同一worktree）が崩れていれば素直に inline に倒す。
+
 ## 5. 例外時の扱い
 
 - `escalate`（最大反復に到達しても blocker が残る）: **強制的に人間へエスカレーション**。

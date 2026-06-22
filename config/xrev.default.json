@@ -5,6 +5,8 @@
   "keyword": "@xrev",
   "max_iterations": 5,
   "max_transport_attempts": 12,
+  "reviewer_reads_workspace": false,
+  "max_reference_fallbacks": 3,
   "stop_at": "review",
   "adr": false,
   "adr_dir": "docs/adr",

@@ -30,6 +30,17 @@
         },
         "required": ["file", "severity", "category", "message"]
       }
+    },
+    "reference_context": {
+      "description": "参照モード(Phase2)で必須。primary と reviewer が同一 diff を取得したことの同一性検証。これは『同一対象を見た』ことの検証であり、レビューの実行・品質を保証しない（信頼済み reviewer 前提）。inline モードでは省略可。",
+      "type": "object",
+      "properties": {
+        "mode": { "enum": ["inline", "reference"] },
+        "diff_hash": { "description": "reviewer が固定 invocation で取得した diff 生バイト列の sha256。primary の expected と一致したときだけレビューを採用する。", "type": "string" },
+        "head": { "type": "string" },
+        "status": { "enum": ["verified", "mismatch", "unavailable"] },
+        "failure_reason": { "type": "string" }
+      }
     }
   },
   "required": ["verdict", "findings"]

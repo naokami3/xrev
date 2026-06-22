@@ -328,6 +328,34 @@ _cmux_set_title() {
   _cmux rename-tab --surface "$CMUX_SURFACE_ID" "$title"
 }
 
+# ── 参照モード(Phase2): 決定論的 diff ハッシュ ───────────────────────────────────
+#
+# 参照モードでは diff 本文を送らず、reviewer に「自分で diff を取得してレビュー」させる。primary と
+# reviewer が「同一の変更を見ている」ことを、**固定 invocation の diff 生バイト列の sha256** で照合する
+# （パス比較=symlink/submodule に弱い、を避ける。別リポ/別worktreeなら自動で不一致→inline へフォールバック）。
+#
+# 【重要】下の invocation は primary/reviewer が**一字一句同一**に実行すること。非決定性
+# （色/外部diff/textconv/rename/prefix/algorithm/ロケール/設定注入/CRLF/pager）を固定・除去する。
+# range は曖昧さ回避のため**解決済み OID** を渡すのが望ましい（既定 HEAD。ブランチは <baseOID>...<headOID>）。
+#   使い方: hash="$(xrev_diff_hash "$range")"
+# 設定注入の無効化（GIT_CONFIG_KEY_/VALUE_* は GIT_CONFIG_COUNT を unset すると無視される）。
+# system/global/XDG config は GIT_CONFIG_SYSTEM=/dev/null / GIT_CONFIG_GLOBAL=/dev/null / GIT_CONFIG_NOSYSTEM で
+# 明示無効化する（unset だけでは標準の読込を止められないため）。primary/reviewer はこの env ごと一字一句同一に実行。
+# 【単一の真実源】primary も reviewer も **この `transport.sh diff-hash <range>` を実行**して diff_hash を得る
+# （手書き invocation の同期ズレを無くす）。下の DOC は透明性のための表記で、関数と一字一句同一に保つこと。
+XREV_DIFF_HASH_DOC='env -u GIT_EXTERNAL_DIFF -u GIT_PAGER -u GIT_CONFIG -u GIT_CONFIG_COUNT -u GIT_DIFF_OPTS -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 LC_ALL=C git --no-pager -c core.autocrlf=false -c core.quotepath=false -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.renames=false -c diff.external= -c diff.algorithm=myers diff --no-color --no-ext-diff --no-textconv --full-index --binary <range>  | (raw stdout を sha256)'
+xrev_diff_hash() {
+  local range="${1:-HEAD}"
+  # pipefail（本スクリプトで設定済み）により git 失敗時はパイプラインが非ゼロを返す。
+  env -u GIT_EXTERNAL_DIFF -u GIT_PAGER -u GIT_CONFIG -u GIT_CONFIG_COUNT -u GIT_DIFF_OPTS \
+      -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 LC_ALL=C \
+    git --no-pager -c core.autocrlf=false -c core.quotepath=false -c diff.noprefix=false \
+      -c diff.mnemonicPrefix=false -c diff.renames=false -c diff.external= -c diff.algorithm=myers \
+      diff --no-color --no-ext-diff --no-textconv --full-index --binary "$range" 2>/dev/null \
+    | python3 -c 'import sys,hashlib; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+}
+
 # reviewer surface を解決する（同一WSスコープ・fail closed）。
 # 出力(stdout): surface ref。付随情報をグローバルに格納:
 #   _XREV_RES_UUID / _XREV_RES_WS / _XREV_RES_PATH(explicit|same_ws|global)
@@ -630,6 +658,13 @@ xrev_transport_review() {
   surface="$_XREV_RES_REF"
   _log "reviewer surface = ${surface} path=${_XREV_RES_PATH}（title: '${REVIEWER_PANE_TITLE}'）"
 
+  # 参照モード(Phase2)は同一WS解決時のみ許可（別worktree/別repoへの参照依頼=誤レビューを防ぐ機械強制）。
+  # global / cross-WS 明示宛先では参照 payload を送らず、呼び出し側に inline 切替を促す。
+  if [[ "${XREV_REFERENCE_MODE:-}" == "1" && "$_XREV_RES_PATH" != "same_ws" ]]; then
+    _log "参照モードは同一WS解決(same_ws)時のみ許可します（現在 path=${_XREV_RES_PATH}）。inline へ切り替えてください。"
+    return 18
+  fi
+
   # ── 送信前ゲート（誤配送・shell誤実行の防止。@xrev 承認設計）──────────────────
   # (i) UUID 同一性・WS 所属の再検証（uuid を持つ経路 = same_ws / explicit）。
   #     ref再利用・WS移動・差し替え・宛先/呼び出し元の消失をすべて fail closed で弾く（fail-open を作らない）。
@@ -771,6 +806,14 @@ print(json.dumps({
       shift
       [[ -n "${1:-}" ]] || { _log "set-title: タイトルを指定してください"; exit 64; }
       _cmux_set_title "$1" ;;
+    diff-hash)
+      # 参照モードの期待ハッシュを計算する（cmux 不要・git のみ）。primary が expected_diff_hash を得る。
+      # git/hash 失敗は非ゼロで返し、空ハッシュを正常結果として返さない。
+      shift
+      _h="$(xrev_diff_hash "${1:-HEAD}")"; _rc=$?
+      (( _rc == 0 )) || exit "$_rc"
+      [[ -n "$_h" ]] || exit 1
+      printf '%s\n' "$_h" ;;
     review)
       shift
       xrev_transport_review "${1:-テスト payload}" ;;
@@ -781,6 +824,7 @@ usage:
   transport.sh resolve              # reviewer surface の解決のみ確認
   transport.sh resolve --json       # 解決結果＋検証状態を JSON で返す（診断契約）
   transport.sh set-title "<title>"  # 呼び出し元タブのタイトルを設定（起動ヘルパ用）
+  transport.sh diff-hash [<range>]  # 参照モードの決定論 diff ハッシュ（既定 HEAD）
   transport.sh review "<payload>"   # 1往復だけ送って JSON を受ける
 USAGE
       exit 64 ;;

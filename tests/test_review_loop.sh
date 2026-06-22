@@ -138,3 +138,62 @@ for bad in '{"transport_attempts":-0.9,"iter":1}' '{"transport_attempts":1.9,"it
   assert_eq "不正型/範囲は transport を呼ばない: $bad" "0" "$(grep -c . "$_cf2")"
 done
 rm -f "$_cf2"
+
+# ── 参照モード(Phase2): mode/status/head(基底OID)/diff_hash の厳密照合 ──
+# 完全一致する reviewer 応答（mode=reference・status=verified・head=H1・diff_hash=ABC）
+_stub_ref_ok()      { printf '%s' '{"verdict":"approve","findings":[],"reference_context":{"mode":"reference","status":"verified","head":"H1","diff_hash":"ABC"}}'; }
+# diff だけ一致するが基底 HEAD が違う（別コンテキストを読んだ＝採用してはいけない）
+_stub_ref_head_ng() { printf '%s' '{"verdict":"approve","findings":[],"reference_context":{"mode":"reference","status":"verified","head":"H2","diff_hash":"ABC"}}'; }
+# diff_hash 不一致
+_stub_ref_diff_ng() { printf '%s' '{"verdict":"approve","findings":[],"reference_context":{"mode":"reference","status":"verified","head":"H1","diff_hash":"XYZ"}}'; }
+# status 未 verified
+_stub_ref_unver()   { printf '%s' '{"verdict":"approve","findings":[],"reference_context":{"mode":"reference","status":"unavailable","head":"H1","diff_hash":"ABC"}}'; }
+_stub_ref_none()    { printf '%s' '{"verdict":"approve","findings":[]}'; }
+_stub_ref_18()      { return 18; }
+
+# 完全一致 → converged（reference_fallbacks は増えない）
+out="$(printf '%s' "x" | XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH=ABC XREV_EXPECT_HEAD=H1 XREV_REVIEW_FN=_stub_ref_ok _xrev_review_loop_run 1)"
+assert_eq "mode/status/head/diff_hash 全一致 → converged" "converged" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "一致時 reference_fallbacks=0" "0" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["round_state"]["reference_fallbacks"])')"
+
+# diff 一致でも基底 HEAD 不一致 → reference_unverified（基底コンテキスト相違を弾く＝Phase2 の肝）
+out="$(printf '%s' "x" | XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH=ABC XREV_EXPECT_HEAD=H1 XREV_REVIEW_FN=_stub_ref_head_ng _xrev_review_loop_run 1)"; rc=$?
+assert_rc "HEAD 不一致でも rc=0（正常系）" 0 "$rc"
+assert_eq "diff一致でもHEAD不一致 → reference_unverified" "reference_unverified" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "不一致で reference_fallbacks=1" "1" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["round_state"]["reference_fallbacks"])')"
+
+# diff_hash 不一致 → reference_unverified
+out="$(printf '%s' "x" | XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH=ABC XREV_EXPECT_HEAD=H1 XREV_REVIEW_FN=_stub_ref_diff_ng _xrev_review_loop_run 1)"
+assert_eq "diff_hash 不一致 → reference_unverified" "reference_unverified" "$(printf '%s' "$out" | json_get decision)"
+
+# status!=verified → reference_unverified
+out="$(printf '%s' "x" | XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH=ABC XREV_EXPECT_HEAD=H1 XREV_REVIEW_FN=_stub_ref_unver _xrev_review_loop_run 1)"
+assert_eq "status 未verified → reference_unverified" "reference_unverified" "$(printf '%s' "$out" | json_get decision)"
+
+# reference_context 欠落 → reference_unverified
+out="$(printf '%s' "x" | XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH=ABC XREV_EXPECT_HEAD=H1 XREV_REVIEW_FN=_stub_ref_none _xrev_review_loop_run 1)"
+assert_eq "reference_context 欠落 → reference_unverified" "reference_unverified" "$(printf '%s' "$out" | json_get decision)"
+
+# 期待 HEAD 未設定 → reference_unverified（fail closed）
+out="$(printf '%s' "x" | XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH=ABC XREV_REVIEW_FN=_stub_ref_ok _xrev_review_loop_run 1)"
+assert_eq "期待HEAD未設定 → reference_unverified" "reference_unverified" "$(printf '%s' "$out" | json_get decision)"
+
+# transport が同一WS外を拒否(exit18) → reference_unverified（inline へ切替）
+out="$(printf '%s' "x" | XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH=ABC XREV_EXPECT_HEAD=H1 XREV_REVIEW_FN=_stub_ref_18 _xrev_review_loop_run 1)"; rc=$?
+assert_rc "同一WS外拒否(18)でも rc=0" 0 "$rc"
+assert_eq "同一WS外(exit18) → reference_unverified" "reference_unverified" "$(printf '%s' "$out" | json_get decision)"
+
+# フォールバック通算が上限超 → escalate（無限の参照→inline 往復を防ぐ）
+out="$(printf '%s' "x" | XREV_MAX_REFERENCE_FALLBACKS=3 XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH=ABC XREV_EXPECT_HEAD=H1 XREV_ROUND_STATE='{"transport_attempts":1,"iter":1,"reference_fallbacks":3}' XREV_REVIEW_FN=_stub_ref_diff_ng _xrev_review_loop_run 1)"
+assert_eq "fallback 上限超 → escalate" "escalate" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "fallback 上限超の理由 max_reference_fallbacks" "max_reference_fallbacks" "$(printf '%s' "$out" | json_get state_violation)"
+
+# 参照モード OFF（既定）では検証しない（inline は従来どおり）
+out="$(printf '%s' "x" | XREV_REVIEW_FN=_stub_ref_diff_ng _xrev_review_loop_run 1)"
+assert_eq "inline(参照OFF)は検証せず converged" "converged" "$(printf '%s' "$out" | json_get decision)"
+
+# reference_fallbacks も round_state 検証の対象（負値は bad_round_state）
+out="$(printf '%s' "x" | XREV_ROUND_STATE='{"transport_attempts":1,"iter":1,"reference_fallbacks":-1}' XREV_REVIEW_FN=_stub_ref_ok _xrev_review_loop_run 1)"
+assert_eq "負の reference_fallbacks → escalate(bad_round_state)" "bad_round_state" "$(printf '%s' "$out" | json_get state_violation)"

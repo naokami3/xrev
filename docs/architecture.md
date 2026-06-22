@@ -66,6 +66,11 @@ xrev/
 - 送信前ゲートで誤配送・shell 誤実行を防ぐ: ①送信直前の UUID 同一性・WS 所属の再検証 → ②端末性プリフライト
   （read-screen 可否、`exit 14`）→ ③**プロセス証明**（`cmux top --processes` で対象 surface の直下プロセスが
   `codex` か、`exit 17`）。詳細・終了コード(14-17)は [`../references/protocol.md`](../references/protocol.md)。
+- **ループ安全弁(round_state)**: review-loop が `round_state{iter,transport_attempts,reference_fallbacks}` を出し、
+  primary が次回へ渡す。通算 transport 上限超・iter 巻戻し・状態不正は送信前に `escalate`(fail closed)。
+- **参照モード(Phase2)**: `reviewer_reads_workspace` かつ同一WS解決時のみ、diff 本文の代わりにファイル参照を送り、
+  reviewer 取得 diff の**内容ハッシュ一致**を採用前に検証する（不一致は `reference_unverified`→inline 再試行）。
+  別WS/別worktreeの誤レビューはハッシュ不一致で自動的に弾く。詳細は [`../references/protocol.md`](../references/protocol.md)。
 - 接続不可は preflight（ping）で検知し `transport.sh` が `exit 31` を返して明示停止する。
 - `review-loop.sh` の分岐は stdout の JSON の `decision` で行う。exit code は「レビュー完了か」だけ:
   完了系（`converged`/`continue`/`escalate`）=0 / `invalid`=21 / `transport_error`=22

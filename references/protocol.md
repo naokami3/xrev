@@ -114,6 +114,7 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 |-------------------|------|------|
 | `converged`       | 0    | blocker 0 件。収束。 |
 | `continue`        | 0    | blocker 残・上限未満。primary が修正して `ITER+1` で再実行（正常系）。 |
+| `reference_unverified` | 0 | 参照モードで reviewer の diff_hash が期待値と不一致/未取得。レビューを採用せず、primary が**同一 ITER を inline で再試行**（正常系）。通算が `max_reference_fallbacks` 超で `escalate`。 |
 | `escalate`        | 0    | 上限到達でも blocker 残。人間へエスカレーション（レビューは完了）。 |
 | `invalid`         | 21   | reviewer 出力が契約違反（スキーマ不一致 / 壊れた JSON）→ レビュー取得できず。 |
 | `transport_error` | 22   | 送受信失敗（ペイン解決不可・タイムアウト等）→ レビュー取得できず。 |
@@ -163,6 +164,8 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | `keyword` | `@xrev` | 発火キーワード |
 | `max_iterations` | `5` | 往復の安全弁（論理ラウンドの上限） |
 | `max_transport_attempts` | `12` | 通算 transport 試行の上限（論理ラウンドとは別の総量安全弁。超過で escalate） |
+| `reviewer_reads_workspace` | `false` | 参照モード(Phase2)を許可するか。`true` かつ同一WS解決時のみ、diff 本文の代わりにファイル参照を送る |
+| `max_reference_fallbacks` | `3` | 参照→inline フォールバックの通算上限（超過で escalate。無限往復を防ぐ） |
 | `stop_at` | `review` | 到達点（review / commit / pr） |
 | `adr` | `false` | ADR 生成の既定（必要有無） |
 | `adr_dir` | `docs/adr` | ADR の出力ディレクトリ（相対は対象リポジトリ基準 / 絶対パス可） |
@@ -185,7 +188,8 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 `XREV_CHUNK_SIZE`, `XREV_CONTENT_TYPE`, `XREV_ROUND_ID`, `XREV_SEND_RETRIES`,
 `XREV_RESPONSE_TIMEOUT_SECONDS`, `XREV_RESPONSE_POLL_SECONDS`,
 `XREV_REVIEWER_PROCESS`, `XREV_ALLOW_GLOBAL_RESOLVE`, `XREV_ALLOW_CROSS_WS`,
-`XREV_MAX_TRANSPORT_ATTEMPTS`, `XREV_ROUND_STATE`, `XREV_CODEX_BIN`。
+`XREV_MAX_TRANSPORT_ATTEMPTS`, `XREV_ROUND_STATE`, `XREV_CODEX_BIN`,
+`XREV_REFERENCE_MODE`, `XREV_EXPECT_DIFF_HASH`, `XREV_EXPECT_HEAD`, `XREV_MAX_REFERENCE_FALLBACKS`。
 `XREV_CONTENT_TYPE`/`XREV_ROUND_ID` は通常自動決定で、テスト・デバッグ時のみ明示する。
 
 ### 送信の堅牢化（実機知見）
@@ -195,6 +199,38 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 長文も成功する）。そのため `_cmux_send_line` は **送信前に入力欄をクリア（ctrl-u/backspace）し、
 失敗時は待って再試行**する（既定 5 回・`XREV_SEND_RETRIES`）。残留が混入したまま送ると prompt が
 壊れるため、クリアと、応答検出側のペースト文字数照合（切り詰め検出）で二重に守る。
+
+### 参照モード（Phase2: コンテキスト削減・diff 本文を送らない）
+
+`reviewer_reads_workspace=true` かつ**同一WS解決(resolve_path=same_ws)**のときのみ使える。diff 本文を
+cmux に流さず、reviewer に「自分で diff を取得してレビュー」させて送受信・reviewer 双方のコンテキストを削減する。
+別WS/別worktreeの誤レビューは **diff 内容ハッシュの不一致**で自動的に弾き、inline へ落とす。設計は 7 ラウンドの
+クロスレビューで収束。
+
+- **適用は実装フェーズのみ**（設計フェーズはコードが無く常に inline）。
+- **同一性照合 = diff 内容ハッシュ ＋ 基底 OID**（パス比較=symlink/submodule に弱い、を避ける）。primary と reviewer は
+  **同一コード `scripts/transport.sh diff-hash <range>` を実行**して diff_hash を得る（手書き invocation の同期ズレを
+  無くす単一の真実源）。primary は参照 payload に「`transport.sh diff-hash <range>` の実行指示・range（解決済み OID
+  推奨）・expected_diff_hash・expected_head(=`git rev-parse HEAD`)」を載せる（diff 本文は載せない）。reviewer は同じ
+  `transport.sh diff-hash` を自分の作業ツリーで実行した sha256 を `reference_context.diff_hash`、自分の `git rev-parse HEAD`
+  を `reference_context.head`、さらに `mode:"reference"` / `status:"verified"` を返す。
+- **diff_hash だけでなく基底 HEAD OID も照合する**（同一 patch は別 HEAD・別基底でも作れるため。diff 一致＋HEAD 一致で
+  「同一の基底・同一の変更を見た」を担保）。
+- **`diff-hash` の内部 invocation**（透明性のため。実体は `XREV_DIFF_HASH_DOC` と一字一句同一。非決定性を固定/除去）:
+  `env -u GIT_EXTERNAL_DIFF -u GIT_PAGER -u GIT_CONFIG -u GIT_CONFIG_COUNT -u GIT_DIFF_OPTS -u GIT_DIR -u GIT_WORK_TREE
+   -u GIT_INDEX_FILE GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 LC_ALL=C git --no-pager
+   -c core.autocrlf=false -c core.quotepath=false -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.renames=false
+   -c diff.external= -c diff.algorithm=myers diff --no-color --no-ext-diff --no-textconv --full-index --binary <range>`
+   の生 stdout を sha256。system/global/XDG config と設定注入(GIT_CONFIG_KEY_/VALUE_*)を無効化する。
+- **検証と状態遷移**: review-loop は `XREV_REFERENCE_MODE=1` のとき、採用前に reviewer の `reference_context` を
+  `mode=reference` / `status=verified` / `head==XREV_EXPECT_HEAD` / `diff_hash==XREV_EXPECT_DIFF_HASH` の**全一致**で照合する。
+  いずれか不一致/未取得/期待値未設定/同一WS外(transport が exit18 で拒否)なら `decision=reference_unverified`(exit0)で、
+  primary は**同一 ITER を inline で再試行**する。フォールバック通算 `reference_fallbacks` が `max_reference_fallbacks`
+  を超えたら `escalate`（無限往復防止）。`reference_fallbacks` は round_state に載り次回へ引き継ぐ。
+- **意味の限定**: `reference_context` は「primary と reviewer が同一 diff を取得した」ことの同一性検証であり、
+  reviewer がその diff を実際にレビューしたこと・品質を保証しない（信頼済み reviewer 前提）。
+- **read-only 不変・安定窓**: reviewer は読むだけ。primary は参照 payload 送信〜応答受領まで作業ツリーを編集しない。
+- クロスホスト/別FSは参照モード非対応（inline 固定）。同一WSは必要条件、最終判定は diff ハッシュ一致。
 
 ### 宛先解決と送信ゲート（Phase1: 誤配送・shell 誤実行の防止）
 
@@ -227,8 +263,8 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 `transport.sh resolve --json` は機械可読の診断契約（`{ok, exit_code, surface_ref, surface_uuid, workspace,
 resolve_path}`）を返す。`resolve_path` は `explicit|same_ws|global`。
 
-> **参照モード（diff 本文を送らずファイル参照を渡す方式）は Phase2** に分離した（設計は diff 内容ハッシュ照合・
-> `reference_context` スキーマ・フォールバック状態機械で確定済み、実装は別途）。Phase1 は常に inline。
+> **参照モード（diff 本文を送らずファイル参照を渡す方式）は別節「参照モード（Phase2）」**を参照。
+> Phase1 の宛先解決＋送信ゲートが前提（同一WS解決時のみ参照モードを許可）。
 
 ### 実行コンテキスト（重要）
 
