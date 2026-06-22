@@ -77,10 +77,13 @@ _xrev_decide() {
 
 # 決定 JSON を stdout に整形する（exit はしない・呼び出し側が制御）。
 _format_decision() {
-  # _format_decision <decision> <iter> <max> <raw_json> <parsed_json>
-  python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+  # _format_decision <decision> <iter> <max> <raw_json> <parsed_json> <transport_exit_code>
+  # transport_exit_code は transport の生終了コード（0=成功）。transport_error 時に原因を機械区別するため
+  # transport_reason へ写像して残す（外部 exit は従来どおり 22 のまま。Phase1 診断契約）。
+  python3 - "$1" "$2" "$3" "$4" "$5" "${6:-0}" <<'PY'
 import json, sys
 decision, it, mx, raw, parsed = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], sys.argv[5]
+trc = int(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6].lstrip("-").isdigit() else 0
 try:
     p = json.loads(parsed) if parsed else {}
 except Exception:
@@ -89,6 +92,12 @@ try:
     rawobj = json.loads(raw) if raw else {}
 except Exception:
     rawobj = {}
+# transport 終了コード → 安定 reason（利用者向け修正案を機械的に選ぶため）
+REASONS = {
+    3: "cmux_unavailable", 10: "resolve_failed", 11: "send_failed", 12: "timeout",
+    13: "truncated", 14: "non_terminal", 15: "ws_mismatch", 16: "ambiguous",
+    17: "process_mismatch", 30: "cmux_not_found", 31: "not_in_pane",
+}
 out = {
     "decision": decision,
     "iteration": it,
@@ -100,6 +109,8 @@ out = {
     "findings": rawobj.get("findings", []),
     "summary": rawobj.get("summary"),
     "raw_review": raw,
+    "transport_exit_code": trc,
+    "transport_reason": REASONS.get(trc) if decision == "transport_error" else None,
 }
 print(json.dumps(out, ensure_ascii=False, indent=2))
 PY
@@ -124,7 +135,7 @@ _xrev_review_loop_run() {
 
   local decision code
   read -r decision code <<< "$(_xrev_decide "$trc" "$prc" "$blockers" "$iter" "$max")"
-  _format_decision "$decision" "$iter" "$max" "$raw" "$parsed"
+  _format_decision "$decision" "$iter" "$max" "$raw" "$parsed" "$trc"
   return "$code"
 }
 

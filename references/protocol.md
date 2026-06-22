@@ -118,6 +118,11 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 | `invalid`         | 21   | reviewer 出力が契約違反（スキーマ不一致 / 壊れた JSON）→ レビュー取得できず。 |
 | `transport_error` | 22   | 送受信失敗（ペイン解決不可・タイムアウト等）→ レビュー取得できず。 |
 
+`transport_error` の決定 JSON には `transport_exit_code`（transport の生終了コード）と `transport_reason`
+（安定文字列）を含める。外部 exit は 22 のままだが、primary はこの reason で利用者向け修正案を機械的に選べる:
+`cmux_unavailable`/`resolve_failed`/`send_failed`/`timeout`/`truncated`/`non_terminal`/`ws_mismatch`/
+`ambiguous`/`process_mismatch`/`cmux_not_found`/`not_in_pane`。
+
 ### `scripts/parse-review.sh`
 
 | exit | 意味 |
@@ -129,10 +134,14 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 
 | exit | 意味 |
 |------|------|
-| 10   | reviewer ペイン解決失敗（タイトル不一致 / 一覧取得不可） |
+| 10   | reviewer ペイン解決失敗（同一WS内にタイトル一致なし / 一覧取得不可） |
 | 11   | 送信失敗 |
 | 12   | 応答タイムアウト（round_id 一致の新着なし） |
 | 13   | 切り詰め検出（ペースト文字数が送信長と不一致） |
+| 14   | reviewer surface が実ターミナルでない（read-screen 不可。cmux エージェント統合パネル等） |
+| 15   | ワークスペース不整合（caller WS 特定不能 / 解決後に WS が変化 / 明示が別WS） |
+| 16   | 同一WS内で reviewer タイトルが複数一致（曖昧） |
+| 17   | プロセス証明失敗（対象 surface の直下プロセスが許可名でない / top 取得不可） |
 | 30   | cmux CLI が見つからない |
 | 31   | cmux 接続不可（preflight 失敗・ペイン外実行） |
 
@@ -149,6 +158,9 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 | `adr` | `false` | ADR 生成の既定（必要有無） |
 | `adr_dir` | `docs/adr` | ADR の出力ディレクトリ（相対は対象リポジトリ基準 / 絶対パス可） |
 | `transport` | `cmux` | 配管実装の選択（将来の差し替え点） |
+| `reviewer_process` | `codex` | 送信前プロセス証明で対象 surface の直下に在るべきプロセス名 |
+| `allow_global_resolve` | `false` | `CMUX_SURFACE_ID` 未注入時のグローバル解決を許すか（危険・opt-in） |
+| `allow_cross_ws` | `false` | 明示サーフェスが呼び出し元と別WSでも送信を許すか（危険・opt-in） |
 | `severity_blockers` | `["critical","high"]` | 収束を妨げる severity |
 | `medium_low_max_rounds` | `2` | medium 以下の指摘に付き合う上限周回（助言値。収束は blocker 0 件で機械判定するためスクリプトは消費せず、スキルが運用指針として参照する） |
 | `read_screen_lines` | `400` | read-screen で読む行数 |
@@ -162,7 +174,8 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 `XREV_CMUX_BIN`, `XREV_MAX_ITERATIONS`, `XREV_STOP_AT`, `XREV_ADR`, `XREV_ADR_DIR`,
 `XREV_READ_SCREEN_LINES`, `XREV_SEND_SETTLE_SECONDS`, `XREV_SUBMIT_SETTLE_SECONDS`,
 `XREV_CHUNK_SIZE`, `XREV_CONTENT_TYPE`, `XREV_ROUND_ID`, `XREV_SEND_RETRIES`,
-`XREV_RESPONSE_TIMEOUT_SECONDS`, `XREV_RESPONSE_POLL_SECONDS`。
+`XREV_RESPONSE_TIMEOUT_SECONDS`, `XREV_RESPONSE_POLL_SECONDS`,
+`XREV_REVIEWER_PROCESS`, `XREV_ALLOW_GLOBAL_RESOLVE`, `XREV_ALLOW_CROSS_WS`。
 `XREV_CONTENT_TYPE`/`XREV_ROUND_ID` は通常自動決定で、テスト・デバッグ時のみ明示する。
 
 ### 送信の堅牢化（実機知見）
@@ -172,6 +185,40 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 長文も成功する）。そのため `_cmux_send_line` は **送信前に入力欄をクリア（ctrl-u/backspace）し、
 失敗時は待って再試行**する（既定 5 回・`XREV_SEND_RETRIES`）。残留が混入したまま送ると prompt が
 壊れるため、クリアと、応答検出側のペースト文字数照合（切り詰め検出）で二重に守る。
+
+### 宛先解決と送信ゲート（Phase1: 誤配送・shell 誤実行の防止）
+
+複数ワークスペースに同名 `Review Codex` があると、旧実装は「最初に見つかった1件」を返して
+**呼び出し元と別ワークスペースの Codex へ誤配送**し得た（実機で観測）。Phase1 でこれを根絶する。
+設計は 7 ラウンドのクロスレビューで収束（critical/high 0）。
+
+**宛先解決（`_cmux_resolve_surface`）の順序**:
+
+1. `XREV_REVIEWER_SURFACE`（明示指定・最優先）。`CMUX_SURFACE_ID` があり `allow_cross_ws` が false の
+   ときは、明示先が呼び出し元と同一WSであることを検証（別WSは `exit 15`、`XREV_ALLOW_CROSS_WS=true` で許可）。
+2. **同一ワークスペース・スコープ解決**（`CMUX_SURFACE_ID` 必須）。`cmux tree --all --json --id-format both`
+   を呼び出し元 surface の UUID で辿り、**同一WS内**で `reviewer_pane_title` にタイトル一致（完全→部分）する
+   surface を選ぶ。1件→採用 / 複数→`exit 16`（曖昧）/ 0件→`exit 10`。**`active`/`focused` は使わない**
+   （フォーカスは他WSへ移動しうるため）。reviewer の役割識別根拠は**タイトル一致 or 明示指定のみ**
+   （プロセス名での自動採用はしない＝別作業中の Codex を誤って reviewer にしない）。
+3. `CMUX_SURFACE_ID` 未注入時のみ、`XREV_ALLOW_GLOBAL_RESOLVE=true` の明示 opt-in でグローバル解決
+   （同一WS保証なし・危険・強い診断）。未許可なら `exit 15`。
+
+**送信前ゲート（`xrev_transport_review`、全段通過で初めて送信）**:
+
+1. **UUID 同一性・WS 所属の再検証**（same_ws 経路）。送信直前に最新 tree を取り直し、解決した surface UUID が
+   今も同一WSに存在し、呼び出し元も同一WSに居続けているかを確認（ref 再利用・WS移動・差し替えを `exit 15` で弾く）。
+2. **端末性プリフライト**。`read-screen` の成否で判定（成功＝空でも usable / `not a terminal` 等＝`exit 14` /
+   一時失敗は限定リトライ）。cmux のエージェント統合パネル（PTY 無し）は read-screen 不可なので reviewer に使えない。
+3. **プロセス証明**。`cmux top --all --processes --format tsv` を送信直前に1回取得し、対象 surface の**直下プロセス**が
+   `reviewer_process`（既定 `codex`）であることを確認（`exit 17`）。Codex 終了後に shell へ戻った端末へ payload を
+   送って**コマンド実行**される事故を防ぐ。tree の `identify` はプロセスを出さないため top を使う。
+
+`transport.sh resolve --json` は機械可読の診断契約（`{ok, exit_code, surface_ref, surface_uuid, workspace,
+resolve_path}`）を返す。`resolve_path` は `explicit|same_ws|global`。
+
+> **参照モード（diff 本文を送らずファイル参照を渡す方式）は Phase2** に分離した（設計は diff 内容ハッシュ照合・
+> `reference_context` スキーマ・フォールバック状態機械で確定済み、実装は別途）。Phase1 は常に inline。
 
 ### 実行コンテキスト（重要）
 

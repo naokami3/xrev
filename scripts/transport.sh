@@ -54,6 +54,12 @@ PY
 
 # 環境変数で上書きできる設定（テスト・運用都合）
 REVIEWER_PANE_TITLE="${XREV_REVIEWER_PANE_TITLE:-$(_cfg reviewer_pane_title 'Review Codex')}"
+# 送信前の安全ゲートで「宛先サーフェスで動いているべきプロセス名」（既定 codex）。
+# プロセス証明: cmux top でこのプロセスが対象サーフェスの直下で動いていることを確認する。
+REVIEWER_PROCESS="${XREV_REVIEWER_PROCESS:-$(_cfg reviewer_process 'codex')}"
+# 安全側既定の opt-in。CMUX_SURFACE_ID 未注入時のみグローバル解決を許す / 明示サーフェスの別WS送信を許す。
+ALLOW_GLOBAL_RESOLVE="${XREV_ALLOW_GLOBAL_RESOLVE:-$(_cfg allow_global_resolve 'false')}"
+ALLOW_CROSS_WS="${XREV_ALLOW_CROSS_WS:-$(_cfg allow_cross_ws 'false')}"
 READ_LINES="${XREV_READ_SCREEN_LINES:-$(_cfg read_screen_lines 400)}"
 SETTLE_SECS="${XREV_SEND_SETTLE_SECONDS:-$(_cfg send_settle_seconds 2)}"
 RESP_TIMEOUT="${XREV_RESPONSE_TIMEOUT_SECONDS:-$(_cfg response_timeout_seconds 180)}"
@@ -173,38 +179,244 @@ sys.exit(5)
 PY
 }
 
-# reviewer ペインの surface ref をタイトルから解決する。
-# 解決順:
-#   1) XREV_REVIEWER_SURFACE が指定されていればそれを優先（実機デバッグ用の明示指定）
-#   2) `cmux tree --all --json` から、タイトルが一致する「サーフェス」の ref を引く
-#      （解析は純粋関数 _resolve_surface_from_json に委譲）
-# 解決できなければ非ゼロで失敗する（暴走防止：宛先不明のまま送らない）。
+# ── Phase1: 同一ワークスペース・スコープの宛先解決（誤配送防止・@xrev 承認設計）──────
 #
-# 実機知見:
-#   - 全ペイン/ワークスペース横断で探すため tree --all を使う（list-pane-surfaces は
-#     呼び出し元ペインのサーフェスしか返さない）。
-#   - タイトルには実行中スピナー等の装飾接頭辞が付く（例 "⠂ Review Codex"）。
-#     先頭の非単語記号を正規化で除去し、完全一致 → 部分一致の順で照合する。
-#   - サーフェスは ref が "surface:" で始まり title を持つ object のみを対象にする
-#     （workspace/pane の ref を誤って拾わないため）。
+# 要点（クロスレビュー収束済み）:
+#   - 呼び出し元(primary)の CMUX_SURFACE_ID(UUID) で「同一ワークスペース」に限定して解決する。
+#     複数WSに同名 "Review Codex" があっても別WSの Codex へ誤配送しない（実機で観測したバグの根絶）。
+#   - active/focused では判定しない（フォーカスは他WSへ移動しうるため不安定）。
+#   - reviewer の「役割」識別根拠はタイトル一致 or 明示サーフェス指定のみ（プロセス名での自動採用はしない）。
+#   - 解決できなければ暴走防止のため必ず fail closed。
+#
+# 純粋関数（cmux 非依存・単体テスト可能）。tree(--id-format both) JSON と caller UUID から、
+# 呼び出し元と同一WS内でタイトル一致する surface を1件に決める。
+#   入力: $1=タイトル, env XREV_LISTING=tree JSON, env XREV_CALLER=caller surface UUID
+#   出力(stdout): "<surface_ref>\t<surface_uuid>\t<workspace_id>"
+#   exit: 0=決定 / 4=JSON不正 / 5=同一WS内に該当なし / 6=同一WS内で曖昧 / 7=caller WS を特定不能
+_resolve_ws_scoped() {
+  XREV_LISTING="${XREV_LISTING:-}" XREV_CALLER="${XREV_CALLER:-}" python3 - "$1" <<'PY'
+import json, os, re, sys
+raw = os.environ.get("XREV_LISTING", "")
+caller = (os.environ.get("XREV_CALLER", "") or "").lower()
+try:
+    data = json.loads(raw)
+except Exception:
+    sys.exit(4)
+def norm(s):
+    s = (s or "").strip().lower()
+    s = re.sub(r'^[\W_]+', '', s)
+    return s.strip()
+def gid(o):
+    for k in ("uuid", "id", "uid"):
+        v = o.get(k)
+        if v:
+            return str(v).lower()
+    return None
+want = norm(sys.argv[1])
+rows = []  # (workspace_node, surface_node)
+def walk(o, ws=None):
+    if isinstance(o, dict):
+        ref = str(o.get("ref", ""))
+        cur = o if ref.startswith("workspace:") else ws
+        if ref.startswith("surface:") and isinstance(o.get("title"), str):
+            rows.append((cur, o))
+        for v in o.values():
+            if isinstance(v, (list, dict)):
+                walk(v, cur)
+    elif isinstance(o, list):
+        for x in o:
+            walk(x, ws)
+walk(data)
+if not caller:
+    sys.exit(7)
+# caller の所属 workspace を UUID 一致で特定（active/focused は使わない）
+caller_ws = None
+for ws, s in rows:
+    if gid(s) == caller:
+        caller_ws = ws
+        break
+if caller_ws is None:
+    sys.exit(7)
+ws_id = gid(caller_ws) or str(caller_ws.get("ref", "")) if caller_ws else ""
+# 同一WS・caller自身を除外した候補からタイトル照合（完全一致 → 部分一致）
+same = [s for ws, s in rows if ws is caller_ws and gid(s) != caller]
+def pick(cands):
+    if len(cands) == 1:
+        return cands[0], 0
+    if len(cands) > 1:
+        return None, 6
+    return None, -1
+chosen, code = pick([s for s in same if norm(s.get("title")) == want])
+if code == -1:
+    chosen, code = pick([s for s in same if want and want in norm(s.get("title"))])
+if code == -1:
+    sys.exit(5)
+if code != 0:
+    sys.exit(code)
+print("%s\t%s\t%s" % (chosen.get("ref"), gid(chosen) or "", ws_id))
+PY
+}
+
+# 純粋関数: tree JSON 内で「ref または UUID」から surface を一意特定し、現在の ref/uuid/workspace を返す。
+# 明示指定(ref/uuid どちらでも)・送信直前の同一性再検証の両方で使う。ref指定でも WS 検証を迂回させない。
+#   入力: $1=ref または UUID, env XREV_LISTING=tree JSON
+#   出力(stdout): "<surface_ref>\t<surface_uuid>\t<workspace_id>"
+#   exit: 0=一意特定 / 4=JSON不正 / 5=未発見 / 6=曖昧
+_locate_surface() {
+  XREV_LISTING="${XREV_LISTING:-}" python3 - "$1" <<'PY'
+import json, os, sys
+raw = os.environ.get("XREV_LISTING", "")
+token = (sys.argv[1] or "").strip().lower()
+try:
+    data = json.loads(raw)
+except Exception:
+    sys.exit(4)
+def gid(o):
+    for k in ("uuid", "id", "uid"):
+        v = o.get(k)
+        if v:
+            return str(v).lower()
+    return None
+hits = []
+def walk(o, ws=None):
+    if isinstance(o, dict):
+        ref = str(o.get("ref", ""))
+        cur = o if ref.startswith("workspace:") else ws
+        if ref.startswith("surface:") and token and (ref.lower() == token or gid(o) == token):
+            ws_id = (gid(cur) or str(cur.get("ref", ""))) if cur else ""
+            hits.append((ref, gid(o) or "", ws_id))
+        for v in o.values():
+            if isinstance(v, (list, dict)):
+                walk(v, cur)
+    elif isinstance(o, list):
+        for x in o:
+            walk(x, ws)
+walk(data)
+if not hits:
+    sys.exit(5)
+if len(hits) > 1:
+    sys.exit(6)
+print("%s\t%s\t%s" % hits[0])
+PY
+}
+
+# 純粋関数: cmux top の TSV から、指定 surface ref の「直下プロセス名」を列挙する。
+# top の行(TSV): cpu, mem, count, kind, id, parent, name。kind=process かつ parent=surface ref が直下。
+#   入力: $1=surface ref, env XREV_TOP=top TSV / 出力: 直下プロセス名を1行ずつ
+_top_surface_processes() {
+  XREV_TOP="${XREV_TOP:-}" python3 - "$1" <<'PY'
+import os, sys
+ref = sys.argv[1]
+for line in os.environ.get("XREV_TOP", "").splitlines():
+    p = line.split("\t")
+    if len(p) < 7:
+        continue
+    if p[3] == "process" and p[5] == ref:
+        print(p[6])
+PY
+}
+
+# ── cmux 配管ラッパ（uuid 付き tree / プロセス付き top）──────────────────────────
+_cmux_tree_uuids() { _cmux tree --all --json --id-format both 2>/dev/null; }
+_cmux_top_processes() { _cmux top --all --processes --format tsv 2>/dev/null; }
+
+# reviewer surface を解決する（同一WSスコープ・fail closed）。
+# 出力(stdout): surface ref。付随情報をグローバルに格納:
+#   _XREV_RES_UUID / _XREV_RES_WS / _XREV_RES_PATH(explicit|same_ws|global)
+# exit: 0=解決 / 3=一覧取得不可 / 10=同一WS内に該当なし / 15=WS不整合/未特定 / 16=同一WS内で曖昧
 _cmux_resolve_surface() {
+  _XREV_RES_REF=""; _XREV_RES_UUID=""; _XREV_RES_WS=""; _XREV_RES_PATH=""; _XREV_RES_SAMEWS=0
+  local tree; tree="$(_cmux_tree_uuids)"
+  [[ -n "$tree" ]] || { _log "cmux tree（--id-format both）を取得できません"; return 3; }
+
+  # 1) 明示指定（最優先）。ref/uuid のどちらで指定されても tree 内で一意特定し、WS 検証を迂回させない。
   if [[ -n "${XREV_REVIEWER_SURFACE:-}" ]]; then
-    printf '%s' "$XREV_REVIEWER_SURFACE"
-    return 0
+    _XREV_RES_PATH="explicit"
+    local loc lrc
+    loc="$(XREV_LISTING="$tree" _locate_surface "$XREV_REVIEWER_SURFACE")"; lrc=$?
+    if (( lrc != 0 )); then
+      _log "明示サーフェス($XREV_REVIEWER_SURFACE)を tree 内に一意特定できません（code=$lrc。誤配送防止のため中止）。"
+      return 15
+    fi
+    _XREV_RES_REF="$(printf '%s' "$loc" | cut -f1)"
+    _XREV_RES_UUID="$(printf '%s' "$loc" | cut -f2)"
+    _XREV_RES_WS="$(printf '%s' "$loc" | cut -f3)"
+    # cross-WS 非許可（既定厳格）: caller を特定し、同一WSであることを必須にする（不明はすべて fail closed）。
+    if [[ "$ALLOW_CROSS_WS" != "true" ]]; then
+      if [[ -z "${CMUX_SURFACE_ID:-}" ]]; then
+        _log "明示サーフェスの同一WS検証に CMUX_SURFACE_ID が必要です（cmux ペイン内で実行 / または XREV_ALLOW_CROSS_WS=true）。"
+        return 15
+      fi
+      local cloc crc caller_ws
+      cloc="$(XREV_LISTING="$tree" _locate_surface "$CMUX_SURFACE_ID")"; crc=$?
+      if (( crc != 0 )); then
+        _log "呼び出し元(CMUX_SURFACE_ID)を tree 内に特定できません（中止）。"; return 15
+      fi
+      caller_ws="$(printf '%s' "$cloc" | cut -f3)"
+      if [[ -z "$_XREV_RES_WS" || -z "$caller_ws" || "$caller_ws" != "$_XREV_RES_WS" ]]; then
+        _log "明示サーフェス($XREV_REVIEWER_SURFACE)が呼び出し元と別/不明ワークスペースです（cross-WS は XREV_ALLOW_CROSS_WS=true のみ）。"
+        return 15
+      fi
+      _XREV_RES_SAMEWS=1
+    fi
+    printf '%s' "$_XREV_RES_REF"; return 0
   fi
 
-  local listing
-  listing="$(_cmux tree --all --json 2>/dev/null)" || listing=""
-  if [[ -z "$listing" ]]; then
-    # フォールバック（呼び出し元ペイン内に reviewer がいる構成のみ救済）
-    listing="$(_cmux list-pane-surfaces --json 2>/dev/null)" || listing=""
-  fi
-  if [[ -z "$listing" ]]; then
-    _log "cmux からサーフェス一覧を取得できません（tree --all / list-pane-surfaces 不可）"
-    return 3
+  # 2) 同一WSスコープ解決（CMUX_SURFACE_ID 必須）
+  if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then
+    local out rc
+    out="$(XREV_LISTING="$tree" XREV_CALLER="$CMUX_SURFACE_ID" _resolve_ws_scoped "$REVIEWER_PANE_TITLE")"; rc=$?
+    case "$rc" in
+      0) _XREV_RES_PATH="same_ws"; _XREV_RES_SAMEWS=1
+         _XREV_RES_REF="$(printf '%s' "$out" | cut -f1)"
+         _XREV_RES_UUID="$(printf '%s' "$out" | cut -f2)"
+         _XREV_RES_WS="$(printf '%s' "$out" | cut -f3)"
+         printf '%s' "$_XREV_RES_REF"; return 0 ;;
+      6) _log "同一ワークスペース内に '$REVIEWER_PANE_TITLE' が複数あり曖昧です。"; return 16 ;;
+      5) _log "同一ワークスペース内に '$REVIEWER_PANE_TITLE' が見つかりません（reviewer を起動しタイトルを設定してください）。"; return 10 ;;
+      7) _log "呼び出し元の所属ワークスペースを特定できません（CMUX_SURFACE_ID が tree に見つからない）。"; return 15 ;;
+      *) _log "宛先解決に失敗しました（rc=$rc）。"; return 10 ;;
+    esac
   fi
 
-  _resolve_surface_from_json "$REVIEWER_PANE_TITLE" "$listing"
+  # 3) CMUX_SURFACE_ID 未注入時のみ、明示 opt-in でグローバル解決（同一WS保証なし・危険）
+  if [[ "$ALLOW_GLOBAL_RESOLVE" == "true" ]]; then
+    _log "警告: CMUX_SURFACE_ID 未注入のためグローバル解決します（別WSへ配送する恐れ）。"
+    local ref
+    ref="$(_resolve_surface_from_json "$REVIEWER_PANE_TITLE" "$tree")" || return 10
+    _XREV_RES_PATH="global"; _XREV_RES_REF="$ref"; printf '%s' "$ref"; return 0
+  fi
+  _log "CMUX_SURFACE_ID が無く同一WS解決ができません。cmux ペイン内で実行するか XREV_REVIEWER_SURFACE を明示指定してください（やむを得ない場合のみ XREV_ALLOW_GLOBAL_RESOLVE=true）。"
+  return 15
+}
+
+# read-screen の成否で端末性を判定（cmux 依存）。端末でないこと(=14)と宛先消失(=15)を分離する。
+#   usable: 成功（空でも可） / non_terminal: "not a terminal"（恒久・実ターミナルでない）/
+#   gone: "not found"（送信直前に surface 消失＝同一性喪失） / transient: 一時失敗
+_probe_terminal_usable() {
+  local surface="$1" err rc
+  err="$(_cmux read-screen --surface "$surface" --lines 1 2>&1 1>/dev/null)"; rc=$?
+  if (( rc == 0 )); then printf 'usable'; return 0; fi
+  if printf '%s' "$err" | grep -qiE 'not a terminal'; then printf 'non_terminal'; return 0; fi
+  if printf '%s' "$err" | grep -qiE 'not[_ ]?found'; then printf 'gone'; return 0; fi
+  printf 'transient'
+}
+
+# プロセス証明: 対象 surface の直下プロセスが「厳密に1件 かつ 許可名(REVIEWER_PROCESS)と完全一致」か。
+#   top を送信直前に1回取得して鮮度を担保。取得不能・複数直下・空・許可名以外はいずれも非ゼロ(=送信拒否)。
+#   「1件でも含めば通す」だと shell と codex が同居する surface で入力先が shell の可能性を排除できないため、
+#   厳密1件を要求する（shell へ payload を Enter 送信する事故を防ぐ）。
+_verify_reviewer_process() {
+  local surface="$1" top names count
+  top="$(_cmux_top_processes)"
+  [[ -n "$top" ]] || { _log "cmux top を取得できません（プロセス証明不可）。"; return 1; }
+  names="$(XREV_TOP="$top" _top_surface_processes "$surface")"
+  [[ -n "$names" ]] || { _log "reviewer surface($surface)の直下プロセスを特定できません。"; return 1; }
+  count="$(printf '%s\n' "$names" | grep -c .)"
+  if [[ "$count" -ne 1 || "$names" != "$REVIEWER_PROCESS" ]]; then
+    _log "reviewer surface($surface)の直下プロセスが '$REVIEWER_PROCESS' 単独ではありません（直下=[$(printf '%s' "$names" | paste -sd, -)]）。"
+    return 1
+  fi
 }
 
 # reviewer ペインの最終確定入力（プロンプト送信）。本文（1物理行）を送り終えたあとに呼ぶ。
@@ -397,13 +609,70 @@ print("ok" if mark in dw else "unknown")
 xrev_transport_review() {
   local payload="$1"
   _cmux_preflight || return $?
+  # 宛先解決（同一WSスコープ）。グローバル(_XREV_RES_*)を使うためサブシェルにしない。
+  # 失敗コード（10/15/16/3）はそのまま返す（review-loop 側で transport_reason に写像）。
   local surface
-  surface="$(_cmux_resolve_surface)" || {
-    _log "reviewer ペイン（タイトル: '$REVIEWER_PANE_TITLE'）を解決できませんでした。"
+  _XREV_RES_REF=""
+  _cmux_resolve_surface >/dev/null; local rrc=$?
+  if (( rrc != 0 )); then
+    _log "reviewer ペイン（タイトル: '$REVIEWER_PANE_TITLE'）を解決できませんでした（code=$rrc）。"
     _log "cmux 上に該当タイトルの Codex ペインを 1 枚開いているか、XREV_REVIEWER_SURFACE で明示指定してください。"
-    return 10
-  }
-  _log "reviewer surface = ${surface}（title: '${REVIEWER_PANE_TITLE}'）"
+    return "$rrc"
+  fi
+  surface="$_XREV_RES_REF"
+  _log "reviewer surface = ${surface} path=${_XREV_RES_PATH}（title: '${REVIEWER_PANE_TITLE}'）"
+
+  # ── 送信前ゲート（誤配送・shell誤実行の防止。@xrev 承認設計）──────────────────
+  # (i) UUID 同一性・WS 所属の再検証（uuid を持つ経路 = same_ws / explicit）。
+  #     ref再利用・WS移動・差し替え・宛先/呼び出し元の消失をすべて fail closed で弾く（fail-open を作らない）。
+  if [[ -n "$_XREV_RES_UUID" && "$_XREV_RES_PATH" != "global" ]]; then
+    local rtree; rtree="$(_cmux_tree_uuids)"
+    if [[ -z "$rtree" ]]; then _log "送信直前の tree 取得に失敗しました（中止）。"; return 15; fi
+    local rloc rlrc
+    rloc="$(XREV_LISTING="$rtree" _locate_surface "$_XREV_RES_UUID")"; rlrc=$?
+    if (( rlrc != 0 )); then
+      _log "解決した reviewer surface(uuid=$_XREV_RES_UUID)を送信直前に一意特定できません（code=$rlrc・中止）。"; return 15
+    fi
+    local cur_ref cur_ws
+    cur_ref="$(printf '%s' "$rloc" | cut -f1)"; cur_ws="$(printf '%s' "$rloc" | cut -f3)"
+    # 同一WS必須の経路では、reviewer の現WS一致 と caller の同一WS在席 をともに必須にする。
+    if [[ "$_XREV_RES_SAMEWS" == "1" ]]; then
+      if [[ -z "$_XREV_RES_WS" || -z "$cur_ws" || "$cur_ws" != "$_XREV_RES_WS" ]]; then
+        _log "reviewer surface の所属ワークスペースが解決時から変化/不明です（誤配送防止のため中止）。"; return 15
+      fi
+      local rcloc rcrc caller_ws
+      rcloc="$(XREV_LISTING="$rtree" _locate_surface "${CMUX_SURFACE_ID:-}")"; rcrc=$?
+      caller_ws="$(printf '%s' "$rcloc" | cut -f3)"
+      if (( rcrc != 0 )) || [[ -z "$caller_ws" || "$caller_ws" != "$_XREV_RES_WS" ]]; then
+        _log "呼び出し元が同一ワークスペースに見つからない/別WSへ移動しました（誤配送防止のため中止）。"; return 15
+      fi
+    fi
+    surface="$cur_ref"
+  fi
+
+  # (ii) 端末性プリフライト（read-screen 可否。非端末=exit14 / 消失=exit15 / 一時失敗は限定リトライ）
+  local term tries=0
+  while :; do
+    term="$(_probe_terminal_usable "$surface")"
+    [[ "$term" != "transient" ]] && break
+    (( ++tries >= 3 )) && break
+    _xrev_sleep 1
+  done
+  case "$term" in
+    usable) ;;
+    non_terminal)
+      _log "reviewer surface($surface)は実ターミナルではありません。シェル端末内で codex CLI を起動してください（cmux エージェント統合パネルは read-screen 不可）。"
+      return 14 ;;
+    gone)
+      _log "reviewer surface($surface)が送信直前に消失しました（誤配送防止のため中止）。"; return 15 ;;
+    *) _log "reviewer surface($surface)の画面取得に繰り返し失敗しました（中止）。"; return 11 ;;
+  esac
+
+  # (iii) プロセス証明（直下プロセスが許可名=$REVIEWER_PROCESS か。Codex 終了後に shell へ戻った端末への誤送信を防ぐ）
+  if ! _verify_reviewer_process "$surface"; then
+    _log "reviewer surface($surface)の直下プロセスが '$REVIEWER_PROCESS' ではありません（reviewer 未稼働/別用途の端末の恐れ）。送信を中止します。"
+    return 17
+  fi
 
   # round_id（ラウンド識別子）と content_type を決め、payload を1物理行にエンコードする。
   # round_id は高エントロピー（衝突でスクロールバックの過去応答と混同しないため）。
@@ -469,7 +738,25 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0}" ]]; then
       _cmux_preflight && echo "(cmux 接続OK: $CMUX_BIN)" >&2 ;;
     resolve)
       _cmux_preflight || exit $?
-      _cmux_resolve_surface && echo "(resolve ok)" >&2 ;;
+      if [[ "${2:-}" == "--json" ]]; then
+        # 機械可読の診断契約: 解決結果と検証状態を JSON で返す（スキル/デバッグ用）。
+        _XREV_RES_REF=""
+        _cmux_resolve_surface >/dev/null; rc=$?
+        XREV_RREF="$_XREV_RES_REF" XREV_RUUID="$_XREV_RES_UUID" XREV_RWS="$_XREV_RES_WS" \
+        XREV_RPATH="$_XREV_RES_PATH" XREV_RRC="$rc" python3 -c '
+import json, os
+rc = int(os.environ.get("XREV_RRC", "1") or 1)
+print(json.dumps({
+    "ok": rc == 0,
+    "exit_code": rc,
+    "surface_ref": os.environ.get("XREV_RREF", "") or None,
+    "surface_uuid": os.environ.get("XREV_RUUID", "") or None,
+    "workspace": os.environ.get("XREV_RWS", "") or None,
+    "resolve_path": os.environ.get("XREV_RPATH", "") or None,
+}, ensure_ascii=False))'
+        exit "$rc"
+      fi
+      _cmux_resolve_surface && echo " (resolve ok: path=${_XREV_RES_PATH})" >&2 ;;
     review)
       shift
       xrev_transport_review "${1:-テスト payload}" ;;
@@ -478,6 +765,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0}" ]]; then
 usage:
   transport.sh ping                 # cmux 接続（実行コンテキスト）の確認
   transport.sh resolve              # reviewer surface の解決のみ確認
+  transport.sh resolve --json       # 解決結果＋検証状態を JSON で返す（診断契約）
   transport.sh review "<payload>"   # 1往復だけ送って JSON を受ける
 USAGE
       exit 64 ;;

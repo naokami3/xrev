@@ -59,8 +59,12 @@ xrev/
 - **応答検出は round_id 相関**: reviewer の JSON にトップレベル `round_id` を返させ、全画面を de-wrap
   （TUI 折り返し除去）→ JSON を raw_decode 走査 → round_id 一致の妥当ブロックだけを採用する。
   マーカー折り返し・前ラウンド残存・未完成 JSON に強い。
-- 宛先は `cmux tree --all --json` でタイトル → surface を**動的解決**する（再起動で surface ID が
-  変わってもタイトルは不変、という前提）。
+- 宛先は **呼び出し元と同一ワークスペースにスコープ**して解決する（`cmux tree --all --json --id-format both`
+  を `CMUX_SURFACE_ID` で辿り、同一WS内でタイトル一致する surface を選ぶ）。複数WSに同名 `Review Codex` が
+  あっても別WSへ誤配送しない。`active`/`focused` は使わない。役割識別はタイトル一致 or 明示指定のみ。
+- 送信前ゲートで誤配送・shell 誤実行を防ぐ: ①送信直前の UUID 同一性・WS 所属の再検証 → ②端末性プリフライト
+  （read-screen 可否、`exit 14`）→ ③**プロセス証明**（`cmux top --processes` で対象 surface の直下プロセスが
+  `codex` か、`exit 17`）。詳細・終了コード(14-17)は [`../references/protocol.md`](../references/protocol.md)。
 - 接続不可は preflight（ping）で検知し `transport.sh` が `exit 31` を返して明示停止する。
 - `review-loop.sh` の分岐は stdout の JSON の `decision` で行う。exit code は「レビュー完了か」だけ:
   完了系（`converged`/`continue`/`escalate`）=0 / `invalid`=21 / `transport_error`=22
@@ -77,4 +81,7 @@ severity（blocker の定義）・act ラベル・各スクリプトの内部終
   rename での title 反映はバージョンで揺れる（検証時 cmux 0.64.15）。
 - **reviewer ペイン運用**: 固定タイトル `Review Codex` で 1 枚、履歴ゼロから開く。作業切替時は
   Codex を再起動し、cmux のセッション復元が前作業を復元しないよう注意する。
+- **reviewer は「実ターミナル内の codex CLI」であること**: cmux のエージェント統合パネル
+  （`--type agent-session`）は PTY を持たず `read-screen` 不可（`Surface is not a terminal`）なので reviewer に
+  使えない。codex を**シェル端末の中で**起動する（matomeblog 等の通常運用と同じ形態）。
 - **依存**: bash + python3 必須（jq 不要）。到達点 `pr` には `gh` が必要。
