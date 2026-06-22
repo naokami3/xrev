@@ -70,3 +70,71 @@ out="$(_format_decision continue 1 5 "$raw" "$parsed")"
 assert_eq "正常時 blockers を parsed から反映" "1" "$(printf '%s' "$out" | json_get blockers)"
 assert_eq "正常時 summary を raw から反映" "要約" "$(printf '%s' "$out" | json_get summary)"
 assert_eq "正常時 findings を raw から反映" "a" "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["findings"][0]["file"])')"
+
+# ── ループ安全弁: round_state（通算 transport 試行の上限・巻戻し検知）──
+_stub_approve2() { printf '%s' '{"verdict":"approve","findings":[]}'; }
+
+# 既定（round_state 無し）: transport_attempts は 1 から始まり、違反は無い
+out="$(printf '%s' "x" | XREV_REVIEW_FN=_stub_approve2 _xrev_review_loop_run 1)"
+assert_eq "round_state 無し → transport_attempts=1" "1" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["round_state"]["transport_attempts"])')"
+assert_eq "round_state 無し → state_violation は null" "null" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["state_violation"]))')"
+assert_eq "round_state 無し → 通常どおり converged" "converged" "$(printf '%s' "$out" | json_get decision)"
+
+# 前回 attempts を引き継ぐ: 2 → 3 に増える
+out="$(printf '%s' "x" | XREV_ROUND_STATE='{"transport_attempts":2,"iter":1}' XREV_REVIEW_FN=_stub_approve2 _xrev_review_loop_run 2)"
+assert_eq "前回 attempts=2 を引き継いで 3" "3" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["round_state"]["transport_attempts"])')"
+
+# 通算上限到達 → escalate（converged になるはずでも安全弁が優先）/ exit0。境界: prev>=max で送信しない。
+out="$(printf '%s' "x" | XREV_MAX_TRANSPORT_ATTEMPTS=3 XREV_ROUND_STATE='{"transport_attempts":3,"iter":2}' XREV_REVIEW_FN=_stub_approve2 _xrev_review_loop_run 3)"; rc=$?
+assert_rc "上限到達でも rc=0（escalate）" 0 "$rc"
+assert_eq "通算上限到達 → escalate" "escalate" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "違反理由 max_transport_attempts" "max_transport_attempts" "$(printf '%s' "$out" | json_get state_violation)"
+
+# 境界の厳密性: 上限到達時は transport を「呼ばない」(追加送信0回)。呼出し回数を一時ファイルで数える。
+_cf="$(mktemp)"; _stub_count() { echo x >> "$_cf"; printf '%s' '{"verdict":"approve","findings":[]}'; }
+out="$(printf '%s' "x" | XREV_MAX_TRANSPORT_ATTEMPTS=2 XREV_ROUND_STATE='{"transport_attempts":2,"iter":1}' XREV_REVIEW_FN=_stub_count _xrev_review_loop_run 2)"
+assert_eq "上限到達時は transport を呼ばない(0回)" "0" "$(grep -c . "$_cf")"
+assert_eq "上限到達時の decision=escalate" "escalate" "$(printf '%s' "$out" | json_get decision)"
+: > "$_cf"
+out="$(printf '%s' "x" | XREV_MAX_TRANSPORT_ATTEMPTS=5 XREV_ROUND_STATE='{"transport_attempts":1,"iter":1}' XREV_REVIEW_FN=_stub_count _xrev_review_loop_run 2)"
+assert_eq "上限未満なら transport を1回呼ぶ" "1" "$(grep -c . "$_cf")"
+rm -f "$_cf"
+
+# 巻戻し（前回 iter=3 なのに今 iter=1）→ escalate / 違反理由 rollback（送信しない）
+out="$(printf '%s' "x" | XREV_ROUND_STATE='{"transport_attempts":1,"iter":3}' XREV_REVIEW_FN=_stub_approve2 _xrev_review_loop_run 1)"
+assert_eq "巻戻し → escalate" "escalate" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "違反理由 rollback" "rollback" "$(printf '%s' "$out" | json_get state_violation)"
+
+# round_state の原子的検証（fail closed）: iter>1 での欠落 / 負値 / 破損 は escalate(bad_round_state)
+out="$(printf '%s' "x" | XREV_REVIEW_FN=_stub_approve2 _xrev_review_loop_run 2)"
+assert_eq "iter>1 で round_state 欠落 → escalate" "escalate" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "欠落の違反理由 bad_round_state" "bad_round_state" "$(printf '%s' "$out" | json_get state_violation)"
+
+out="$(printf '%s' "x" | XREV_ROUND_STATE='{"transport_attempts":-100,"iter":1}' XREV_REVIEW_FN=_stub_approve2 _xrev_review_loop_run 1)"
+assert_eq "負値 transport_attempts → escalate" "escalate" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "負値の違反理由 bad_round_state" "bad_round_state" "$(printf '%s' "$out" | json_get state_violation)"
+
+out="$(printf '%s' "x" | XREV_ROUND_STATE='これは壊れたJSON' XREV_REVIEW_FN=_stub_approve2 _xrev_review_loop_run 2)"
+assert_eq "破損 round_state → escalate" "escalate" "$(printf '%s' "$out" | json_get decision)"
+
+# 上限・状態が健全なら通常どおり transport 失敗は transport_error（安全弁は誤発火しない）
+_stub_fail2() { return 12; }
+out="$(printf '%s' "x" | XREV_ROUND_STATE='{"transport_attempts":1,"iter":1}' XREV_REVIEW_FN=_stub_fail2 _xrev_review_loop_run 2)"; rc=$?
+assert_rc "健全状態での transport 失敗は rc22" 22 "$rc"
+assert_eq "transport 失敗は transport_error" "transport_error" "$(printf '%s' "$out" | json_get decision)"
+
+# round_state の厳密型・範囲検証（float/数値文字列/巨大値を受理しない・送信前に拒否）
+_cf2="$(mktemp)"; _stub_count2() { echo x >> "$_cf2"; printf '%s' '{"verdict":"approve","findings":[]}'; }
+for bad in '{"transport_attempts":-0.9,"iter":1}' '{"transport_attempts":1.9,"iter":1}' \
+           '{"transport_attempts":"1","iter":1}' '{"transport_attempts":1,"iter":true}' \
+           '{"transport_attempts":99999999999999999999,"iter":1}'; do
+  : > "$_cf2"
+  out="$(printf '%s' "x" | XREV_ROUND_STATE="$bad" XREV_REVIEW_FN=_stub_count2 _xrev_review_loop_run 1)"
+  assert_eq "不正型/範囲の round_state は escalate: $bad" "escalate" "$(printf '%s' "$out" | json_get decision)"
+  assert_eq "不正型/範囲は bad_round_state: $bad" "bad_round_state" "$(printf '%s' "$out" | json_get state_violation)"
+  assert_eq "不正型/範囲は transport を呼ばない: $bad" "0" "$(grep -c . "$_cf2")"
+done
+rm -f "$_cf2"

@@ -22,6 +22,7 @@ xrev/
 │   ├── parse-review.sh        # 構造化レビューの妥当性検証と severity 集計（jq 非依存）
 │   ├── review-loop.sh         # 1 ラウンド実行＋終端の機械判定（decision を返す）。修正反映は LLM が担う
 │   ├── make-adr.sh            # 往復ログ → ADR 整形（ADR 生成 on のときのみ）。出力先は引数/env/config/既定で解決
+│   ├── start-reviewer.sh      # reviewer(Codex)を実ターミナル内で規約タイトル付き起動（目標C。cmux依存はtransport経由）
 │   └── finalize.sh            # 到達点分岐 review/commit/pr。PR は --draft 固定
 ├── config/xrev.default.json   # 既定設定（設定キー一覧は protocol.md）
 ├── references/

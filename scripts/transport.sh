@@ -320,6 +320,14 @@ PY
 _cmux_tree_uuids() { _cmux tree --all --json --id-format both 2>/dev/null; }
 _cmux_top_processes() { _cmux top --all --processes --format tsv 2>/dev/null; }
 
+# 自分(呼び出し元)のタブタイトルを設定する。reviewer 起動ヘルパが規約タイトルを付けるために使う。
+# cmux 依存をここ(transport.sh)に閉じるため、ヘルパは直接 cmux を叩かず本関数/サブコマンド経由で呼ぶ。
+_cmux_set_title() {
+  local title="$1"
+  [[ -n "${CMUX_SURFACE_ID:-}" ]] || { _log "CMUX_SURFACE_ID が無いためタイトル設定できません（cmux ペイン内で実行してください）。"; return 31; }
+  _cmux rename-tab --surface "$CMUX_SURFACE_ID" "$title"
+}
+
 # reviewer surface を解決する（同一WSスコープ・fail closed）。
 # 出力(stdout): surface ref。付随情報をグローバルに格納:
 #   _XREV_RES_UUID / _XREV_RES_WS / _XREV_RES_PATH(explicit|same_ws|global)
@@ -757,6 +765,12 @@ print(json.dumps({
         exit "$rc"
       fi
       _cmux_resolve_surface && echo " (resolve ok: path=${_XREV_RES_PATH})" >&2 ;;
+    set-title)
+      # 呼び出し元タブのタイトルを設定（起動ヘルパ用。cmux 依存を transport.sh に閉じる）。
+      _cmux_preflight || exit $?
+      shift
+      [[ -n "${1:-}" ]] || { _log "set-title: タイトルを指定してください"; exit 64; }
+      _cmux_set_title "$1" ;;
     review)
       shift
       xrev_transport_review "${1:-テスト payload}" ;;
@@ -766,6 +780,7 @@ usage:
   transport.sh ping                 # cmux 接続（実行コンテキスト）の確認
   transport.sh resolve              # reviewer surface の解決のみ確認
   transport.sh resolve --json       # 解決結果＋検証状態を JSON で返す（診断契約）
+  transport.sh set-title "<title>"  # 呼び出し元タブのタイトルを設定（起動ヘルパ用）
   transport.sh review "<payload>"   # 1往復だけ送って JSON を受ける
 USAGE
       exit 64 ;;

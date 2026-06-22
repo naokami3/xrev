@@ -52,6 +52,44 @@ except Exception:
 PY
 }
 
+# ループ安全弁: 直前ラウンドの状態を XREV_ROUND_STATE(JSON) から原子的に検証して読む。
+# primary は前回の決定 JSON の round_state をそのまま次回 XREV_ROUND_STATE に渡す契約。
+#   入力: $1=現在の iter, env XREV_ROUND_STATE
+#   出力(stdout): "<prev_attempts> <prev_iter>"（非負整数）/ exit: 0=妥当 / 1=不正(fail closed)
+# 検証方針（high 修正）:
+#   - 状態欠落は「新規開始(iter<=1)」のときだけ許可（=0 0）。iter>1 での欠落は fail closed。
+#   - 破損 JSON・型不正・負値・bool は fail closed（0 へ黙ってフォールバックして上限を無効化させない）。
+# 限界: 永続状態を持たないため、primary が意図的に新規開始(iter=1)を装う巻戻しは完全には防げない（primary 信頼）。
+_round_state_read() {
+  XREV_RS="${XREV_ROUND_STATE:-}" python3 - "$1" <<'PY'
+import json, os, sys
+try:
+    cur = int(sys.argv[1])
+except Exception:
+    cur = 1
+rs = os.environ.get("XREV_RS", "")
+if rs.strip() == "":
+    if cur <= 1:
+        print("0 0"); sys.exit(0)
+    sys.exit(1)  # 途中での状態欠落は fail closed
+try:
+    d = json.loads(rs)
+    a, i = d["transport_attempts"], d["iter"]
+    # 厳密に int 型のみ許可。bool(int派生)・float(-0.9→0等)・数値文字列("1")は拒否。
+    if type(a) is not int or type(i) is not int:
+        raise ValueError
+    if a < 0 or i < 0:
+        raise ValueError
+    # Bash 算術のオーバーフロー防止のため安全な有限範囲に制限（実運用の試行回数を遥かに超える上限）。
+    LIMIT = 1000000000
+    if a > LIMIT or i > LIMIT:
+        raise ValueError
+except Exception:
+    sys.exit(1)  # 破損・型不正(float/str/bool)・負値・範囲外は fail closed
+print("%d %d" % (a, i))
+PY
+}
+
 # 純粋関数（cmux 非依存・単体テスト可能）: 終端判定の中核。
 #   入力: transport 終了コード / parse 終了コード / blocker 件数 / 反復回数 / 上限
 #   出力(stdout): "<decision> <exit_code>"（副作用なし・exit しない）
@@ -77,13 +115,17 @@ _xrev_decide() {
 
 # 決定 JSON を stdout に整形する（exit はしない・呼び出し側が制御）。
 _format_decision() {
-  # _format_decision <decision> <iter> <max> <raw_json> <parsed_json> <transport_exit_code>
+  # _format_decision <decision> <iter> <max> <raw_json> <parsed_json> <transport_exit_code> \
+  #                  <transport_attempts> <state_violation>
   # transport_exit_code は transport の生終了コード（0=成功）。transport_error 時に原因を機械区別するため
   # transport_reason へ写像して残す（外部 exit は従来どおり 22 のまま。Phase1 診断契約）。
-  python3 - "$1" "$2" "$3" "$4" "$5" "${6:-0}" <<'PY'
+  # round_state は次回呼出しへ primary が必ず渡す（ループ安全弁）。
+  python3 - "$1" "$2" "$3" "$4" "$5" "${6:-0}" "${7:-0}" "${8:-}" <<'PY'
 import json, sys
 decision, it, mx, raw, parsed = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], sys.argv[5]
 trc = int(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6].lstrip("-").isdigit() else 0
+attempts = int(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7].lstrip("-").isdigit() else 0
+state_violation = sys.argv[8] if len(sys.argv) > 8 and sys.argv[8] else None
 try:
     p = json.loads(parsed) if parsed else {}
 except Exception:
@@ -111,6 +153,8 @@ out = {
     "raw_review": raw,
     "transport_exit_code": trc,
     "transport_reason": REASONS.get(trc) if decision == "transport_error" else None,
+    "state_violation": state_violation,
+    "round_state": {"iter": it, "transport_attempts": attempts},
 }
 print(json.dumps(out, ensure_ascii=False, indent=2))
 PY
@@ -122,6 +166,30 @@ PY
 _xrev_review_loop_run() {
   local iter="${1:-1}"
   local max="${XREV_MAX_ITERATIONS:-$(_cfg_int max_iterations 5)}"
+  local max_attempts="${XREV_MAX_TRANSPORT_ATTEMPTS:-$(_cfg_int max_transport_attempts 12)}"
+
+  # ── ループ安全弁（送信前に判定して暴走を止める）─────────────────────────────
+  # 直前 round_state を原子的に検証して読む。欠落(途中)・破損・負値は fail closed。
+  local rs_out rs_rc prev_attempts prev_iter
+  rs_out="$(_round_state_read "$iter")"; rs_rc=$?
+  if (( rs_rc != 0 )); then
+    _format_decision escalate "$iter" "$max" "" "" 0 0 "bad_round_state"
+    return 0
+  fi
+  read -r prev_attempts prev_iter <<< "$rs_out"
+
+  # 巻戻し（前回より iter が戻っている）→ 送信せず escalate。
+  if (( prev_iter > iter )); then
+    _format_decision escalate "$iter" "$max" "" "" 0 "$prev_attempts" "rollback"
+    return 0
+  fi
+  # 通算 transport 試行の上限到達 → これ以上「送信しない」で escalate（境界を正しく＝上限超の送信をしない）。
+  if (( prev_attempts >= max_attempts )); then
+    _format_decision escalate "$iter" "$max" "" "" 0 "$prev_attempts" "max_transport_attempts"
+    return 0
+  fi
+  local attempts=$(( prev_attempts + 1 ))
+
   local payload; payload="$(cat)"
 
   local raw trc parsed prc blockers
@@ -135,7 +203,7 @@ _xrev_review_loop_run() {
 
   local decision code
   read -r decision code <<< "$(_xrev_decide "$trc" "$prc" "$blockers" "$iter" "$max")"
-  _format_decision "$decision" "$iter" "$max" "$raw" "$parsed" "$trc"
+  _format_decision "$decision" "$iter" "$max" "$raw" "$parsed" "$trc" "$attempts" ""
   return "$code"
 }
 

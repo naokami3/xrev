@@ -4,6 +4,7 @@
   "reviewer_pane_title": "Review Codex",
   "keyword": "@xrev",
   "max_iterations": 5,
+  "max_transport_attempts": 12,
   "stop_at": "review",
   "adr": false,
   "adr_dir": "docs/adr",

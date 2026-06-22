@@ -123,6 +123,14 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 `cmux_unavailable`/`resolve_failed`/`send_failed`/`timeout`/`truncated`/`non_terminal`/`ws_mismatch`/
 `ambiguous`/`process_mismatch`/`cmux_not_found`/`not_in_pane`。
 
+**ループ安全弁（round_state・Phase1b）**: review-loop は決定 JSON に `round_state`（`{iter, transport_attempts}`）
+を含める。primary は**この round_state を次回呼び出しの `XREV_ROUND_STATE`(JSON) にそのまま渡す契約**。
+review-loop は受け取った状態から通算 `transport_attempts` を1つ進め、`max_transport_attempts` 超過、または
+`iter` の巻戻し（前回より小さい）を検知したら、レビュー取得に成功していても `decision=escalate` に倒し
+（`state_violation` に `max_transport_attempts`/`rollback` を記録）人間へ委ねる。中間ファイルは作らず状態は
+呼び出し連鎖で授受するため、巻戻しの完全強制は不可能で「primary 信頼＋欠落/巻戻し時 fail closed」を
+プロトコル限界として明記する。transport/parse 失敗（レビュー取得不可）はそれ自体の扱いを優先し上書きしない。
+
 ### `scripts/parse-review.sh`
 
 | exit | 意味 |
@@ -153,7 +161,8 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 | `reviewer` | `codex` | レビュー専用（read-only）の側 |
 | `reviewer_pane_title` | `Review Codex` | 宛先解決に使う cmux ペインタイトル |
 | `keyword` | `@xrev` | 発火キーワード |
-| `max_iterations` | `5` | 往復の安全弁（上限） |
+| `max_iterations` | `5` | 往復の安全弁（論理ラウンドの上限） |
+| `max_transport_attempts` | `12` | 通算 transport 試行の上限（論理ラウンドとは別の総量安全弁。超過で escalate） |
 | `stop_at` | `review` | 到達点（review / commit / pr） |
 | `adr` | `false` | ADR 生成の既定（必要有無） |
 | `adr_dir` | `docs/adr` | ADR の出力ディレクトリ（相対は対象リポジトリ基準 / 絶対パス可） |
@@ -175,7 +184,8 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 `XREV_READ_SCREEN_LINES`, `XREV_SEND_SETTLE_SECONDS`, `XREV_SUBMIT_SETTLE_SECONDS`,
 `XREV_CHUNK_SIZE`, `XREV_CONTENT_TYPE`, `XREV_ROUND_ID`, `XREV_SEND_RETRIES`,
 `XREV_RESPONSE_TIMEOUT_SECONDS`, `XREV_RESPONSE_POLL_SECONDS`,
-`XREV_REVIEWER_PROCESS`, `XREV_ALLOW_GLOBAL_RESOLVE`, `XREV_ALLOW_CROSS_WS`。
+`XREV_REVIEWER_PROCESS`, `XREV_ALLOW_GLOBAL_RESOLVE`, `XREV_ALLOW_CROSS_WS`,
+`XREV_MAX_TRANSPORT_ATTEMPTS`, `XREV_ROUND_STATE`, `XREV_CODEX_BIN`。
 `XREV_CONTENT_TYPE`/`XREV_ROUND_ID` は通常自動決定で、テスト・デバッグ時のみ明示する。
 
 ### 送信の堅牢化（実機知見）

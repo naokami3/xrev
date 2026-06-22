@@ -139,3 +139,19 @@ assert_eq "surface:4 の直下は claude プロセス" \
   "2.1.185" "$(XREV_TOP="$top" _top_surface_processes "surface:4" | paste -sd, -)"
 assert_eq "存在しない surface は空" \
   "" "$(XREV_TOP="$top" _top_surface_processes "surface:99")"
+
+# ── _cmux_set_title（起動ヘルパの規約タイトル設定。cmux依存は transport.sh 内に閉じる）──
+_orig_cmux_fn="$(declare -f _cmux)"
+_CAP=""; _cmux() { _CAP="$*"; return 0; }
+
+CMUX_SURFACE_ID="uuid-self" _cmux_set_title "Review Codex"; rc=$?
+assert_rc "CMUX_SURFACE_ID あり → set-title rc0" 0 "$rc"
+assert_contains "rename-tab を呼ぶ" "$_CAP" "rename-tab"
+assert_contains "--surface に自分の UUID" "$_CAP" "uuid-self"
+assert_contains "タイトルを渡す" "$_CAP" "Review Codex"
+
+_CAP=""
+( unset CMUX_SURFACE_ID; _cmux_set_title "T" ) >/dev/null 2>&1; rc=$?
+assert_rc "CMUX_SURFACE_ID 無し → rc31(設定不可)" 31 "$rc"
+
+eval "$_orig_cmux_fn"  # _cmux スタブを元に戻す
