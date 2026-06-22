@@ -375,7 +375,7 @@ _cmux_resolve_surface() {
     local loc lrc
     loc="$(XREV_LISTING="$tree" _locate_surface "$XREV_REVIEWER_SURFACE")"; lrc=$?
     if (( lrc != 0 )); then
-      _log "明示サーフェス($XREV_REVIEWER_SURFACE)を tree 内に一意特定できません（code=$lrc。誤配送防止のため中止）。"
+      _log "明示サーフェス($XREV_REVIEWER_SURFACE)を tree 内に一意特定できません（code=${lrc}。誤配送防止のため中止）。"
       return 15
     fi
     _XREV_RES_REF="$(printf '%s' "$loc" | cut -f1)"
@@ -415,7 +415,7 @@ _cmux_resolve_surface() {
       6) _log "同一ワークスペース内に '$REVIEWER_PANE_TITLE' が複数あり曖昧です。"; return 16 ;;
       5) _log "同一ワークスペース内に '$REVIEWER_PANE_TITLE' が見つかりません（reviewer を起動しタイトルを設定してください）。"; return 10 ;;
       7) _log "呼び出し元の所属ワークスペースを特定できません（CMUX_SURFACE_ID が tree に見つからない）。"; return 15 ;;
-      *) _log "宛先解決に失敗しました（rc=$rc）。"; return 10 ;;
+      *) _log "宛先解決に失敗しました（rc=${rc}）。"; return 10 ;;
     esac
   fi
 
@@ -725,7 +725,7 @@ _xrev_create_reviewer() {
   local out nrc ref
   # new-pane の rc を確認し、成功時の stdout のみから surface を抽出する（失敗メッセージの誤抽出を防ぐ）。
   out="$(_cmux new-pane --type terminal --workspace "$ws" --focus false 2>/dev/null)"; nrc=$?
-  (( nrc == 0 )) || { _log "reviewer ペインの生成(new-pane)に失敗しました（rc=$nrc）。"; return 19; }
+  (( nrc == 0 )) || { _log "reviewer ペインの生成(new-pane)に失敗しました（rc=${nrc}）。"; return 19; }
   ref="$(printf '%s' "$out" | grep -oE 'surface:[0-9]+' | head -1)"
   [[ -n "$ref" ]] || { _log "new-pane 出力から surface を特定できません: $out"; return 19; }
   # 生成 surface の UUID を tree から固定（＝所有物。以後この UUID にだけ作用する）。
@@ -748,7 +748,7 @@ _xrev_create_reviewer() {
       return 0
     fi
   done
-  _log "reviewer 生成: codex の起動を確認できませんでした（surface uuid=$_XREV_RES_UUID）。"
+  _log "reviewer 生成: codex の起動を確認できませんでした（surface uuid=${_XREV_RES_UUID}）。"
   return 19
 }
 
@@ -824,7 +824,7 @@ xrev_transport_review() {
   _XREV_RES_REF=""
   _cmux_resolve_surface >/dev/null; local rrc=$?
   if (( rrc != 0 )); then
-    _log "reviewer ペイン（タイトル: '$REVIEWER_PANE_TITLE'）を解決できませんでした（code=$rrc）。"
+    _log "reviewer ペイン（タイトル: '$REVIEWER_PANE_TITLE'）を解決できませんでした（code=${rrc}）。"
     _log "cmux 上に該当タイトルの Codex ペインを 1 枚開いているか、XREV_REVIEWER_SURFACE で明示指定してください。"
     return "$rrc"
   fi
@@ -847,7 +847,7 @@ xrev_transport_review() {
     local rloc rlrc
     rloc="$(XREV_LISTING="$rtree" _locate_surface "$_XREV_RES_UUID")"; rlrc=$?
     if (( rlrc != 0 )); then
-      _log "解決した reviewer surface(uuid=$_XREV_RES_UUID)を送信直前に一意特定できません（code=$rlrc・中止）。"; return 15
+      _log "解決した reviewer surface(uuid=$_XREV_RES_UUID)を送信直前に一意特定できません（code=${rlrc}・中止）。"; return 15
     fi
     local cur_ref cur_ws
     cur_ref="$(printf '%s' "$rloc" | cut -f1)"; cur_ws="$(printf '%s' "$rloc" | cut -f3)"
