@@ -16,6 +16,8 @@ assert_eq "blocker 0 は converged(exit0)" "converged 0" "$(_xrev_decide 0 0 0 3
 assert_eq "上限到達の escalate も exit0（レビューは完了）" "escalate 0" "$(_xrev_decide 0 0 2 5 5)"
 assert_eq "continue も exit0（continue は正常）" "continue 0" "$(_xrev_decide 0 0 1 1 5)"
 assert_eq "transport 失敗は parse より優先" "transport_error 22" "$(_xrev_decide 22 1 0 9 5)"
+# trc=24（センチネルで完成した応答はあるがJSON不正・契約違反）は transport_error ではなく invalid
+assert_eq "trc=24 は invalid（transport_error ではない）" "invalid 21" "$(_xrev_decide 24 0 0 1 5)"
 
 # ── 統合: transport をスタブにして 1 ラウンドを通す ──
 # approve を返すスタブ → converged / rc 0 / blockers 0
@@ -49,6 +51,15 @@ _stub_fail() { return 12; }
 out="$(printf '%s' "ダミー差分" | XREV_REVIEW_FN=_stub_fail _xrev_review_loop_run 1)"; rc=$?
 assert_rc "transport 失敗で rc=22" 22 "$rc"
 assert_eq "decision=transport_error" "transport_error" "$(printf '%s' "$out" | json_get decision)"
+
+# transport が exit24（センチネルで完成した応答はあるが JSON 不正・契約違反）を返すスタブ
+# → transport_error ではなく invalid / rc 21（reviewer の契約違反として再出力依頼に合流させる）
+_stub_broken() { return 24; }
+out="$(printf '%s' "ダミー差分" | XREV_REVIEW_FN=_stub_broken _xrev_review_loop_run 1)"; rc=$?
+assert_rc "transport exit24 で rc=21(invalid)" 21 "$rc"
+assert_eq "trc=24 は decision=invalid" "invalid" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "trc=24 でも transport_exit_code=24 は残る（透明性）" "24" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["transport_exit_code"])')"
 
 # ── _format_decision（純粋）: 異常系で壊れず既定値の決定JSONを出す ──
 # raw も parsed も壊れている（transport_error/invalid 相当）→ 既定値で整形できる

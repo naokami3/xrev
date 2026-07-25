@@ -13,6 +13,9 @@
 - センチネルの外には何も書かない。
 - JSON は **1 行コンパクト形式**（改行・インデントなし）で出力すること。
 - JSON は `references/review-schema.json` に準拠（`verdict` + `findings[]`）。
+- **JSON 文字列値の中の二重引用符は必ず `\"` とエスケープし、生の二重引用符を含めないこと。**
+  実機で「センチネルは正しいが JSON 文字列値に生の二重引用符が混じり不正 JSON になる」契約違反が
+  観測されている（`_scan_broken_blocks` が検出し `exit 24` に区別する。4節参照）。
 
 センチネル方式の理由: 対話モードの Codex 画面はプロンプトやエコーでノイズが多い。
 固定マーカーで挟むことで `cmux read-screen` の出力から機械的かつ確実に JSON を切り出せる。
@@ -41,6 +44,14 @@
 - **応答検出**: reviewer の JSON にトップレベル `round_id` を返させ、`_scan_review_blocks` は
   **全画面を de-wrap → JSON を raw_decode 走査 → round_id 一致の妥当ブロックだけ**を採用する
   （マーカー折り返し・前ラウンド残存・未完成JSONに強い。走査サイズ/件数に上限あり）。
+- **壊れた完成応答の検出**（`_scan_broken_blocks`）: `_scan_review_blocks` は parse に成功した
+  ブロックだけを採用するため、センチネルで完成しているが JSON として不正な応答（例: 文字列値に
+  生の二重引用符が混入）は永遠に検出できず、本来 `invalid`（契約違反）であるべきものが応答
+  タイムアウト（`exit 12`）と誤診断され、タイムアウト全時間を無駄に待つ実機バグが観測された。
+  `_scan_broken_blocks` は SENTINEL_BEGIN/END が両方揃った完成領域のうち、期待 `round_id` を
+  含みながら妥当な review JSON を1つも取り出せない領域を数える。応答待ちループはこれをポーリング
+  ごとに確認し、新規に増えていればタイムアウトを待たず即座に `exit 24` で返す。END が無い領域
+  （ストリーミング途中）は数えない。
 - reviewer 側はトークン（`<XREV-NL>`/`|| LNNNN:`/`<XREV-BS>`/`<XREV-TAB>`）を元の複数行へ復元して読む。
 - **トークン衝突回避**: 本文に制御トークンが元から含まれても区切りと誤解されないよう、導入子
   `XREVQ` で始まるリテラル表記へ可逆エスケープする（例: 本文の `<XREV-NL>`→`XREVQnl`）。
@@ -203,7 +214,7 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 | `continue`        | 0    | blocker 残・上限未満。primary が修正して `ITER+1` で再実行（正常系）。 |
 | `reference_unverified` | 0 | 参照モードで reviewer の diff_hash が期待値と不一致/未取得。レビューを採用せず、primary が**同一 ITER を inline で再試行**（正常系）。通算が `max_reference_fallbacks` 超で `escalate`。 |
 | `escalate`        | 0    | 上限到達でも blocker 残。人間へエスカレーション（レビューは完了）。 |
-| `invalid`         | 21   | reviewer 出力が契約違反（スキーマ不一致 / 壊れた JSON）→ レビュー取得できず。 |
+| `invalid`         | 21   | reviewer 出力が契約違反（スキーマ不一致 / 壊れた JSON / transport `exit 24`）→ レビュー取得できず。 |
 | `transport_error` | 22   | 送受信失敗（ペイン解決不可・タイムアウト等）→ レビュー取得できず。 |
 
 `transport_error` の決定 JSON には `transport_exit_code`（transport の生終了コード）と `transport_reason`
@@ -211,6 +222,12 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 `cmux_unavailable`/`resolve_failed`/`send_failed`/`timeout`/`truncated`/`non_terminal`/`ws_mismatch`/
 `ambiguous`/`process_mismatch`/`autocreate_failed`/`reviewer_contention`/`encode_failed`/`payload_too_large`/
 `cmux_not_found`/`not_in_pane`。
+
+`transport_exit_code=24`（`invalid_response`。センチネルで完成した応答はあるが妥当な review JSON
+を含まない契約違反。`timeout` と区別され primary は再出力を促す）は `transport_error` ではなく
+`decision=invalid` に写像される特例。`transport_reason` は従来どおり `decision=transport_error`
+のときだけ埋まる（`decision=invalid` では `null`）が、`transport_exit_code` 自体は透明性のため
+`decision=invalid` でも決定 JSON に残る（`=24`）。
 
 **ループ安全弁（round_state・Phase1b）**: review-loop は決定 JSON に `round_state`（`{iter, transport_attempts}`）
 を含める。primary は**この round_state を次回呼び出しの `XREV_ROUND_STATE`(JSON) にそのまま渡す契約**。
@@ -243,6 +260,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | 19   | reviewer 自動生成は試みたが codex の起動を確認できなかった（autocreate_failed） |
 | 20   | reviewer 生成の競合で期限切れ（別 primary が生成中 or 残留ロック→人間。reviewer_contention） |
 | 23   | payload のエンコードに失敗（cmux へは未送信。encode_failed。round_id/content_type 不正・不変条件違反等） |
+| 24   | センチネルで完成した応答はあるが妥当な review JSON を含まない（契約違反。invalid_response）。`timeout`(12) と区別され、primary は再出力を促す。 |
 | 26   | wire（1物理行）の文字数が上限(`wire_max_chars`)を超過（cmux へは未送信。payload_too_large） |
 | 30   | cmux CLI が見つからない |
 | 31   | cmux 接続不可（preflight 失敗・ペイン外実行） |

@@ -81,3 +81,34 @@ mix="$rid_other"$'\n--\n'"$rid_match"
 assert_eq "混在から round_id=rX のみ採用(1件)" "1" "$(printf '%s' "$mix" | _scan_review_blocks "rX" | head -1)"
 # 期待 round_id 未指定なら従来どおり全採用（後方互換）
 assert_eq "round_id 未指定は従来どおり採用" "1" "$(printf '%s' "$rid_match" | _scan_review_blocks | head -1)"
+
+# ── _scan_broken_blocks（純粋）: 「センチネルで完成しているが JSON として不正」な応答の検出 ──
+# 実機で観測: reviewer がセンチネルで挟んだ本文を返したが、JSON 文字列値に生の二重引用符が
+# 混じっていて不正 JSON だった。_scan_review_blocks では永遠に検出できず timeout と誤診断される。
+
+# a) センチネル対の中に round_id を含む壊れた JSON（文字列値に生の二重引用符）→ 1 件
+broken_a="$B"$'\n{"round_id":"rX","verdict":"approve","findings":[{"file":"a","severity":"high","category":"bug","message":"彼は"だめ"と言った"}]}\n'"$E"
+assert_eq "生の二重引用符で壊れたJSONは 1 件" "1" "$(printf '%s' "$broken_a" | _scan_broken_blocks "rX")"
+
+# b) BEGIN のみで END が無い（ストリーミング途中）→ 0 件（未完成を invalid と誤検出しない）
+streaming="$B"$'\n{"round_id":"rX","verdict":"approve","findings":[{"file":"a"'
+assert_eq "END 無し(未完成)は 0 件" "0" "$(printf '%s' "$streaming" | _scan_broken_blocks "rX")"
+
+# c) センチネル対の中に妥当な JSON（verdict + round_id 一致）→ 0 件
+valid_c="$B"$'\n{"round_id":"rX","verdict":"approve","findings":[]}\n'"$E"
+assert_eq "妥当JSONは 0 件" "0" "$(printf '%s' "$valid_c" | _scan_broken_blocks "rX")"
+
+# d) round_id が別の壊れたブロック → 0 件（期待 round_id を含まない領域は対象外）
+broken_d="$B"$'\n{"round_id":"rY","verdict":"approve","findings":[{"message":"彼は"だめ"と言った"}]}\n'"$E"
+assert_eq "別round_idの壊れたブロックは 0 件" "0" "$(printf '%s' "$broken_d" | _scan_broken_blocks "rX")"
+
+# e) TUI 折り返し（複数行に分断・ガター字下げ）された壊れたブロック → 1 件（de-wrap の確認）
+broken_e="$B"$'\n  {\n  "round_id": "rX",\n  "verdict": "approve",\n  "findings": [\n  {\n  "message": "彼は"だめ\n  "と言った"\n  }\n  ]\n  }\n'"$E"
+assert_eq "折り返しで分断された壊れたJSONも 1 件" "1" "$(printf '%s' "$broken_e" | _scan_broken_blocks "rX")"
+
+# 期待 round_id 未指定なら全ての完成領域を対象にする（後方互換の拡張）
+assert_eq "round_id 未指定でも壊れたJSONを検出" "1" "$(printf '%s' "$broken_a" | _scan_broken_blocks)"
+assert_eq "round_id 未指定でも妥当JSONは 0 件" "0" "$(printf '%s' "$valid_c" | _scan_broken_blocks)"
+
+# 何も無い画面 → 0 件
+assert_eq "空画面は 0 件" "0" "$(printf '%s' "ただのログ出力" | _scan_broken_blocks "rX")"

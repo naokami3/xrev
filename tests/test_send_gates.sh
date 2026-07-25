@@ -97,7 +97,40 @@ assert_eq   "wire 上限超 → send も submit も呼ばれない" "" "$_SG_CAL
 WIRE_MAX_CHARS="$_SG_SAVED_MAX"
 _build_framed_line() { printf 'FRAMED_LINE_FOR_TEST'; }
 
+# 7) 変更1: 完成しているが壊れた応答（実機で観測したバグ）→ タイムアウトを待たず即座に rc24。
+#    _scan_review_blocks は「妥当な応答なし」を返すよう固定し、_cmux_read_screen は
+#    submit 前は空・submit 後は「センチネルは揃っているが JSON 文字列値に生の二重引用符を含む
+#    壊れた応答」を返す（_scan_broken_blocks はスタブせず本物を使う）。submit 前後で画面を
+#    変えるのは、before_broken のベースライン取得時点で既に broken=1 だと「新着」判定が
+#    成立せずポーリングがタイムアウトまで回り続けてしまうため。RESP_TIMEOUT を十分大きく・
+#    直接代入し、それでもタイムアウト(180s既定)まで待たずに返ることを確認する。
+_SG_SAVED_TIMEOUT="$RESP_TIMEOUT"; _SG_SAVED_POLL="$RESP_POLL"; _SG_SAVED_SETTLE="$SETTLE_SECS"
+RESP_TIMEOUT=100000    # 意図的に巨大値。もしタイムアウト待ちに落ちればテストがハングして検知できる。
+RESP_POLL=1
+SETTLE_SECS=0
+XREV_ROUND_ID="rBROKEN"
+_scan_review_blocks() { printf '0'; }  # 妥当な応答は一切無い（常に新着0件）
+_SG_BROKEN_SCREEN="$SENTINEL_BEGIN"$'\n{"round_id":"rBROKEN","verdict":"approve","findings":[{"file":"a","severity":"high","category":"bug","message":"彼は"だめ"と言った"}]}\n'"$SENTINEL_END"
+_cmux_read_screen() {
+  case "$_SG_CALLS" in
+    *submit*) printf '%s' "$_SG_BROKEN_SCREEN" ;;
+    *)        printf '' ;;
+  esac
+}
+_sg_run 0 0 0
+assert_rc "壊れた完成応答 → rc24（invalid_response）" 24 "$_SG_RC"
+assert_eq "壊れた完成応答でも send/submit は正常に完了している" " send submit" "$_SG_CALLS"
+RESP_TIMEOUT="$_SG_SAVED_TIMEOUT"; RESP_POLL="$_SG_SAVED_POLL"; SETTLE_SECS="$_SG_SAVED_SETTLE"
+unset XREV_ROUND_ID _SG_BROKEN_SCREEN
+_scan_review_blocks() {
+  case "$_SG_CALLS" in
+    *submit*) printf '1\n{"round_id":"x","verdict":"approve","findings":[]}' ;;
+    *)        printf '0' ;;
+  esac
+}
+_cmux_read_screen() { printf ''; }
+
 # ── 後片付け: 実体を読み直してスタブを捨てる（後続の test_*.sh へ漏らさない）────────
 # shellcheck source=/dev/null
 source "$SCRIPTS/transport.sh"
-unset _SG_CALLS _SG_VP_SEQ _SG_VP_I _SG_RC _SG_SAVED_MAX
+unset _SG_CALLS _SG_VP_SEQ _SG_VP_I _SG_RC _SG_SAVED_MAX _SG_SAVED_TIMEOUT _SG_SAVED_POLL _SG_SAVED_SETTLE

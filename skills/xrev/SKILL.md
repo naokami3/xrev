@@ -185,7 +185,8 @@ printf '%s' "$payload" | \
   残った critical/high と往復経緯を要約して提示し、判断を仰ぐ。勝手に到達点へ進めない。
 - `invalid`（reviewer が自由作文や壊れた JSON を返す）: スキーマ
   （`references/review-schema.json`）への準拠を促して同じ payload を 1 回だけ再送。
-  なお改善しなければ人間に報告。
+  なお改善しなければ人間に報告。transport が `exit 24`（センチネルで完成した応答は画面にあるが
+  JSON が不正）を返した場合も、この `invalid` として同様に扱われる。
 - `transport_error`（送受信失敗）: `Review Codex` ペインの存在・タイトル・常駐を確認。
   `XREV_REVIEWER_SURFACE` 明示指定も検討。
 

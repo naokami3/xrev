@@ -682,6 +682,83 @@ PY
   python3 -c "$prog" "${1:-}"
 }
 
+# 純粋関数（cmux 非依存・テスト可能）: 「センチネルで完成しているが JSON として不正な応答」を検出する。
+#   実機で観測した不具合: reviewer が SENTINEL_BEGIN/END の2行マーカーで挟んだ本文を返したが、
+#   JSON 文字列値の中に生の二重引用符が混じっていて JSON として不正だった。_scan_review_blocks は
+#   「parse できたブロックだけ」を採用するためこの応答を永遠に検出できず、本来 invalid（契約違反
+#   →再出力を促す）であるべきものが timeout(12) と誤診断され、応答タイムアウトの全時間を無駄にする。
+#   本関数はそれを区別するため「BEGIN と END が両方揃った完成領域」のうち、期待 round_id を含み
+#   かつ妥当な review JSON（dict かつ verdict を持ち round_id 一致）が1つも取り出せない領域を数える。
+#   END が無い領域（ストリーミング途中の未完成応答）は invalid と誤検出しないよう数えない。
+#   入力: stdin=画面テキスト・$1(任意)=期待 round_id。出力: 壊れた完成応答の件数のみ(1行)。
+_scan_broken_blocks() {
+  # 実装方針は _scan_review_blocks と同じ（read -r -d '' prog + python3 -c 方式・de-wrap・
+  # 走査上限）。SENTINEL 文字列はシェル変数 SENTINEL_BEGIN/SENTINEL_END を argv で渡し、
+  # ハードコードの二重管理をしない。
+  local prog
+  read -r -d '' prog <<'PY' || true
+import sys, json
+text = sys.stdin.read()
+expect_rid = sys.argv[1] if len(sys.argv) > 1 else ""
+sb = sys.argv[2]
+se = sys.argv[3]
+
+# TUI の折り返し＋ガター字下げを除く（各行 strip して連結）。_scan_review_blocks と同じ方式。
+dw = "".join(line.strip() for line in text.splitlines())
+
+# 走査上限（暴走・誤検出の防御）。最新の応答は末尾に出るため末尾側を優先して切り詰める。
+MAX_SCAN = 500000
+MAX_REGIONS = 200
+if len(dw) > MAX_SCAN:
+    dw = dw[-MAX_SCAN:]
+
+dec = json.JSONDecoder()
+
+def has_valid_review(region):
+    # region 内に「dict かつ verdict を持ち（round_id 指定時は一致する）」JSON が
+    # 1つでも raw_decode できれば、その領域は妥当な応答を含むとみなす。
+    i, n = 0, len(region)
+    while i < n:
+        if region[i] != "{":
+            i += 1
+            continue
+        try:
+            obj, end = dec.raw_decode(region, i)
+        except Exception:
+            i += 1
+            continue
+        i = end
+        if isinstance(obj, dict) and "verdict" in obj:
+            if expect_rid and str(obj.get("round_id", "")) != expect_rid:
+                continue
+            return True
+    return False
+
+broken = 0
+regions = 0
+pos, n = 0, len(dw)
+while pos < n and regions < MAX_REGIONS:
+    b = dw.find(sb, pos)
+    if b == -1:
+        break
+    e = dw.find(se, b + len(sb))
+    if e == -1:
+        # END が無い＝ストリーミング途中の未完成応答。数えず、以降も走査を打ち切る
+        # （残りは同じ未完成応答の続きである可能性が高いため）。
+        break
+    region = dw[b + len(sb):e]
+    pos = e + len(se)
+    regions += 1
+    # 期待 round_id 指定時は、それを含まない領域（他ラウンド・無関係な表示）は対象外にする。
+    if expect_rid and expect_rid not in region:
+        continue
+    if not has_valid_review(region):
+        broken += 1
+print(broken)
+PY
+  python3 -c "$prog" "${1:-}" "$SENTINEL_BEGIN" "$SENTINEL_END"
+}
+
 # 純粋関数（cmux 非依存・テスト可能）: payload を「画面上は1物理行・意味上は複数行」に
 # エンコードし、reviewer への指示と出力契約を含む完全な1行メッセージを stdout に返す。
 #   $1 = content_type(plain|unified_diff|code|markdown), $2 = round_id, $3 = payload
@@ -773,6 +850,9 @@ out = ("出力は必ず %s と %s の2行マーカーで挟み、間には1行�
        "(マーカー外・JSON前後に説明文を書かない)。JSONはトップレベルに round_id(=\"%s\") と "
        "verdict(approve|request_changes) と findings[] を持ち、各 finding は "
        "file/severity(critical|high|medium|low|nit)/category(bug|security|design|perf|style)/message を必須とする。"
+       "JSON文字列値の中に二重引用符を含める場合は必ずJSON仕様どおりエスケープ済みの形にし、"
+       "エスケープしていない生の二重引用符を値の中に含めないこと"
+       "(壊れたJSONは契約違反として扱われ、レビュー全体が無効になる)。"
        "wire の復号に失敗した場合はレビューを行わず、verdict=\"request_changes\" と "
        "findings に category=\"bug\" message=\"decode_error\" を1件だけ入れて返すこと。"
        % (sb, se, rid))
@@ -1384,9 +1464,14 @@ xrev_transport_review() {
   fi
 
   # 送信前ベースライン：この round_id に一致する妥当ブロック数（通常0、防御的に数える）。
-  local before_count
-  before_count="$(_cmux_read_screen "$surface" | _scan_review_blocks "$round_id" | head -1)"
+  # broken（完成しているが不正なブロック）も同様にベースラインを取り、送信前から既に画面に
+  # 残っている壊れた表示を「新着の契約違反」と誤検出しないようにする。
+  local before_count before_broken screen_snapshot
+  screen_snapshot="$(_cmux_read_screen "$surface")"
+  before_count="$(printf '%s' "$screen_snapshot" | _scan_review_blocks "$round_id" | head -1)"
   [[ "$before_count" =~ ^[0-9]+$ ]] || before_count=0
+  before_broken="$(printf '%s' "$screen_snapshot" | _scan_broken_blocks "$round_id")"
+  [[ "$before_broken" =~ ^[0-9]+$ ]] || before_broken=0
 
   # (iii-b) 本文送信の直前に再検証。(iii) からベースライン取得（read-screen）を挟むため、
   # その間に codex が終了していれば本文がシェルの入力バッファへ流れ込む。窓を最小化する。
@@ -1433,7 +1518,7 @@ xrev_transport_review() {
   _cmux_submit "$surface" || true
 
   # 応答待ち：round_id 一致の新着妥当ブロックが出るまで待つ。
-  local waited=0 screen scan count block
+  local waited=0 screen scan count block broken
   _xrev_sleep "$SETTLE_SECS"
   while (( waited < RESP_TIMEOUT )); do
     screen="$(_cmux_read_screen "$surface")"
@@ -1444,6 +1529,16 @@ xrev_transport_review() {
       block="$(printf '%s' "$scan" | tail -n +2)"
       printf '%s\n' "$block"
       return 0
+    fi
+    # 妥当ブロックが増えていない場合、「完成しているが JSON として不正」な応答が新規に
+    # 現れていないかを確認する。実機で観測: reviewer がセンチネルで挟んだ本文を返したが
+    # JSON が壊れていて _scan_review_blocks では永遠に検出できず、タイムアウト(12)まで
+    # 全時間を無駄に待った。ここで先に検出し、タイムアウトを待たず即座に契約違反として返す。
+    broken="$(printf '%s' "$screen" | _scan_broken_blocks "$round_id")"
+    [[ "$broken" =~ ^[0-9]+$ ]] || broken=0
+    if (( broken > before_broken )); then
+      _log "reviewer の応答はセンチネルで完成していますが JSON として不正です（契約違反, round_id=${round_id}）。内容は画面に出ているためログには件数のみ記録します（broken=${broken}）。"
+      return 24
     fi
     _xrev_sleep "$RESP_POLL"
     waited=$(( waited + RESP_POLL ))

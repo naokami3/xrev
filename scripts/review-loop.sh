@@ -103,6 +103,10 @@ PY
 #   こうすることで「continue は正常なのに非ゼロでエラー扱いされる」誤判定を避ける。
 _xrev_decide() {
   local trc="$1" prc="$2" blockers="$3" iter="$4" max="$5"
+  # trc=24: センチネルで完成した応答はあるが JSON として不正（reviewer の契約違反）。
+  # transport_error（送受信自体の失敗）とは別種の失敗であり、SKILL.md の invalid 経路
+  # （スキーマ準拠の再出力依頼）に合流させるため一般の trc!=0 分岐より先に判定する。
+  if (( trc == 24 )); then echo "invalid 21"; return 0; fi
   if (( trc != 0 )); then echo "transport_error 22"; return 0; fi
   if (( prc != 0 )); then echo "invalid 21"; return 0; fi
   # critical/high が 0 → 収束。medium 以下は blocker でないため往復を止める（設計1.5）。
@@ -146,7 +150,7 @@ except Exception:
 # transport 終了コード → 安定 reason（利用者向け修正案を機械的に選ぶため）
 REASONS = {
     3: "cmux_unavailable", 10: "resolve_failed", 11: "send_failed", 12: "timeout",
-    23: "encode_failed", 26: "payload_too_large",
+    23: "encode_failed", 26: "payload_too_large", 24: "invalid_response",
     13: "truncated", 14: "non_terminal", 15: "ws_mismatch", 16: "ambiguous",
     17: "process_mismatch", 19: "autocreate_failed", 20: "reviewer_contention",
     30: "cmux_not_found", 31: "not_in_pane",
