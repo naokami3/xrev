@@ -19,6 +19,87 @@ export XREV_CONFIG="$DEFAULT_CONFIG"
 # shellcheck source=/dev/null
 source "$SCRIPTS/transport.sh"
 
+# ── _verify_reviewer_process の観測リトライ（実装の本体をそのまま検証）────────────
+#
+# 【この節が守る仕様】cmux の surface 直下には周期的に消滅する sleep サイドカーが存在し、
+# top 取得と ps 取得の間にそれが消えると「欠落」判定で拒否される（詳細は docs/cmux-behavior.md
+# の「過渡プロセス（sleep サイドカー）の消滅による観測不一致」）。対処は判定条件を緩めることでは
+# なく、top/ps を最初から取り直して最大3回まで試行し直すことだけ。ここでは _decide_foreground_owner
+# はスタブせず本物を使い、_cmux_top_processes / _ps_snapshot だけを呼び出し回数で切り替えて
+# スタブすることで「取り直しの回数」を検証する（test_ws_scoped.sh のスタブ手法を流用）。
+_xrev_sleep() { :; }  # リトライ間の待ちを無効化（テストを遅くしない）
+
+# 【注意】_verify_reviewer_process は _cmux_top_processes / _ps_snapshot をコマンド置換
+# ("$(...)" やパイプライン)経由で呼ぶため、呼び出しはサブシェルで実行される。ふつうの変数
+# インクリメントはサブシェル内で完結して親シェルへ戻らないので、呼び出し回数はファイルに
+# 記録して数える（bash+python3 のみという依存方針は変えない。中間ファイルは repo 外の
+# 一時領域に置き、このテストの最後に削除する）。
+_sg_call_file="$(mktemp -t xrev_sg_calls)"
+_sg_reset_calls() { printf '0' > "$_sg_call_file"; }
+_sg_call_count() { cat "$_sg_call_file"; }
+_sg_top_script=()   # 呼び出し順に返す top TSV の台本
+_sg_ps_script=()    # 呼び出し順に返す ps 出力の台本（top と対で消費する）
+_cmux_top_processes() {
+  local n; n=$(( $(cat "$_sg_call_file") + 1 ))
+  printf '%s' "$n" > "$_sg_call_file"
+  printf '%s' "${_sg_top_script[$(( n - 1 ))]:-}"
+}
+_ps_snapshot() {
+  cat >/dev/null
+  local n; n="$(cat "$_sg_call_file")"
+  printf '%s' "${_sg_ps_script[$(( n - 1 ))]:-}"
+}
+_sg_mk_top() { # 引数: "PID:name,PID:name,..." → surface:9 直下の top TSV
+  local procs="$1" p
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' 0.0 1 1 surface surface:9 pane:1 title
+  IFS=','; for p in $procs; do
+    [[ -n "$p" ]] && printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' 0.0 1 1 process "${p%%:*}" surface:9 "${p#*:}"
+  done; unset IFS
+}
+_sg_mk_ps() { local r; for r in "$@"; do printf '%s\n' "$r"; done; }  # "pid pgid tpgid comm"
+
+# 実機形状（test_ws_scoped.sh の実測 fixture を踏襲）: codex=前景(pgid==tpgid), sleep=別pgid,
+# zsh=ログインシェル。sleep が消える前後で top/ps の直下集合が変わる想定。
+_SG_TOP_WITH_SLEEP="$(_sg_mk_top "4728:codex,13900:sleep,1489:zsh")"
+_SG_TOP_NO_SLEEP="$(_sg_mk_top "4728:codex,1489:zsh")"
+# codex+zsh の2件分の ps 出力。top 側が3件(sleep含む)のときに渡すと「sleep が欠落」の不一致に、
+# top 側が2件(sleep なし)のときに渡すと「過不足なく一致」になる（同じ ps 出力を両方の意味で使う）。
+_SG_PS_CODEX_ZSH_ONLY="$(_sg_mk_ps "4728 4728 4728 /Users/x/.local/bin/codex" \
+                                    "1489 1489 4728 -/bin/zsh")"
+
+# 1) 1回目=top:sleepあり/ps:sleep欠落(不一致) → リトライ → 2回目=top:sleepなし/ps一致 → 許可。
+#    top 取得が2回であること＝観測を最初から取り直していることの確認。
+_sg_reset_calls
+_sg_top_script=("$_SG_TOP_WITH_SLEEP" "$_SG_TOP_NO_SLEEP")
+_sg_ps_script=("$_SG_PS_CODEX_ZSH_ONLY" "$_SG_PS_CODEX_ZSH_ONLY")
+_verify_reviewer_process "surface:9"
+assert_rc "1回目不一致→2回目一致で許可(rc0)" 0 "$?"
+assert_eq "取り直しにより top 取得は2回" "2" "$(_sg_call_count)"
+
+# 2) 3回とも不一致 → 拒否(非0)。top 取得は3回で打ち切り、4回目は起きない。
+_sg_reset_calls
+_sg_top_script=("$_SG_TOP_WITH_SLEEP" "$_SG_TOP_WITH_SLEEP" "$_SG_TOP_WITH_SLEEP")
+_sg_ps_script=("$_SG_PS_CODEX_ZSH_ONLY" "$_SG_PS_CODEX_ZSH_ONLY" "$_SG_PS_CODEX_ZSH_ONLY")
+_verify_reviewer_process "surface:9" 2>/dev/null
+assert_rc "3回とも不一致→拒否(rc1)" 1 "$?"
+assert_eq "3回で打ち切り(4回目は呼ばれない)" "3" "$(_sg_call_count)"
+
+# 3) 1回目から一致 → 許可(rc0)。成功時は余計な取り直しをしない(top 取得は1回のみ)。
+_sg_reset_calls
+_sg_top_script=("$_SG_TOP_NO_SLEEP")
+_sg_ps_script=("$_SG_PS_CODEX_ZSH_ONLY")
+_verify_reviewer_process "surface:9"
+assert_rc "1回目から一致→許可(rc0)" 0 "$?"
+assert_eq "成功時は取り直さず top 取得は1回のみ" "1" "$(_sg_call_count)"
+
+# 元の実装へ戻す（以降のスタブ定義・他テストへ漏らさない）。
+rm -f "$_sg_call_file"
+# shellcheck source=/dev/null
+source "$SCRIPTS/transport.sh"
+unset -f _sg_mk_top _sg_mk_ps _sg_reset_calls _sg_call_count
+unset _sg_call_file _sg_top_script _sg_ps_script \
+      _SG_TOP_WITH_SLEEP _SG_TOP_NO_SLEEP _SG_PS_CODEX_ZSH_ONLY
+
 # ── スタブ群（このファイルの最後に transport.sh を読み直して元に戻す）──────────────
 _SG_CALLS=""                      # 外部作用の記録（"send submit" のように順に積む）
 _SG_VP_SEQ=()                     # _verify_reviewer_process の戻り値台本（0=許可 / 1=拒否）

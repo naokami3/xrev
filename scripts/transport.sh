@@ -592,17 +592,35 @@ PY
 # 【重要】この検証は「その瞬間」の観測にすぎない。検査から実際の入力確定(Enter)までの間に codex が
 # 終了すれば payload が shell へ渡りうるため、呼び出し側は **Enter の直前を最終ゲート**として
 # 再検証すること（xrev_transport_review の (iii-c) を参照）。
+# 【観測の取り直し】cmux の surface 直下には周期的に生成・消滅する sleep サイドカーが存在し、top と
+# ps の取得時刻がミリ秒単位でずれるだけで「欠落」判定になりうる（実測で発生。docs/cmux-behavior.md
+# 参照）。これは判定条件を緩めるのではなく、top/ps を最初から取り直して最大3回までやり直す＝壊れた
+# 観測のみを捨てて撮り直す対処であり、検証窓を広げるものではない。_decide_foreground_owner の判定
+# 条件（完全一致・前景1件・許可名一致）はそのまま維持する。
 _verify_reviewer_process() {
-  local surface="$1" top direct ps_out detail
-  top="$(_cmux_top_processes)"
-  [[ -n "$top" ]] || { _log "cmux top を取得できません（プロセス証明不可）。"; return 1; }
-  direct="$(XREV_TOP="$top" _top_surface_processes "$surface")"
-  [[ -n "$direct" ]] || { _log "reviewer surface($surface)の直下プロセスを特定できません。"; return 1; }
-  ps_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_snapshot)"
-  detail="$(XREV_DIRECT="$direct" XREV_PS="$ps_out" _decide_foreground_owner "$REVIEWER_PROCESS")" || {
-    _log "reviewer surface($surface)のプロセス証明に失敗: ${detail}"
-    return 1
-  }
+  local surface="$1" top direct ps_out detail attempt
+  for attempt in 1 2 3; do
+    top="$(_cmux_top_processes)"
+    if [[ -z "$top" ]]; then
+      detail="cmux top を取得できません（プロセス証明不可）。"
+    else
+      direct="$(XREV_TOP="$top" _top_surface_processes "$surface")"
+      if [[ -z "$direct" ]]; then
+        detail="reviewer surface($surface)の直下プロセスを特定できません。"
+      else
+        ps_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_snapshot)"
+        if detail="$(XREV_DIRECT="$direct" XREV_PS="$ps_out" _decide_foreground_owner "$REVIEWER_PROCESS")"; then
+          if (( attempt > 1 )); then
+            _log "プロセス証明を ${attempt} 回目の試行で確認しました（過渡プロセスの消滅による観測不一致の可能性）。"
+          fi
+          return 0
+        fi
+      fi
+    fi
+    (( attempt < 3 )) && _xrev_sleep 1
+  done
+  _log "reviewer surface($surface)のプロセス証明に失敗: ${detail}"
+  return 1
 }
 
 # reviewer ペインの最終確定入力（プロンプト送信）。本文（1物理行）を送り終えたあとに呼ぶ。
