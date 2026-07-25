@@ -12,6 +12,10 @@
   "adr_dir": "docs/adr",
   "transport": "cmux",
   "reviewer_process": "codex",
+  "reviewer_launch_args": {
+    "codex": ["--sandbox", "read-only"],
+    "claude": ["--permission-mode", "plan"]
+  },
   "reviewer_autocreate": "ask",
   "reviewer_create_timeout_seconds": 30,
   "allow_global_resolve": false,

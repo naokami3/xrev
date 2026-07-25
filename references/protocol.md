@@ -257,7 +257,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | 16   | 同一WS内で reviewer タイトルが複数一致（曖昧） |
 | 17   | プロセス証明失敗（対象 surface の前景プロセスが許可名でない / top・ps 取得不可 / Enter 直前に前景が変化） |
 | 18   | 参照モードなのに同一WS解決でない（reference モードを拒否し inline へ切替を促す） |
-| 19   | reviewer 自動生成は試みたが codex の起動を確認できなかった（autocreate_failed） |
+| 19   | reviewer 自動生成は試みたが codex の起動を確認できなかった。launch 引数（read-only 強制）の決定失敗・起動未確認・実効未確認のいずれも含む（autocreate_failed） |
 | 20   | reviewer 生成の競合で期限切れ（別 primary が生成中 or 残留ロック→人間。reviewer_contention） |
 | 23   | payload のエンコードに失敗（cmux へは未送信。encode_failed。round_id/content_type 不正・不変条件違反等） |
 | 24   | センチネルで完成した応答はあるが妥当な review JSON を含まない（契約違反。invalid_response）。`timeout`(12) と区別され、primary は再出力を促す。 |
@@ -283,6 +283,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | `adr_dir` | `docs/adr` | ADR の出力ディレクトリ（相対は対象リポジトリ基準 / 絶対パス可） |
 | `transport` | `cmux` | 配管実装の選択（将来の差し替え点） |
 | `reviewer_process` | `codex` | 送信前プロセス証明で対象 surface の直下に在るべきプロセス名 |
+| `reviewer_launch_args` | `{"codex":["--sandbox","read-only"],"claude":["--permission-mode","plan"]}` | reviewer バイナリ名をキーに持つ object。起動経路（`start-reviewer.sh` / `ensure-reviewer` の自動生成）で機械的に付与する read-only 相当の起動引数。既存ペインを採用する経路では強制しない |
 | `reviewer_autocreate` | `ask` | reviewer ペインの自動生成方針。`ask`(スキルが一拍確認で確認後生成)/`auto`(無確認で生成)/`off`(生成せず案内) |
 | `reviewer_create_timeout_seconds` | `30` | 自動生成時の codex 起動確認・競合待ちの上限秒。範囲 1..600 |
 | `allow_global_resolve` | `false` | `CMUX_SURFACE_ID` 未注入時のグローバル解決を許すか（危険・opt-in） |
@@ -314,7 +315,9 @@ stderr に1行警告する（可用性優先。stdout は汚さない）。生�
 `XREV_REVIEWER_PROCESS`, `XREV_ALLOW_GLOBAL_RESOLVE`, `XREV_ALLOW_CROSS_WS`,
 `XREV_MAX_TRANSPORT_ATTEMPTS`, `XREV_ROUND_STATE`, `XREV_CODEX_BIN`,
 `XREV_REFERENCE_MODE`, `XREV_EXPECT_DIFF_HASH`, `XREV_EXPECT_HEAD`, `XREV_MAX_REFERENCE_FALLBACKS`,
-`XREV_REVIEWER_AUTOCREATE`, `XREV_REVIEWER_CREATE_TIMEOUT_SECONDS`, `XREV_WIRE_MAX_CHARS`。
+`XREV_REVIEWER_AUTOCREATE`, `XREV_REVIEWER_CREATE_TIMEOUT_SECONDS`, `XREV_WIRE_MAX_CHARS`,
+`XREV_REVIEWER_LAUNCH_ARGS`（JSON 配列文字列。`reviewer_launch_args` の該当 reviewer 分を上書きする。
+文字列のみの配列・印字可能ASCIIのみという型検証は config 由来の値と同じ）。
 `XREV_CONTENT_TYPE`/`XREV_ROUND_ID` は通常自動決定で、テスト・デバッグ時のみ明示する。
 
 ### 送信の堅牢化（実機知見）
@@ -334,8 +337,11 @@ stderr に1行警告する（可用性優先。stdout は汚さない）。生�
 - **分類**: resolve＋probe で `present`/`absent`/`ambiguous`(16)/`non_terminal`(14)/`process_mismatch`(17) を判別。
   既存が**壊れ(14)/曖昧(16)/別物(17)**のときは**作り直さず人間へ**（誤って二重生成しない）。
 - **生成は absent のときだけ**: caller の WS UUID を明示して `cmux new-pane --type terminal --workspace <WS>` で生成し、
-  **new-pane が返した surface UUID を所有物に固定**（title は一意でないので生成判定に使わない）→ `rename-tab` で
-  規約タイトル → `send 'exec <shell-safe quoted codex>'` → read-screen probe 成功＋直下=codex で起動確認（上限超は 19）。
+  **new-pane が返した surface UUID を所有物に固定**（title は一意でないので生成判定に使わない）→
+  `reviewer_launch_args`（read-only 強制。下記参照）を決定して各要素を shell-safe クォート →
+  `send 'exec <quoted codex> <quoted launch args...>'` → read-screen probe 成功＋直下=codex で起動確認 →
+  直下プロセスの実コマンドラインに launch 引数が含まれることを検証（`_verify_reviewer_launch_args`）→
+  `rename-tab` で規約タイトル。launch 引数の決定失敗・起動未確認・実効未確認はいずれも `exit 19`。
 - **競合の直列化**: WS UUID 鍵の `mkdir` ロック（${TMPDIR}/xrev-reviewer-<wsuuid>.lock・**リポジトリには作らない**）を
   原子取得。**ロックは回収しない**（stale 回収レースを構造的に排除）。取れない側は**奪わず** deadline まで
   read+codex 確認済みの present を待ち、期限切れは `exit 20`（残留ロックは案内に従い手動削除）。これで複数 primary
@@ -348,6 +354,29 @@ stderr に1行警告する（可用性優先。stdout は汚さない）。生�
   起動前に rename しても定着しない。生成は「起動確認 → rename」の順にする。`rename-tab` も read/send 同様
   `--workspace <ws_uuid> --surface <surface_uuid>` 指定が要る（短縮 ref/uuid 単独は `Tab not found`）。これにより
   reviewer_pane_title が定着し、次回の title 解決が当たる（create-if-missing の冪等性を保つ）。
+
+### reviewer read-only 強制（launch 引数の機械生成）
+
+SKILL.md は「reviewer = レビュー専用・read-only」と約束する。これを起動経路（`start-reviewer.sh` の
+手動起動 / `_xrev_create_reviewer` の自動生成）で機械的に強制する。設計はクロスレビューで収束。
+
+- **単一の生成関数**: `transport.sh` の `_xrev_reviewer_launch_args <reviewer バイナリ名>` を両起動経路が
+  共有する。優先順位は env `XREV_REVIEWER_LAUNCH_ARGS`（JSON 配列文字列）> config の
+  `reviewer_launch_args[<basename>]`。型検証（object であること・キー存在・文字列のみの配列・
+  印字可能ASCIIのみ・空文字列不可）は python3 側で行い、違反時・未知 reviewer 時は**空配列へ
+  フォールバックせず非ゼロ**（fail closed）。出力は1行1要素（改行区切り）で、呼び出し側は
+  `while read` で bash 配列へ集める（**eval は使わない**）。
+- **危険引数の拒否**: `_xrev_reject_unsafe_reviewer_args` が sandbox/approval 系フラグ
+  （前方一致: `--sandbox` `--ask-for-approval` `--approval` `--full-auto` `--dangerously`
+  `--permission-mode` `--yolo` `-a`）を検出したら非ゼロで拒否する。`start-reviewer.sh` はユーザー
+  追加引数をこれに通してから launch 引数の**後ろ**に連結する（launch 引数を後置上書きさせない）。
+- **起動後の実効検証**: 自動生成経路は起動確認（read-screen probe + プロセス証明）に加え、
+  `_verify_reviewer_launch_args` で対象 surface の直下プロセスの実コマンドライン（`ps -o pid=,args=`）に
+  launch 引数がすべて含まれることを確認してから採用する。確認できなければ `exit 19`（採用しない）。
+- **限界**: 既存ペインを「採用」する経路（classify → present）では launch 引数を検証しない
+  （ユーザーが手動で用意した端末を壊さないための意図的な限界）。同名の別バイナリへの差し替えや、
+  codex/claude 自身の設定ファイル側での上書きまでは検出・保証しない（詳細は
+  [`../docs/security-design.md`](../docs/security-design.md)）。
 
 ### 参照モード（Phase2: コンテキスト削減・diff 本文を送らない）
 

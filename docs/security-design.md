@@ -20,7 +20,7 @@ xrev の脅威モデルを正直に記述する。**何を守り、何を守ら�
 
 | 項目 | 実態 |
 |------|------|
-| reviewer の read-only | Codex は read-only を**前提**とするが、xrev は強制しない（権限分離は運用に委ねる）。 |
+| reviewer の read-only | 起動経路（`start-reviewer.sh` の手動起動 / `ensure-reviewer` の自動生成）では `reviewer_launch_args`（既定 codex=`--sandbox read-only`、claude=`--permission-mode plan`）を機械的に付与し、起動後に対象 surface の直下プロセスの実コマンドラインへ実際に含まれているかを検証する（確認できなければ起動を採用せず `exit 19`）。ただし**既存ペインを「採用」する経路（classify → present）ではこの強制を行わない**（ユーザーが手動で用意した端末をそのまま使う運用を壊さないための意図的な限界）。同名の別バイナリへの差し替えや、codex/claude 自身の設定ファイル側での上書きまでは検出・保証しない。 |
 | エージェントの外部通信 | 送受信内容は cmux ソケット経由で**ローカルに留まる**（xrev 自身は外部送信しない）。ただし各エージェント（Claude / Codex）自体は各社のサービスに接続する。 |
 | 秘密情報の管理 | xrev 自身は API キー等の秘密情報を**保存・要求しない**。cmux ソケットは認証付き（`CMUX_SOCKET_PASSWORD` 等がペイン内シェルに自動注入）。 |
 

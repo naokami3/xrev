@@ -43,6 +43,26 @@ if ! command -v "$codex_bin" >/dev/null 2>&1; then
   exit 127
 fi
 
+# ユーザー追加引数(「$@」)に sandbox/approval 系の上書きが無いか検証する。
+# read-only は launch 引数（下）で機械強制するため、ユーザー引数による後置上書きを許すと無意味になる。
+# transport.sh と同じ判定関数（_xrev_reject_unsafe_reviewer_args）を使い、判定リストを二重管理しない。
+if ! _xrev_reject_unsafe_reviewer_args "$@"; then
+  echo "[start-reviewer] 指定された引数に危険なフラグが含まれるため中止しました。タイトルは変更していません。" >&2
+  exit 64
+fi
+
+# launch 引数（read-only 強制）を決定する。transport.sh の単一の生成関数
+# （_xrev_reviewer_launch_args）を使い、自動生成経路(_xrev_create_reviewer)と実装を共有する。
+# config/env が壊れている・未知の reviewer 名の場合は fail closed（exec せず中止）。
+launch_args=()
+if ! _xrev_launch_out="$(_xrev_reviewer_launch_args "$codex_bin")"; then
+  echo "[start-reviewer] '$codex_bin' の launch 引数を決定できませんでした（config の reviewer_launch_args を確認してください）。タイトルは変更していません。" >&2
+  exit 64
+fi
+while IFS= read -r _xrev_launch_line; do
+  [[ -n "$_xrev_launch_line" ]] && launch_args+=("$_xrev_launch_line")
+done <<< "$_xrev_launch_out"
+
 if ! _cmux_set_title "$REVIEWER_PANE_TITLE"; then
   echo "[start-reviewer] タブタイトルの設定に失敗しました（rename-tab 不可）。" >&2
   exit 1
@@ -54,7 +74,11 @@ echo "[start-reviewer] タブを '$REVIEWER_PANE_TITLE' に設定しました。
 # 周期 sleep も直下として報告し続けるため、直下は複数件のまま。ゲートが見るのは件数ではなく
 # 「前景プロセスグループを握るのが codex か」である（references/protocol.md 参照）。
 # 万一 exec に失敗した場合は、規約タイトルのまま codex でない状態が残るため復旧手順を明示する。
-exec "$codex_bin" "$@"
+# launch 引数（read-only 強制）を先に、ユーザー追加引数("$@")を後に置く。危険引数は上で拒否済みなので
+# 後置でも sandbox/approval 系の上書きは起きない。
+# 【注意】bash 3.2（macOS既定）は set -u 下で「宣言済みだが要素0件」の配列展開が unbound variable に
+# なるバグがある。"${arr[@]+...}" イディオムで launch_args が0件（例: env override='[]'）でも安全に展開する。
+exec "$codex_bin" "${launch_args[@]+"${launch_args[@]}"}" "$@"
 echo "[start-reviewer] codex の起動(exec)に失敗しました。タブ名が '$REVIEWER_PANE_TITLE' のまま残っています。" >&2
 echo "[start-reviewer] このタブで手動で codex を起動するか、タブを閉じて開き直してください。" >&2
 exit 126

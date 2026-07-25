@@ -41,6 +41,59 @@ _set_stubs 16 usable 0
 out="$(_xrev_classify_reviewer)"; assert_rc "曖昧(16) → ambiguous" 16 "$?"
 eval "$_orig_resolve"; eval "$_orig_probe"; eval "$_orig_proc"
 
+# ── _xrev_create_reviewer: launch 引数（read-only 強制）の実効検証 ─────────────────
+# 生成本体そのものを cmux 非依存で動かすため、cmux 呼び出し・宛先解決・プロセス証明・
+# launch 引数の実効検証をスタブする（_xrev_reviewer_launch_args 自体は本物を使い、既定
+# config の codex 分がそのまま渡ることも併せて検証する）。
+_orig_cmux="$(declare -f _cmux)"
+_orig_tree="$(declare -f _cmux_tree_uuids)"
+_orig_locate="$(declare -f _locate_surface)"
+_orig_probe3="$(declare -f _probe_terminal_usable)"
+_orig_proc3="$(declare -f _verify_reviewer_process)"
+_orig_largs="$(declare -f _verify_reviewer_launch_args)"
+_orig_sleep="$(declare -f _xrev_sleep)"
+
+_cmux() { # new-pane 以外は無条件成功でよい（send/send-key/rename-tab の内容は本テストの対象外）
+  case "$1" in
+    new-pane) printf 'surface:42\n'; return 0 ;;
+    *) return 0 ;;
+  esac
+}
+_cmux_tree_uuids() { printf '{}'; }               # 中身は使わない（_locate_surface をスタブするため）
+_locate_surface() { printf 'surface:42\tu42\tws1'; return 0; }
+_probe_terminal_usable() { printf 'usable'; }
+_verify_reviewer_process() { return 0; }
+_xrev_sleep() { :; }  # 実待機を無くしてテストを高速化する
+
+# 実在する codex という名前のダミー実行ファイルを PATH に用意する（既定 config の codex 分をそのまま使う）。
+_crt_bindir="$(mktemp -d)"
+cat > "$_crt_bindir/codex" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$_crt_bindir/codex"
+
+# 【注意】_xrev_create_reviewer は結果を戻り値と _XREV_RES_* グローバルで返す（stdout には出さない）。
+# xrev_ensure_reviewer 側の既存コメントどおり、$() で捕捉するとサブシェルでグローバルが失われるため、
+# ここでも $() を使わず直接呼び出して rc と _XREV_RES_REF を確認する。
+
+# launch 引数の実効検証が失敗 → 採用しない(return 19)。CREATE_TIMEOUT を短くして待ち過ぎを防ぐ。
+_verify_reviewer_launch_args() { return 1; }
+_XREV_RES_REF=""
+PATH="$_crt_bindir:$PATH" CREATE_TIMEOUT=1 _xrev_create_reviewer ws1 >/dev/null 2>/dev/null; rc=$?
+assert_rc "launch引数の実効検証に失敗 → rc19（採用しない）" 19 "$rc"
+
+# launch 引数の実効検証が成功 → 採用（所有 surface ref をグローバルに設定）
+_verify_reviewer_launch_args() { return 0; }
+_XREV_RES_REF=""
+PATH="$_crt_bindir:$PATH" _xrev_create_reviewer ws1 >/dev/null 2>/dev/null; rc=$?
+assert_rc "launch引数の実効検証に成功 → rc0（採用）" 0 "$rc"
+assert_eq "採用時は生成した surface ref を _XREV_RES_REF に設定する" "surface:42" "$_XREV_RES_REF"
+
+rm -rf "$_crt_bindir"
+eval "$_orig_cmux"; eval "$_orig_tree"; eval "$_orig_locate"; eval "$_orig_probe3"; eval "$_orig_proc3"
+eval "$_orig_largs"; eval "$_orig_sleep"
+
 # ── xrev_ensure_reviewer のフロー（preflight/classify/create をスタブ）──
 _orig_pre="$(declare -f _cmux_preflight)"
 _orig_cls="$(declare -f _xrev_classify_reviewer)"

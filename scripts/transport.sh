@@ -501,6 +501,20 @@ _ps_snapshot() {
   ps -o pid=,pgid=,tpgid=,comm= "${args[@]}" 2>/dev/null
 }
 
+# ps スナップショット取得（フルコマンドライン込み・cmux 非依存の外部コマンド。テストではスタブする）。
+#   入力(stdin): PID を1行1件 / 出力: "<pid> <args...>" を1行1件（ps の既定区切り＝空白。args 自体に
+#   空白を含みうるため、末尾側は分割せず1本の文字列のまま扱う＝先頭の PID フィールドだけを分離する）。
+# 【用途】起動後の launch 引数の実効検証（_verify_reviewer_launch_args）専用。プロセス証明
+# （_ps_snapshot・pgid/tpgid 判定）とは目的が異なるため別関数にする。
+_ps_args_snapshot() {
+  local args=() p
+  while IFS= read -r p; do
+    [[ -n "$p" ]] && args+=(-p "$p")
+  done
+  (( ${#args[@]} )) || return 1
+  ps -o pid=,args= "${args[@]}" 2>/dev/null
+}
+
 # 純粋関数: 「対象 surface でキー入力を受け取るプロセス」が許可名かを判定する。
 #   入力: $1=許可名, env XREV_DIRECT="PID<TAB>name" 行群, env XREV_PS=_ps_snapshot 出力
 #   出力: 成功時は検出したプロセス名 / 失敗時は拒否理由。exit 0=許可 / 1=拒否（fail closed）
@@ -621,6 +635,42 @@ _verify_reviewer_process() {
   done
   _log "reviewer surface($surface)のプロセス証明に失敗: ${detail}"
   return 1
+}
+
+# 起動後の実効検証: reviewer 自動生成（_xrev_create_reviewer）が読み込ませた launch 引数
+# （read-only 強制）が、実際に対象 surface の直下プロセスのコマンドラインへ含まれていることを
+# 確認する。「起動できた」だけでは read-only が実際に効いているかは分からない
+# （引数生成のバグ・cmux send の欠落等でも起動確認自体は通ってしまうため）ので、
+# ここで実プロセスの args を見て機械的に裏取りする。
+#   入力: $1=surface ref, $2..=期待する launch 引数（可変長・0件可）
+#   出力: なし（exit のみ）。exit: 0=直下プロセスのいずれかで全 launch 引数を確認できた（0件なら
+#   直下プロセスの存在のみで成立） / 1=確認できない（呼び出し側は起動を採用しない＝fail closed）
+_verify_reviewer_launch_args() {
+  local surface="$1"; shift
+  local top direct ps_out
+  top="$(_cmux_top_processes)"
+  if [[ -z "$top" ]]; then
+    _log "cmux top を取得できません（launch 引数の実効検証不可）。"
+    return 1
+  fi
+  direct="$(XREV_TOP="$top" _top_surface_processes "$surface")"
+  if [[ -z "$direct" ]]; then
+    _log "reviewer surface($surface)の直下プロセスを特定できません（launch 引数の実効検証不可）。"
+    return 1
+  fi
+  ps_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_args_snapshot)"
+  XREV_LARGS_PS="$ps_out" python3 - "$@" <<'PY'
+import os, re, sys
+expected = sys.argv[1:]
+for line in os.environ.get("XREV_LARGS_PS", "").splitlines():
+    m = re.match(r"^\s*\d+\s*(.*)$", line)
+    if not m:
+        continue
+    args = m.group(1)
+    if all(e in args for e in expected):
+        sys.exit(0)
+sys.exit(1)
+PY
 }
 
 # reviewer ペインの最終確定入力（プロンプト送信）。本文（1物理行）を送り終えたあとに呼ぶ。
@@ -1247,6 +1297,102 @@ print("ok" if mark in dw else "unknown")
 # シェルに渡す値を単一引数として安全にクォート（XREV_CODEX_BIN 注入対策）。printf %q は shell-safe。
 _xrev_shquote() { printf '%q' "$1"; }
 
+# ── reviewer read-only 強制（launch 引数の機械生成・危険引数の拒否）─────────────────
+#
+# 【設計】SKILL.md は「reviewer = レビュー専用・read-only」と約束するが、これまでは素の
+# `exec codex` とユーザー引数の素通しで、read-only は codex 側の既定設定に完全依存していた。
+# ここで起動経路（start-reviewer.sh の手動経路 / _xrev_create_reviewer の自動生成経路）が
+# 共有する単一の引数生成関数を設け、read-only 相当の引数を機械的に強制する。
+#   - eval は使わない（1行1要素で stdout に出し、呼び出し側は while read で配列へ集める）。
+#   - 型検証（object であること・キー存在・文字列のみの配列・印字可能ASCIIのみ）は python 側で行い、
+#     違反時は空配列へフォールバックせず fail closed（非ゼロ）にする。
+#   - 未知の reviewer（config に launch 引数が無い）も fail closed（暴発防止の設計原則7とは別に、
+#     「read-only を強制できないなら起動しない」という安全側の既定）。
+
+# reviewer の launch 引数を決定する（config/env → 型検証 → 1行1要素で stdout）。
+#   入力: $1 = reviewer バイナリ名（basename を取ってから照合する）
+#   優先順位: env XREV_REVIEWER_LAUNCH_ARGS（JSON 配列文字列。文字列のみの配列を要求） >
+#             config の reviewer_launch_args[<basename>]
+#   出力(stdout): 引数を1行1要素（改行区切り）。引数自体に改行を含むことは型検証で拒否するため
+#     区切りとして安全。exit: 0=決定 / 1=型不正・未知reviewer・JSON不正（fail closed）
+_xrev_reviewer_launch_args() {
+  local name; name="$(basename -- "$1")"
+  XREV_LAUNCH_OVERRIDE="${XREV_REVIEWER_LAUNCH_ARGS:-}" XREV_CONFIG_PATH="$XREV_CONFIG" \
+    python3 - "$name" <<'PY'
+import json, os, sys
+
+def die(msg):
+    sys.stderr.write("[xrev/transport] %s\n" % msg)
+    sys.exit(1)
+
+def validate_list(val, label):
+    # object の値（launch 引数列）が「文字列のみの配列・印字可能ASCIIのみ・空文字列不可」であることを
+    # 検証する。1つでも違反があれば fail closed（部分的に有効な要素だけを使うことはしない）。
+    if not isinstance(val, list):
+        die("%s が不正です（配列ではありません）" % label)
+    out = []
+    for item in val:
+        if not isinstance(item, str):
+            die("%s に文字列以外の要素が含まれています" % label)
+        if item == "":
+            die("%s に空文字列の要素が含まれています" % label)
+        for ch in item:
+            code = ord(ch)
+            if code < 0x20 or code > 0x7E:
+                die("%s の要素に印字可能ASCII以外の文字が含まれています（該当要素は伏せます）" % label)
+        out.append(item)
+    return out
+
+name = sys.argv[1]
+override = os.environ.get("XREV_LAUNCH_OVERRIDE", "")
+
+if override:
+    try:
+        parsed = json.loads(override)
+    except Exception:
+        die("XREV_REVIEWER_LAUNCH_ARGS が不正な JSON です")
+    launch_args = validate_list(parsed, "XREV_REVIEWER_LAUNCH_ARGS")
+else:
+    cfg_path = os.environ.get("XREV_CONFIG_PATH", "")
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+    except Exception:
+        die("config を読み込めません（%s）" % cfg_path)
+    launch_map = cfg.get("reviewer_launch_args")
+    if not isinstance(launch_map, dict):
+        die("reviewer_launch_args が不正です（object ではありません）")
+    if name not in launch_map:
+        die("未知の reviewer '%s'（launch 引数が未定義）。"
+            "config の reviewer_launch_args に追加するか "
+            "XREV_REVIEWER_LAUNCH_ARGS を指定してください" % name)
+    launch_args = validate_list(launch_map[name], "reviewer_launch_args['%s']" % name)
+
+for a in launch_args:
+    print(a)
+PY
+}
+
+# 危険な launch 引数上書きの拒否。sandbox/approval 系フラグの前方一致で判定する。
+# 【判定リストはここ1箇所にまとめる】codex/claude の sandbox・承認モード系フラグ。
+#   launch 引数（read-only 強制）の後置上書きを防ぐ（start-reviewer.sh のユーザー追加引数向け）。
+_xrev_reject_unsafe_reviewer_args() {
+  local -a unsafe_prefixes=(
+    "--sandbox" "--ask-for-approval" "--approval" "--full-auto"
+    "--dangerously" "--permission-mode" "--yolo" "-a"
+  )
+  local arg prefix
+  for arg in "$@"; do
+    for prefix in "${unsafe_prefixes[@]}"; do
+      if [[ "$arg" == "$prefix"* ]]; then
+        _log "危険な引数 '${arg}' は許可されません（sandbox/approval 系フラグの上書きは拒否します）。"
+        return 64
+      fi
+    done
+  done
+  return 0
+}
+
 # 呼び出し元(CMUX_SURFACE_ID)の所属ワークスペース UUID を返す。
 _xrev_caller_ws() {
   [[ -n "${CMUX_SURFACE_ID:-}" ]] || return 1
@@ -1293,10 +1439,22 @@ _xrev_lock_path() {
 }
 
 # 生成本体: caller WS に terminal ペインを作り、所有 surface UUID を固定して codex を起動・確認する。
-# 成功で _XREV_RES_* に生成結果を入れて 0、起動確認失敗で 19。
+# 成功で _XREV_RES_* に生成結果を入れて 0、起動確認失敗（read-only 引数の実効確認できず、を含む）で 19。
 _xrev_create_reviewer() {
   local ws="$1" codex="${XREV_CODEX_BIN:-codex}"
   command -v "$codex" >/dev/null 2>&1 || { _log "codex バイナリ '$codex' が見つかりません（XREV_CODEX_BIN で指定可）。"; return 19; }
+  # launch 引数（read-only 強制）を先に決定する。cmux にペインを作る前に検証しておくことで、
+  # config/env が壊れている場合に無駄なペイン生成をしない。生成できなければ fail closed で中止。
+  local -a launch_args=()
+  local launch_out
+  if ! launch_out="$(_xrev_reviewer_launch_args "$codex")"; then
+    _log "reviewer(${codex}) の launch 引数を決定できませんでした（生成を中止します）。"
+    return 19
+  fi
+  local _la_line
+  while IFS= read -r _la_line; do
+    [[ -n "$_la_line" ]] && launch_args+=("$_la_line")
+  done <<< "$launch_out"
   local out nrc ref
   # new-pane の rc を確認し、成功時の stdout のみから surface を抽出する（失敗メッセージの誤抽出を防ぐ）。
   out="$(_cmux new-pane --type terminal --workspace "$ws" --focus false 2>/dev/null)"; nrc=$?
@@ -1309,12 +1467,18 @@ _xrev_create_reviewer() {
   loc="$(XREV_LISTING="$tree" _locate_surface "$ref")" || { _log "生成した surface($ref)を特定できません。"; return 19; }
   sf="$(printf '%s' "$loc" | cut -f2)"
   _XREV_RES_REF="$ref"; _XREV_RES_UUID="$sf"; _XREV_RES_WS="$ws"; _XREV_RES_PATH="created"; _XREV_RES_SAMEWS=1
-  # codex を exec で起動（shell-safe にクォート）。
+  # codex を launch 引数付きで exec 起動（各要素を個別に shell-safe クォートし、eval は使わない）。
   # 【実機知見】タブのリネームは「codex 起動の前」に行うと、codex が起動時に cwd 由来の名前(例 "xrev")で
   #   タブ名を上書きしてしまい、reviewer_pane_title が定着しない（→ 次回の title 解決が当たらず冪等性が崩れる）。
   #   そのため rename は**起動確認の後**に行う（post-startup rename は上書きされず定着することを実機確認）。
   #   また rename-tab も read/send 同様 workspace+surface UUID 指定が必要（短縮 ref/uuid 単独は "Tab not found"）。
-  _cmux send --workspace "$ws" --surface "$sf" "exec $(_xrev_shquote "$codex")" >/dev/null 2>&1
+  local cmd_str; cmd_str="exec $(_xrev_shquote "$codex")"
+  # bash 3.2（macOS既定）は set -u 下で「宣言済みだが要素0件」の配列展開が unbound variable に
+  # なるバグがある（bash 4.4 で修正）。"${arr[@]+...}" イディオムで 0 件配列でも安全に展開する。
+  for _la_line in "${launch_args[@]+"${launch_args[@]}"}"; do
+    cmd_str+=" $(_xrev_shquote "$_la_line")"
+  done
+  _cmux send --workspace "$ws" --surface "$sf" "$cmd_str" >/dev/null 2>&1
   _cmux send-key --workspace "$ws" --surface "$sf" enter >/dev/null 2>&1
   # 起動確認（同一試行内で read+top）。所有 UUID にだけ作用。
   local deadline=$(( SECONDS + CREATE_TIMEOUT )) term
@@ -1322,6 +1486,13 @@ _xrev_create_reviewer() {
     _xrev_sleep 1
     term="$(_probe_terminal_usable "$_XREV_RES_REF")"
     if [[ "$term" == "usable" ]] && _verify_reviewer_process "$_XREV_RES_REF"; then
+      # read-only 引数の実効検証。ここまでは「起動できた」だけで、launch 引数が実際に効いて
+      # いる保証にはならない（引数生成のバグ・cmux send の欠落等でも起動確認は通り得る）ため、
+      # 実プロセスのコマンドラインで裏取りしてから採用する。確認できなければ採用しない(fail closed)。
+      if ! _verify_reviewer_launch_args "$_XREV_RES_REF" "${launch_args[@]+"${launch_args[@]}"}"; then
+        _log "reviewer は起動しましたが read-only 引数の実効を確認できませんでした（surface=${ref}）。"
+        return 19
+      fi
       # 起動確認後にリネーム（codex のタブ名上書きを上書きし返して定着させる）。失敗は致命でない
       # （当該セッションは UUID で操作できる）が、冪等性のため診断ログは残す。
       _cmux rename-tab --workspace "$ws" --surface "$sf" "$REVIEWER_PANE_TITLE" >/dev/null 2>&1 \
