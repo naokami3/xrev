@@ -27,7 +27,7 @@ EVENT_JSON="$(cat)"
 # python3 で prompt 抽出とキーワード判定を行う（jq 非依存）。
 # キーワード一致時のみ additionalContext 入りの JSON を stdout に出す。
 XREV_EVENT="$EVENT_JSON" python3 - "$CONFIG" <<'PY'
-import json, os, sys
+import json, os, re, sys
 
 config_path = sys.argv[1]
 try:
@@ -43,8 +43,60 @@ except Exception:
 
 prompt = event.get("prompt", "") or ""
 
+
+def strip_noise(text: str) -> str:
+    """誤発火の温床（コードブロック・インラインコード・引用・diff）を除去する。
+
+    stdin から prompt、引数から keyword を受けて真偽を返す純粋関数
+    (is_triggered) から呼ばれる下請け。ここで除去した残りのテキストにのみ
+    キーワード境界照合をかける。
+    """
+    lines = text.split("\n")
+    kept = []
+    in_fence = False
+    fence_marker = None
+    for line in lines:
+        stripped = line.lstrip()
+        if in_fence:
+            if stripped.startswith(fence_marker):
+                # 閉じ fence 行。閉じが無ければ末尾まで in_fence のまま破棄され続ける。
+                in_fence = False
+                fence_marker = None
+            continue
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = True
+            fence_marker = stripped[:3]
+            continue
+        kept.append(line)
+
+    # 同一行内の `...`（インラインコード）を除去する。
+    kept = [re.sub(r"`[^`\n]*`", "", line) for line in kept]
+
+    # 引用行（行頭 >）を除去する。
+    kept = [line for line in kept if not line.lstrip().startswith(">")]
+
+    # diff 由来行を除去する。
+    diff_prefixes = ("diff --git", "@@ ", "+++ ", "--- ", "index ")
+    kept = [line for line in kept if not line.lstrip().startswith(diff_prefixes)]
+
+    return "\n".join(kept)
+
+
+def is_triggered(text: str, kw: str) -> bool:
+    """prompt と keyword を受け、境界付きでキーワードが発火するかを返す純粋関数。"""
+    if not kw:
+        return False
+    cleaned = strip_noise(text)
+    # 直前が英数字/_/@/./- なら不一致（"foo@xrev" 等の部分一致を除外）。
+    # 直後が英数字/_/- なら不一致（"@xrevfoo" 等を除外。日本語等はそのまま発火）。
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_@.\-])" + re.escape(kw) + r"(?![A-Za-z0-9_\-])"
+    )
+    return pattern.search(cleaned) is not None
+
+
 # キーワード非検知 → 完全沈黙（何も出力せず終了）。
-if keyword not in prompt:
+if not is_triggered(prompt, keyword):
     sys.exit(0)
 
 # 検知 → 設計段階からのクロスレビューを回す指示をコンテキスト注入。
