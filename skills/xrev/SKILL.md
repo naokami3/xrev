@@ -6,7 +6,7 @@ description: >-
   reviewer(既定 Codex) が cmux 経由でクロスレビューを行う往復を、設計フェーズから自動運用する。
   critical/high が 0 件になるまでレビュー指摘を反映し、収束後に到達点（review/commit/pr）へ進める。
   キーワードや明示指示が無い些細な変更では発火しない。
-allowed-tools: Bash Read Edit Write Grep Glob
+allowed-tools: Bash, Read, Edit, Write, Grep, Glob
 ---
 
 # xrev — 設計段階からのクロスレビュー往復
