@@ -92,7 +92,12 @@ severity（blocker の定義）・act ラベル・各スクリプトの内部終
 - **実行コンテキスト**: primary は cmux ペイン内で起動する必要がある（認証情報がペイン内シェルにのみ
   自動注入されるため）。cmux 外からは配管が接続できない。
 - **環境依存**: macOS の cmux（libghostty ベース）が前提。`cmux` の list/tree 系コマンド名・JSON 形状・
-  rename での title 反映はバージョンで揺れる（検証時 cmux 0.64.15）。
+  rename での title 反映・**プロセスツリーの報告形状**はバージョンで揺れる（現在の検証は cmux 0.64.20）。
+  実測でしか分からない挙動は [cmux-behavior.md](cmux-behavior.md) に集約している。設計前提そのものなので、
+  配管に手を入れる前に必ず読むこと。
+- **cmux の未修正バグに依存した回避策がある**: ソケット受信側の UTF-8 チャンク欠陥のため、送信 wire を
+  ASCII に閉じている（`XREV-ASCII-V1`）。上流が修正されたら削除可否を判断する。詳細は
+  [cmux-behavior.md](cmux-behavior.md) の 4 と [`../references/protocol.md`](../references/protocol.md)。
 - **reviewer ペイン運用**: 固定タイトル `Review Codex` で 1 枚、履歴ゼロから開く。作業切替時は
   Codex を再起動し、cmux のセッション復元が前作業を復元しないよう注意する。
 - **reviewer は「実ターミナル内の codex CLI」であること**: cmux のエージェント統合パネル

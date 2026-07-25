@@ -51,13 +51,21 @@ scripts/transport.sh review "<payload>"   # 1 往復の手動テスト（実機�
   配管が接続できず、`transport.sh` が preflight で `exit 31` を返す。`scripts/transport.sh ping` で確認。
 - **reviewer ペインは固定タイトル `Review Codex` で 1 枚、履歴ゼロで開く**: 作業切替時は Codex を
   再起動して履歴を切る。cmux のセッション復元が前作業を復元しないよう注意。
+- **cmux の実挙動は推測しない**: surface の直下プロセス構成、`top` の name 列、ソケットの
+  UTF-8 チャンク欠陥、composer の消去可否など、公式ドキュメントに無く実測でしか分からない挙動が
+  設計前提になっている。配管に手を入れる前に [docs/cmux-behavior.md](docs/cmux-behavior.md) を読むこと。
+  過去に「直下プロセスが1件」という未検証の前提で往復が全停止した実績がある。
+- **非決定的な事象を1回の試行で判定しない**: cmux の送信は間欠的に失敗する。単調性を仮定した
+  二分探索は誤った境界を返す（実際に2度誤った結論が出ている）。
 
 環境・依存（macOS の cmux、到達点 `pr` の `gh`、cmux のバージョン揺れ）の詳細は
-[docs/architecture.md](docs/architecture.md) を参照。
+[docs/architecture.md](docs/architecture.md)、実測知見は
+[docs/cmux-behavior.md](docs/cmux-behavior.md) を参照。
 
 ## 関連ドキュメント
 
 - 構造・設計原則・transport プロトコル要約 → [docs/architecture.md](docs/architecture.md)
+- cmux の実挙動（実測ベース・設計前提） → [docs/cmux-behavior.md](docs/cmux-behavior.md)
 - フェーズと進捗 → [docs/roadmap.md](docs/roadmap.md)
 - 脅威モデル（何を守り何を守らないか） → [docs/security-design.md](docs/security-design.md)
 - 往復の手順そのもの → [skills/xrev/SKILL.md](skills/xrev/SKILL.md)
