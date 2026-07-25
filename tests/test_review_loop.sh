@@ -52,13 +52,13 @@ assert_eq "decision=transport_error" "transport_error" "$(printf '%s' "$out" | j
 
 # ── _format_decision（純粋）: 異常系で壊れず既定値の決定JSONを出す ──
 # raw も parsed も壊れている（transport_error/invalid 相当）→ 既定値で整形できる
-out="$(_format_decision transport_error 1 5 "" "")"
+out="$(printf '%s' "" | XREV_PARSED="" _format_decision transport_error 1 5)"
 assert_eq "空 raw/parsed でも decision を保持" "transport_error" "$(printf '%s' "$out" | json_get decision)"
 assert_eq "空時 blockers 既定 0" "0" "$(printf '%s' "$out" | json_get blockers)"
 assert_eq "空時 verdict は null" "null" "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["verdict"]))')"
 
 # 壊れた JSON 文字列を渡しても例外で死なず既定にフォールバック
-out="$(_format_decision invalid 2 5 "これはJSONでない" "これも壊れている")"
+out="$(printf '%s' "これはJSONでない" | XREV_PARSED="これも壊れている" _format_decision invalid 2 5)"
 assert_eq "壊れた raw でも decision=invalid" "invalid" "$(printf '%s' "$out" | json_get decision)"
 assert_eq "壊れた parsed でも blockers=0" "0" "$(printf '%s' "$out" | json_get blockers)"
 assert_eq "raw_review は渡した生文字列を保持" "これはJSONでない" "$(printf '%s' "$out" | json_get raw_review)"
@@ -66,10 +66,15 @@ assert_eq "raw_review は渡した生文字列を保持" "これはJSONでない
 # 正常: parsed の counts/blockers と raw の findings を決定JSONに反映
 raw='{"verdict":"request_changes","findings":[{"file":"a","severity":"high","category":"bug","message":"m"}],"summary":"要約"}'
 parsed='{"valid":true,"verdict":"request_changes","counts":{"critical":0,"high":1,"medium":0,"low":0,"nit":0},"blockers":1,"total":1}'
-out="$(_format_decision continue 1 5 "$raw" "$parsed")"
+out="$(printf '%s' "$raw" | XREV_PARSED="$parsed" _format_decision continue 1 5)"
 assert_eq "正常時 blockers を parsed から反映" "1" "$(printf '%s' "$out" | json_get blockers)"
 assert_eq "正常時 summary を raw から反映" "要約" "$(printf '%s' "$out" | json_get summary)"
 assert_eq "正常時 findings を raw から反映" "a" "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["findings"][0]["file"])')"
+
+# trc=26（wire_max_chars 超過）→ transport_reason=payload_too_large に写像される（変更2）
+out="$(printf '%s' "" | XREV_PARSED="" _format_decision transport_error 1 5 26 1)"
+assert_eq "trc=26 は decision=transport_error のまま" "transport_error" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "trc=26 は transport_reason=payload_too_large" "payload_too_large" "$(printf '%s' "$out" | json_get transport_reason)"
 
 # ── ループ安全弁: round_state（通算 transport 試行の上限・巻戻し検知）──
 _stub_approve2() { printf '%s' '{"verdict":"approve","findings":[]}'; }

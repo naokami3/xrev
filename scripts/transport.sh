@@ -64,6 +64,11 @@ ALLOW_CROSS_WS="${XREV_ALLOW_CROSS_WS:-$(_cfg allow_cross_ws 'false')}"
 REVIEWER_AUTOCREATE="${XREV_REVIEWER_AUTOCREATE:-$(_cfg reviewer_autocreate 'ask')}"
 CREATE_TIMEOUT="${XREV_REVIEWER_CREATE_TIMEOUT_SECONDS:-$(_cfg reviewer_create_timeout_seconds 30)}"
 [[ "$CREATE_TIMEOUT" =~ ^[0-9]+$ ]] || CREATE_TIMEOUT=30
+# wire（1物理行）の文字数上限（fail closed）。数値検証に加え範囲も検証し、範囲外・非数値は既定へ
+# フォールバックする（CREATE_TIMEOUT と同様の方針）。根拠・詳細は references/protocol.md 参照。
+WIRE_MAX_CHARS="${XREV_WIRE_MAX_CHARS:-$(_cfg wire_max_chars 64000)}"
+[[ "$WIRE_MAX_CHARS" =~ ^[0-9]+$ ]] || WIRE_MAX_CHARS=64000
+(( WIRE_MAX_CHARS >= 1000 && WIRE_MAX_CHARS <= 1000000 )) || WIRE_MAX_CHARS=64000
 READ_LINES="${XREV_READ_SCREEN_LINES:-$(_cfg read_screen_lines 400)}"
 SETTLE_SECS="${XREV_SEND_SETTLE_SECONDS:-$(_cfg send_settle_seconds 2)}"
 RESP_TIMEOUT="${XREV_RESPONSE_TIMEOUT_SECONDS:-$(_cfg response_timeout_seconds 180)}"
@@ -607,10 +612,19 @@ _cmux_read_screen() {
 # raw_decode で走査 → dict かつ verdict を持ち（round_id 指定時は一致する）ものだけ採用」する。
 # 完成した JSON だけが parse できるため、ストリーミング途中の未完成応答も自然に除外される。
 _scan_review_blocks() {
-  XREV_SCREEN="$1" XREV_EXPECT_ROUND_ID="${2:-}" python3 <<'PY'
-import os, sys, json
-text = os.environ.get("XREV_SCREEN", "")
-expect_rid = os.environ.get("XREV_EXPECT_ROUND_ID", "")
+  # 画面テキスト（$1、巨大になり得る）は stdin から読む。ヒアドキュメントが stdin を占有して
+  # 競合するため、プログラム本文を `read -r -d ''` で変数化し `python3 -c` へ渡して stdin を
+  # 空ける。round_id は小さいので従来どおり argv のまま。
+  # 【注意】ここで `prog="$(cat <<'PY' ... PY)"` を使わないこと: bash 3.2（macOS既定）は
+  # $(...) の対応括弧探索がヒアドキュメント本文の中身（括弧・引用符の個数）まで数えてしまう
+  # バグ/仕様があり、本文中の括弧が不均衡な行（Python の複数行文字列連結等）があると
+  # 「unexpected EOF while looking for matching」で構文エラーになる。`read -d ''` は
+  # command substitution を経由しないため影響を受けない。
+  local prog
+  read -r -d '' prog <<'PY' || true
+import sys, json
+text = sys.stdin.read()
+expect_rid = sys.argv[1] if len(sys.argv) > 1 else ""
 
 # TUI の折り返し＋ガター字下げを除く（各行 strip して連結）。
 dw = "".join(line.strip() for line in text.splitlines())
@@ -646,6 +660,7 @@ print(len(blocks))
 if blocks:
     sys.stdout.write(blocks[-1])
 PY
+  python3 -c "$prog" "${1:-}"
 }
 
 # 純粋関数（cmux 非依存・テスト可能）: payload を「画面上は1物理行・意味上は複数行」に
@@ -683,11 +698,20 @@ XREV_ASCII_HINT="ASCII-ONLY WIRE. Slice fields by LEN_INSTR/LEN_OUT/LEN_PAYLOAD 
 # 5 の直前に「バックスラッシュ・改行・CR・TAB が残っていない」ことを、直後に「全文字が 0x20-0x7E」を
 # 検証する。前者が成り立つので、wire 上の "\" は必ず xrev が生成した \uXXXX の一部になり復号が一意になる。
 _build_framed_line() {
-  XREV_BUILD_PAYLOAD="$3" XREV_ENC="$XREV_ASCII_ENCODING" XREV_HINT="$XREV_ASCII_HINT" \
-    python3 - "$1" "$2" "$SENTINEL_BEGIN" "$SENTINEL_END" <<'PY'
+  # payload（$3、巨大になり得る）は stdin から読む。ヒアドキュメントが stdin を占有して
+  # 競合するため、プログラム本文を `read -r -d ''` で変数化し `python3 -c` へ渡して
+  # stdin を空ける（Linux の ARG_MAX/MAX_ARG_STRLEN を env/argv 経由で踏み抜かないため）。
+  # ct/round_id/sentinel は小さいので従来どおり argv、ENCODING/HINT は固定小サイズなので env のまま。
+  # 【注意】`prog="$(cat <<'PY' ... PY)"` は使わない: bash 3.2（macOS既定）は $(...) の対応
+  # 括弧探索がヒアドキュメント本文中の括弧・引用符の個数まで数えてしまい、本文中の括弧が
+  # 不均衡な行（Python の複数行文字列連結等、本関数のように多い）があると
+  # 「unexpected EOF while looking for matching」で構文エラーになる。`read -d ''` は
+  # command substitution を経由しないため影響を受けない。
+  local prog
+  read -r -d '' prog <<'PY' || true
 import os, sys
 ct, rid, sb, se = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-body = os.environ.get("XREV_BUILD_PAYLOAD", "")
+body = sys.stdin.read()
 enc_name = os.environ["XREV_ENC"]
 hint = os.environ["XREV_HINT"]
 
@@ -767,14 +791,20 @@ for ch in line:
         die("wire に印字可能 ASCII 以外が残っています (U+%04X)" % ord(ch))
 sys.stdout.write(line)
 PY
+  XREV_ENC="$XREV_ASCII_ENCODING" XREV_HINT="$XREV_ASCII_HINT" \
+    python3 -c "$prog" "$1" "$2" "$SENTINEL_BEGIN" "$SENTINEL_END"
 }
 
 # 純粋関数: wire 1行を元の payload へ復号する（プロトコルの正典実装。テストの往復検証に使う）。
-#   入力: env XREV_DECODE_LINE / 出力: 復号した payload。不正な wire は exit 1（fail closed）。
+#   入力: stdin=wire（巨大になり得る） / 出力: 復号した payload。不正な wire は exit 1（fail closed）。
 _xrev_decode_line() {
-  XREV_DECODE_LINE="${XREV_DECODE_LINE:-}" XREV_ENC="$XREV_ASCII_ENCODING" python3 - <<'PY'
+  # wire は stdin から読む。ENCODING 名は固定小サイズなので env のまま。
+  # `prog="$(cat <<'PY' ... PY)"` は使わない（bash 3.2 の $(...) 対応括弧探索がヒアドキュメント
+  # 本文中の不均衡な括弧・引用符で誤爆するため。詳細は _build_framed_line のコメント参照）。
+  local prog
+  read -r -d '' prog <<'PY' || true
 import os, re, sys
-line = os.environ.get("XREV_DECODE_LINE", "")
+line = sys.stdin.read()
 enc_name = os.environ["XREV_ENC"]
 
 def die(msg):
@@ -883,6 +913,7 @@ def detok(s):
 
 sys.stdout.write("\n".join(detok(ln) for ln in lines))
 PY
+  XREV_ENC="$XREV_ASCII_ENCODING" python3 -c "$prog"
 }
 
 # payload の content_type を推定する（純粋）。
@@ -936,10 +967,17 @@ _cmux_clear_input() {
 # 新しいエラー種別を診断で読めるようにしたいときは allowlist に形式を追加する＝人間のレビューを経る。
 # 推測で allowlist を広げないこと（接頭辞・接尾辞・引用構造が少しでも違えば未知扱いにする）。
 _xrev_redact_diag() {
-  XREV_DIAG_ERR="${XREV_DIAG_ERR:-}" XREV_DIAG_LINE="${XREV_DIAG_LINE:-}" python3 - <<'PY'
-import os, re
+  # 送信本文(XREV_DIAG_LINE。巨大になり得る)は stdin から読む。stderr(XREV_DIAG_ERR)は
+  # 呼び出し側で常に 4096 文字に打ち切られる契約（下の MAX_INPUT 参照）で ENV 1本の上限には
+  # 遠く及ばず、stdin 化すると呼び出し側が2本のパイプ/リダイレクトを使い分ける必要が出て
+  # 複雑になるだけなので、単純さを優先して env のままにする。
+  # `prog="$(cat <<'PY' ... PY)"` は使わない（bash 3.2 の $(...) 対応括弧探索がヒアドキュメント
+  # 本文中の不均衡な括弧・引用符で誤爆するため。詳細は _build_framed_line のコメント参照）。
+  local prog
+  read -r -d '' prog <<'PY' || true
+import os, re, sys
 err = os.environ.get("XREV_DIAG_ERR", "")
-line = os.environ.get("XREV_DIAG_LINE", "")
+line = sys.stdin.read()
 
 # 巨大な stderr は**正規化する前に**打ち切る（正規表現や走査のコストを抑える DoS 抑制。
 # 正規化後に判定すると、畳み込みのコストを先に払ってしまい抑制にならない）。
@@ -1001,6 +1039,7 @@ if re.fullmatch(r"Error: Command timed out", s):
 # 2) 既知形式に当たらないものは未知形式として全体を伏せる。
 unknown("未知形式の stderr", s)
 PY
+  XREV_DIAG_ERR="${XREV_DIAG_ERR:-}" python3 -c "$prog"
 }
 
 # 1物理行を reviewer 入力欄へ送る（確定はしない）。cmux 依存。
@@ -1038,7 +1077,7 @@ _cmux_send_line() {
   # 全滅時のみ診断を出す（成功時に無用なログを増やさない）。バイト長は仮説検証の主要な手掛かり。
   local nbytes; nbytes="$(printf '%s' "$line" | wc -c | tr -d ' ')"
   _log "送信に ${max} 回失敗しました（rc=[${rcs}] 文字数=${#line} バイト数=${nbytes}）。"
-  _log "cmux stderr: $(XREV_DIAG_ERR="$last_err" XREV_DIAG_LINE="$line" _xrev_redact_diag)"
+  _log "cmux stderr: $(printf '%s' "$line" | XREV_DIAG_ERR="$last_err" _xrev_redact_diag)"
   return 6
 }
 
@@ -1312,15 +1351,22 @@ xrev_transport_review() {
   # 本スクリプトは set -e ではないため、rc を見ないと壊れた/空の wire をそのまま送ってしまう。
   # 専用コード(23)にするのは、cmux へ一度も送っていない失敗を「送信失敗(11)」として報告すると
   # 利用者向け診断や将来の再試行判断が不正確になるため。
-  if ! line="$(_build_framed_line "$ct" "$round_id" "$payload")" || [[ -z "$line" ]]; then
+  if ! line="$(printf '%s' "$payload" | _build_framed_line "$ct" "$round_id")" || [[ -z "$line" ]]; then
     _log "payload のエンコードに失敗しました（cmux へは送信していません）。"
     return 23
   fi
   _log "round_id=${round_id} content_type=${ct} len=${#line}"
 
+  # wire 長の上限（fail closed）。実測（docs/cmux-behavior.md）で ASCII 100KB の送信が成功して
+  # いるが、想定外に巨大な payload を安全側に倒して早期に弾くため保守的な既定値を設けている。
+  if (( ${#line} > WIRE_MAX_CHARS )); then
+    _log "wire が上限を超えました（実長=${#line} 上限=${WIRE_MAX_CHARS}）。payload を前回からの差分に縮めるか、XREV_WIRE_MAX_CHARS を明示して拡大してください。"
+    return 26
+  fi
+
   # 送信前ベースライン：この round_id に一致する妥当ブロック数（通常0、防御的に数える）。
   local before_count
-  before_count="$(_scan_review_blocks "$(_cmux_read_screen "$surface")" "$round_id" | head -1)"
+  before_count="$(_cmux_read_screen "$surface" | _scan_review_blocks "$round_id" | head -1)"
   [[ "$before_count" =~ ^[0-9]+$ ]] || before_count=0
 
   # (iii-b) 本文送信の直前に再検証。(iii) からベースライン取得（read-screen）を挟むため、
@@ -1372,7 +1418,7 @@ xrev_transport_review() {
   _xrev_sleep "$SETTLE_SECS"
   while (( waited < RESP_TIMEOUT )); do
     screen="$(_cmux_read_screen "$surface")"
-    scan="$(_scan_review_blocks "$screen" "$round_id")"
+    scan="$(printf '%s' "$screen" | _scan_review_blocks "$round_id")"
     count="$(printf '%s' "$scan" | head -1)"
     [[ "$count" =~ ^[0-9]+$ ]] || count=0
     if (( count > before_count )); then

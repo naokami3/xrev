@@ -115,18 +115,26 @@ _xrev_decide() {
 
 # 決定 JSON を stdout に整形する（exit はしない・呼び出し側が制御）。
 _format_decision() {
-  # _format_decision <decision> <iter> <max> <raw_json> <parsed_json> <transport_exit_code> \
-  #                  <transport_attempts> <state_violation> <reference_fallbacks>
+  # _format_decision <decision> <iter> <max> <transport_exit_code> <transport_attempts> \
+  #                  <state_violation> <reference_fallbacks>
+  # raw_json（reviewer の生応答。画面由来で最大 500KB 相当になり得る）は stdin から読む。
+  # parsed_json（parse-review の集計。小さい）は env XREV_PARSED で渡す。
   # transport_exit_code は transport の生終了コード（0=成功）。transport_error 時に原因を機械区別するため
   # transport_reason へ写像して残す（外部 exit は従来どおり 22 のまま。Phase1 診断契約）。
   # round_state は次回呼出しへ primary が必ず渡す（ループ安全弁。Phase2 で reference_fallbacks も含む）。
-  python3 - "$1" "$2" "$3" "$4" "$5" "${6:-0}" "${7:-0}" "${8:-}" "${9:-0}" <<'PY'
-import json, sys
-decision, it, mx, raw, parsed = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], sys.argv[5]
-trc = int(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6].lstrip("-").isdigit() else 0
-attempts = int(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7].lstrip("-").isdigit() else 0
-state_violation = sys.argv[8] if len(sys.argv) > 8 and sys.argv[8] else None
-ref_fallbacks = int(sys.argv[9]) if len(sys.argv) > 9 and sys.argv[9].lstrip("-").isdigit() else 0
+  # 【注意】`prog="$(cat <<'PY' ... PY)"` は使わない: bash 3.2（macOS既定）は $(...) の対応
+  # 括弧探索がヒアドキュメント本文中の括弧・引用符の個数まで数えてしまうバグ/仕様があり、構文
+  # エラーになりうる。`read -d ''` は command substitution を経由しないため影響を受けない。
+  local prog
+  read -r -d '' prog <<'PY' || true
+import json, os, sys
+decision, it, mx = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+raw = sys.stdin.read()
+parsed = os.environ.get("XREV_PARSED", "")
+trc = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4].lstrip("-").isdigit() else 0
+attempts = int(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5].lstrip("-").isdigit() else 0
+state_violation = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] else None
+ref_fallbacks = int(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7].lstrip("-").isdigit() else 0
 try:
     p = json.loads(parsed) if parsed else {}
 except Exception:
@@ -138,7 +146,7 @@ except Exception:
 # transport 終了コード → 安定 reason（利用者向け修正案を機械的に選ぶため）
 REASONS = {
     3: "cmux_unavailable", 10: "resolve_failed", 11: "send_failed", 12: "timeout",
-    23: "encode_failed",
+    23: "encode_failed", 26: "payload_too_large",
     13: "truncated", 14: "non_terminal", 15: "ws_mismatch", 16: "ambiguous",
     17: "process_mismatch", 19: "autocreate_failed", 20: "reviewer_contention",
     30: "cmux_not_found", 31: "not_in_pane",
@@ -161,6 +169,7 @@ out = {
 }
 print(json.dumps(out, ensure_ascii=False, indent=2))
 PY
+  python3 -c "$prog" "$1" "$2" "$3" "${4:-0}" "${5:-0}" "${6:-}" "${7:-0}"
 }
 
 # 1 ラウンドを実行する。
@@ -179,19 +188,19 @@ _xrev_review_loop_run() {
   if (( rs_rc != 0 )); then
     # 破損時は不明値を 0 ではなく上限へ飽和させる（安全弁のリセットを防ぐ）。
     # 0 を渡すと次ラウンドの prev_attempts >= max_attempts 判定が無効化されてしまう。
-    _format_decision escalate "$iter" "$max" "" "" 0 "$max_attempts" "bad_round_state" "$max_ref_fb"
+    XREV_PARSED="" _format_decision escalate "$iter" "$max" 0 "$max_attempts" "bad_round_state" "$max_ref_fb" < /dev/null
     return 0
   fi
   read -r prev_attempts prev_iter prev_fb <<< "$rs_out"
 
   # 巻戻し（前回より iter が戻っている）→ 送信せず escalate。
   if (( prev_iter > iter )); then
-    _format_decision escalate "$iter" "$max" "" "" 0 "$prev_attempts" "rollback" "$prev_fb"
+    XREV_PARSED="" _format_decision escalate "$iter" "$max" 0 "$prev_attempts" "rollback" "$prev_fb" < /dev/null
     return 0
   fi
   # 通算 transport 試行の上限到達 → これ以上「送信しない」で escalate（境界を正しく＝上限超の送信をしない）。
   if (( prev_attempts >= max_attempts )); then
-    _format_decision escalate "$iter" "$max" "" "" 0 "$prev_attempts" "max_transport_attempts" "$prev_fb"
+    XREV_PARSED="" _format_decision escalate "$iter" "$max" 0 "$prev_attempts" "max_transport_attempts" "$prev_fb" < /dev/null
     return 0
   fi
   local attempts=$(( prev_attempts + 1 ))
@@ -238,9 +247,9 @@ PY
     if [[ -n "$ref_fail" ]]; then
       local fb=$(( prev_fb + 1 ))
       if (( fb > max_ref_fb )); then
-        _format_decision escalate "$iter" "$max" "$raw" "$parsed" "$trc" "$attempts" "max_reference_fallbacks" "$fb"
+        printf '%s' "$raw" | XREV_PARSED="$parsed" _format_decision escalate "$iter" "$max" "$trc" "$attempts" "max_reference_fallbacks" "$fb"
       else
-        _format_decision reference_unverified "$iter" "$max" "$raw" "$parsed" "$trc" "$attempts" "" "$fb"
+        printf '%s' "$raw" | XREV_PARSED="$parsed" _format_decision reference_unverified "$iter" "$max" "$trc" "$attempts" "" "$fb"
       fi
       return 0
     fi
@@ -248,7 +257,7 @@ PY
 
   local decision code
   read -r decision code <<< "$(_xrev_decide "$trc" "$prc" "$blockers" "$iter" "$max")"
-  _format_decision "$decision" "$iter" "$max" "$raw" "$parsed" "$trc" "$attempts" "" "$prev_fb"
+  printf '%s' "$raw" | XREV_PARSED="$parsed" _format_decision "$decision" "$iter" "$max" "$trc" "$attempts" "" "$prev_fb"
   return "$code"
 }
 

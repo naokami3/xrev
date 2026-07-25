@@ -23,5 +23,6 @@
   "submit_settle_seconds": 1,
   "chunk_size": 0,
   "response_timeout_seconds": 180,
-  "response_poll_seconds": 3
+  "response_poll_seconds": 3,
+  "wire_max_chars": 64000
 }

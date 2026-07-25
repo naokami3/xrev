@@ -85,7 +85,19 @@ assert_eq   "(iii-c) 拒否 → send のみで submit は呼ばれない" " send
 _sg_run 0 0 0
 assert_eq   "プロセス証明は 1 往復で 3 回走る" "3" "$_SG_VP_I"
 
+# 6) wire_max_chars（変更2: fail closed）: エンコード後の wire が上限を超えたら rc26 で中止し、
+#    cmux へは一切送信しない（send/submit いずれも呼ばれない）。巨大 payload を実際に作らずに
+#    検証するため、上限そのものを小さく差し替え、_build_framed_line のスタブ出力を上限超にする。
+_SG_SAVED_MAX="$WIRE_MAX_CHARS"
+WIRE_MAX_CHARS=1000
+_build_framed_line() { printf 'x%.0s' {1..2000}; }
+_sg_run 0 0 0
+assert_rc   "wire 上限超 → rc26" 26 "$_SG_RC"
+assert_eq   "wire 上限超 → send も submit も呼ばれない" "" "$_SG_CALLS"
+WIRE_MAX_CHARS="$_SG_SAVED_MAX"
+_build_framed_line() { printf 'FRAMED_LINE_FOR_TEST'; }
+
 # ── 後片付け: 実体を読み直してスタブを捨てる（後続の test_*.sh へ漏らさない）────────
 # shellcheck source=/dev/null
 source "$SCRIPTS/transport.sh"
-unset _SG_CALLS _SG_VP_SEQ _SG_VP_I _SG_RC
+unset _SG_CALLS _SG_VP_SEQ _SG_VP_I _SG_RC _SG_SAVED_MAX

@@ -24,12 +24,14 @@ set -uo pipefail
 _xrev_script_dir() { cd "$(dirname "${BASH_SOURCE[0]}")" && pwd; }
 : "${XREV_CONFIG:=${CLAUDE_PLUGIN_ROOT:-$(_xrev_script_dir)/..}/config/xrev.default.json}"
 
-input="$(cat)"
-
-# 注意: `python3 - <<'PY'` はヒアドキュメントが stdin を占有するため、レビュー本文は
-# パイプではなく環境変数 XREV_REVIEW_INPUT で渡す（stdin 競合の回避）。
-XREV_REVIEW_INPUT="$input" python3 - "$XREV_CONFIG" <<'PY'
-import json, os, sys
+# reviewer JSON（巨大になり得る）は stdin から直接 python3 へ流し込む。中継の bash 変数を
+# 経由させない（Linux の env/argv 1本あたり上限 MAX_ARG_STRLEN を踏み抜かないため）。
+# 【注意】`prog="$(cat <<'PY' ... PY)"` は使わない: bash 3.2（macOS既定）は $(...) の対応
+# 括弧探索がヒアドキュメント本文中の括弧・引用符の個数まで数えてしまうバグ/仕様があり、
+# 本文中の括弧が不均衡な行があると「unexpected EOF while looking for matching」で構文
+# エラーになる。`read -d ''` は command substitution を経由しないため影響を受けない。
+read -r -d '' prog <<'PY' || true
+import json, sys
 
 cfg_path = sys.argv[1]
 try:
@@ -38,7 +40,7 @@ try:
 except Exception:
     cfg = {}
 
-raw = os.environ.get("XREV_REVIEW_INPUT", "")
+raw = sys.stdin.read()
 
 def fail(reason):
     print(json.dumps({"valid": False, "reason": reason,
@@ -118,3 +120,4 @@ print(json.dumps({
     "total": total,
 }, ensure_ascii=False))
 PY
+python3 -c "$prog" "$XREV_CONFIG"

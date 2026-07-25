@@ -110,6 +110,31 @@ encoding にバージョンを付けている。
   `message="decode_error"` の finding は、その severity や config の `severity_blockers`
   設定に関わらず、常に blocker として集計される（誤収束防止）。
 
+### wire 長の上限（fail closed）
+
+`_build_framed_line` が生成した wire（1物理行）の文字数が `wire_max_chars`（既定 `64000`。
+`XREV_WIRE_MAX_CHARS` / config の `wire_max_chars`。`^[0-9]+$` を満たさない、または範囲
+1000〜1000000 外なら既定値へフォールバック）を超えたら、`xrev_transport_review` は
+エンコード後・送信前に **cmux へ一切送らず** `exit 26` で中止する。
+
+根拠: [docs/cmux-behavior.md](../docs/cmux-behavior.md) の実測で ASCII 100KB の送信が 5/5
+成功しているが、Linux の env/argv 1本あたり上限（`MAX_ARG_STRLEN` 約128KiB）や巨大 payload
+が想定外に混入するリスクを踏まえ、実測より保守的な値を既定にして早期に fail closed する。
+
+### 巨大な payload の受け渡し（stdin 経由・env/argv 上限の回避）
+
+`_build_framed_line` / `_xrev_decode_line` / `_scan_review_blocks` / `_xrev_redact_diag`（送信本文側）
+や `parse-review.sh`（reviewer JSON）は、巨大になり得るデータを **環境変数や argv ではなく stdin**
+で python3 へ渡す。Linux は env/argv 1本あたり `MAX_ARG_STRLEN`（約128KiB）の上限があり、これを
+超えるとシェルやプロセス起動が失敗するため（macOS の `ARG_MAX` も合計約1MBで同種の制約がある）。
+
+実装上の注意（bash 3.2 対策）: プログラム本文を `prog="$(cat <<'PY' ... PY)"` のように command
+substitution で変数化する書き方は使わない。bash 3.2（macOS 既定）は `$(...)` の対応する閉じ括弧を
+探す処理がヒアドキュメント本文の中身（括弧・引用符の個数）まで数えてしまう既知の癖があり、本文中に
+不均衡な括弧を含む行（Python の複数行文字列連結など）があると `unexpected EOF while looking for
+matching` という構文エラーになる。代わりに `read -r -d '' prog <<'PY' ... PY` でヒアドキュメントを
+変数へ読み込む（command substitution を経由しないため影響を受けない）。
+
 ### reviewer 出力の例
 
 実際は1行コンパクトで返させる（読みやすさのため整形して例示）。トップレベルに依頼の
@@ -184,7 +209,8 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 `transport_error` の決定 JSON には `transport_exit_code`（transport の生終了コード）と `transport_reason`
 （安定文字列）を含める。外部 exit は 22 のままだが、primary はこの reason で利用者向け修正案を機械的に選べる:
 `cmux_unavailable`/`resolve_failed`/`send_failed`/`timeout`/`truncated`/`non_terminal`/`ws_mismatch`/
-`ambiguous`/`process_mismatch`/`autocreate_failed`/`reviewer_contention`/`encode_failed`/`cmux_not_found`/`not_in_pane`。
+`ambiguous`/`process_mismatch`/`autocreate_failed`/`reviewer_contention`/`encode_failed`/`payload_too_large`/
+`cmux_not_found`/`not_in_pane`。
 
 **ループ安全弁（round_state・Phase1b）**: review-loop は決定 JSON に `round_state`（`{iter, transport_attempts}`）
 を含める。primary は**この round_state を次回呼び出しの `XREV_ROUND_STATE`(JSON) にそのまま渡す契約**。
@@ -217,6 +243,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | 19   | reviewer 自動生成は試みたが codex の起動を確認できなかった（autocreate_failed） |
 | 20   | reviewer 生成の競合で期限切れ（別 primary が生成中 or 残留ロック→人間。reviewer_contention） |
 | 23   | payload のエンコードに失敗（cmux へは未送信。encode_failed。round_id/content_type 不正・不変条件違反等） |
+| 26   | wire（1物理行）の文字数が上限(`wire_max_chars`)を超過（cmux へは未送信。payload_too_large） |
 | 30   | cmux CLI が見つからない |
 | 31   | cmux 接続不可（preflight 失敗・ペイン外実行） |
 
@@ -249,6 +276,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | `chunk_size` | `0` | 1物理行の分割送信サイズ（0=分割なし・一括送信） |
 | `response_timeout_seconds` | `180` | 応答待ちタイムアウト秒 |
 | `response_poll_seconds` | `3` | 応答ポーリング間隔秒 |
+| `wire_max_chars` | `64000` | 送信直前の wire（1物理行）文字数の上限。超過は送信せず fail closed（`exit 26`） |
 
 環境変数で個別上書き可: `XREV_CONFIG`, `XREV_REVIEWER_PANE_TITLE`, `XREV_REVIEWER_SURFACE`,
 `XREV_CMUX_BIN`, `XREV_MAX_ITERATIONS`, `XREV_STOP_AT`, `XREV_ADR`, `XREV_ADR_DIR`,
@@ -258,7 +286,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 `XREV_REVIEWER_PROCESS`, `XREV_ALLOW_GLOBAL_RESOLVE`, `XREV_ALLOW_CROSS_WS`,
 `XREV_MAX_TRANSPORT_ATTEMPTS`, `XREV_ROUND_STATE`, `XREV_CODEX_BIN`,
 `XREV_REFERENCE_MODE`, `XREV_EXPECT_DIFF_HASH`, `XREV_EXPECT_HEAD`, `XREV_MAX_REFERENCE_FALLBACKS`,
-`XREV_REVIEWER_AUTOCREATE`, `XREV_REVIEWER_CREATE_TIMEOUT_SECONDS`。
+`XREV_REVIEWER_AUTOCREATE`, `XREV_REVIEWER_CREATE_TIMEOUT_SECONDS`, `XREV_WIRE_MAX_CHARS`。
 `XREV_CONTENT_TYPE`/`XREV_ROUND_ID` は通常自動決定で、テスト・デバッグ時のみ明示する。
 
 ### 送信の堅牢化（実機知見）
