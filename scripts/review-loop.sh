@@ -177,7 +177,9 @@ _xrev_review_loop_run() {
   local rs_out rs_rc prev_attempts prev_iter prev_fb
   rs_out="$(_round_state_read "$iter")"; rs_rc=$?
   if (( rs_rc != 0 )); then
-    _format_decision escalate "$iter" "$max" "" "" 0 0 "bad_round_state" 0
+    # 破損時は不明値を 0 ではなく上限へ飽和させる（安全弁のリセットを防ぐ）。
+    # 0 を渡すと次ラウンドの prev_attempts >= max_attempts 判定が無効化されてしまう。
+    _format_decision escalate "$iter" "$max" "" "" 0 "$max_attempts" "bad_round_state" "$max_ref_fb"
     return 0
   fi
   read -r prev_attempts prev_iter prev_fb <<< "$rs_out"

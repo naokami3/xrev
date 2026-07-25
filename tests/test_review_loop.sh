@@ -120,6 +120,20 @@ assert_eq "負値の違反理由 bad_round_state" "bad_round_state" "$(printf '%
 out="$(printf '%s' "x" | XREV_ROUND_STATE='これは壊れたJSON' XREV_REVIEW_FN=_stub_approve2 _xrev_review_loop_run 2)"
 assert_eq "破損 round_state → escalate" "escalate" "$(printf '%s' "$out" | json_get decision)"
 
+# 破損 round_state → 通算カウンタは 0 でなく上限へ飽和させる（fail closed。安全弁のリセット防止）
+out="$(printf '%s' "x" | XREV_ROUND_STATE='{{{' XREV_REVIEW_FN=_stub_approve2 _xrev_review_loop_run 2)"
+assert_eq "破損JSON → escalate" "escalate" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "破損JSON → 違反理由 bad_round_state" "bad_round_state" "$(printf '%s' "$out" | json_get state_violation)"
+assert_eq "破損JSON → transport_attempts は既定上限12へ飽和" "12" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["round_state"]["transport_attempts"])')"
+assert_eq "破損JSON → reference_fallbacks は既定上限3へ飽和" "3" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["round_state"]["reference_fallbacks"])')"
+
+# XREV_MAX_TRANSPORT_ATTEMPTS を変えた場合は、その上限値へ飽和する
+out="$(printf '%s' "x" | XREV_MAX_TRANSPORT_ATTEMPTS=7 XREV_ROUND_STATE='{{{' XREV_REVIEW_FN=_stub_approve2 _xrev_review_loop_run 2)"
+assert_eq "上限変更時 → transport_attempts は指定上限7へ飽和" "7" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["round_state"]["transport_attempts"])')"
+
 # 上限・状態が健全なら通常どおり transport 失敗は transport_error（安全弁は誤発火しない）
 _stub_fail2() { return 12; }
 out="$(printf '%s' "x" | XREV_ROUND_STATE='{"transport_attempts":1,"iter":1}' XREV_REVIEW_FN=_stub_fail2 _xrev_review_loop_run 2)"; rc=$?
