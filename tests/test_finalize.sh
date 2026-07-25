@@ -45,10 +45,29 @@ assert_rc "ステージ済みで commit は rc=0" 0 "$crc"
 msg="$(cd "$repo" && git log -1 --pretty=%s 2>/dev/null)"
 assert_eq "コミットメッセージが記録される" "テスト: a.txt を追加" "$msg"
 
-# commit: ステージ無しはエラー
+# commit: ステージ無しはエラー（exit code 4 = ステージ済み変更なし）
 (cd "$repo" && XREV_CONFIG="$DEFAULT_CONFIG" "$FN" commit "空コミット" >/dev/null 2>&1); erc=$?
-assert_rc "ステージ無しの commit はエラー(rc1)" 1 "$erc"
+assert_rc "ステージ無しの commit はエラー(rc4)" 4 "$erc"
 rm -rf "$repo"
+
+# commit: detached HEAD では exit code 3 で拒否される
+dtmp="$(mktemp -d)"
+(
+  cd "$dtmp"
+  git init -q
+  git config user.email t@example.com
+  git config user.name tester
+  echo x > a.txt
+  git add a.txt
+  git commit -qm init
+  git checkout -q --detach
+  echo y >> a.txt
+  git add a.txt
+)
+out="$(cd "$dtmp" && XREV_CONFIG="$DEFAULT_CONFIG" "$FN" commit "msg" 2>&1)"; drc=$?
+assert_rc "detached HEAD の commit は rc=3" 3 "$drc"
+assert_contains "detached HEAD 検出メッセージ" "$out" "detached HEAD"
+rm -rf "$dtmp"
 
 # pr: 「必ず --draft」の安全弁を検証（fake gh で引数を捕捉 / bare origin で push 成立）
 ptmp="$(mktemp -d)"
@@ -85,3 +104,53 @@ out="$(cd "$work" && git checkout -q main && PATH="$ptmp/bin:$PATH" XREV_CONFIG=
 assert_rc "branch==base は拒否(rc1)" 1 "$rc"
 assert_contains "branch==base 拒否メッセージ" "$out" "同一"
 rm -rf "$ptmp"
+
+# pr: origin/HEAD 未設定・XREV_PR_BASE 未指定・base 引数無し → base 特定不能(exit 7)
+btmp="$(mktemp -d)"
+mkdir -p "$btmp/bin"
+cat > "$btmp/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$btmp/bin/gh"
+bwork="$btmp/work"; mkdir -p "$bwork"
+(
+  cd "$bwork"
+  git init -q; git config user.email t@e.com; git config user.name t
+  echo base > f.txt; git add f.txt; git commit -qm init; git branch -M main
+  git checkout -q -b feature
+  echo more >> f.txt; git add f.txt; git commit -qm feat
+)
+# origin リモート自体を張らないため origin/HEAD は存在しない
+out="$(cd "$bwork" && PATH="$btmp/bin:$PATH" XREV_CONFIG="$DEFAULT_CONFIG" "$FN" pr "t" "b" 2>&1)"; rc=$?
+assert_rc "base 特定不能は rc=7" 7 "$rc"
+assert_contains "base 特定不能メッセージ" "$out" "base ブランチを特定できません"
+rm -rf "$btmp"
+
+# pr: XREV_PR_BASE を指定すれば通る（origin/HEAD 未設定・base 引数無しでも解決できる）
+etmp="$(mktemp -d)"
+mkdir -p "$etmp/bin"
+eargsfile="$etmp/gh_args.txt"
+cat > "$etmp/bin/gh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$eargsfile"
+exit 0
+EOF
+chmod +x "$etmp/bin/gh"
+git init --bare -q "$etmp/origin.git"
+ework="$etmp/work"; mkdir -p "$ework"
+(
+  cd "$ework"
+  git init -q; git config user.email t@e.com; git config user.name t
+  git remote add origin "$etmp/origin.git"
+  echo base > f.txt; git add f.txt; git commit -qm init; git branch -M main
+  git push -q -u origin main
+  git checkout -q -b feature
+  echo more >> f.txt; git add f.txt; git commit -qm feat
+)
+# git remote set-head origin -a を行わないため origin/HEAD は未設定のまま
+out="$(cd "$ework" && PATH="$etmp/bin:$PATH" XREV_CONFIG="$DEFAULT_CONFIG" XREV_PR_BASE=main "$FN" pr "t" "b" 2>&1)"; rc=$?
+assert_rc "XREV_PR_BASE 指定で通る(rc0)" 0 "$rc"
+eargs="$(cat "$eargsfile" 2>/dev/null)"
+assert_contains "XREV_PR_BASE が --base として渡る" "$eargs" "--base main"
+rm -rf "$etmp"
