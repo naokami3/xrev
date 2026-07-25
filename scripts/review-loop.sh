@@ -177,9 +177,13 @@ PY
 #   transport の呼び出しは XREV_REVIEW_FN で差し替え可能（テストでスタブを注入するため）。
 _xrev_review_loop_run() {
   local iter="${1:-1}"
-  local max="${XREV_MAX_ITERATIONS:-$(_cfg_int max_iterations 5)}"
-  local max_attempts="${XREV_MAX_TRANSPORT_ATTEMPTS:-$(_cfg_int max_transport_attempts 12)}"
-  local max_ref_fb="${XREV_MAX_REFERENCE_FALLBACKS:-$(_cfg_int max_reference_fallbacks 3)}"
+  # env 直渡し・_cfg_int 経由のどちらで来た値も、算術式へ入れる前に _xrev_uint（transport.sh 由来）
+  # で「正整数 + キー別上限 + 桁数上限」を検証する。範囲外・非数値は既定値へフォールバックし
+  # stderr に警告する（bash 算術インジェクション対策。詳細は references/protocol.md）。
+  local max max_attempts max_ref_fb
+  max="$(_xrev_uint "${XREV_MAX_ITERATIONS:-$(_cfg_int max_iterations 5)}" 1 50 5 'max_iterations')"
+  max_attempts="$(_xrev_uint "${XREV_MAX_TRANSPORT_ATTEMPTS:-$(_cfg_int max_transport_attempts 12)}" 1 100 12 'max_transport_attempts')"
+  max_ref_fb="$(_xrev_uint "${XREV_MAX_REFERENCE_FALLBACKS:-$(_cfg_int max_reference_fallbacks 3)}" 0 10 3 'max_reference_fallbacks')"
 
   # ── ループ安全弁（送信前に判定して暴走を止める）─────────────────────────────
   # 直前 round_state を原子的に検証して読む。欠落(途中)・破損・負値は fail closed。

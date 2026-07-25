@@ -52,6 +52,28 @@ except Exception:
 PY
 }
 
+_log() { printf '[xrev/transport] %s\n' "$*" >&2; }
+
+# ── 数値設定の共通バリデータ ─────────────────────────────────────────────────
+# env/config 由来の数値は、bash 算術式 (( )) に入れる前に必ずここを通す。
+# 理由:
+#   1) bash 算術は `x[$(コマンド)]` のような値を渡すとコマンド実行が起きる（インジェクション）。
+#      生の値を絶対に算術へ渡さないため、正規表現検証を通過した文字列だけを算術評価する。
+#   2) `^[0-9]+$` だけの検証では 64bit を超える巨大値（20桁など）が算術でオーバーフローしうる。
+#      桁数を {1,10} に制限してから算術へ渡すことでオーバーフローを regex 段階で排除する。
+#   3) 範囲外・非数値は可用性優先で既定値へフォールバックし、stderr に1行警告する（stdout は汚さない）。
+#
+# 使い方: val="$(_xrev_uint "$raw" "$min" "$max" "$def" "設定名")"
+_xrev_uint() {
+  local v="$1" min="$2" max="$3" def="$4" name="$5"
+  if [[ "$v" =~ ^[0-9]{1,10}$ ]] && (( v >= min && v <= max )); then
+    printf '%s' "$v"
+    return 0
+  fi
+  _log "${name} が不正です（値='${v}'）。既定 ${def} を使います。"
+  printf '%s' "$def"
+}
+
 # 環境変数で上書きできる設定（テスト・運用都合）
 REVIEWER_PANE_TITLE="${XREV_REVIEWER_PANE_TITLE:-$(_cfg reviewer_pane_title 'Review Codex')}"
 # 送信前の安全ゲートで「宛先サーフェスで動いているべきプロセス名」（既定 codex）。
@@ -62,24 +84,21 @@ ALLOW_GLOBAL_RESOLVE="${XREV_ALLOW_GLOBAL_RESOLVE:-$(_cfg allow_global_resolve '
 ALLOW_CROSS_WS="${XREV_ALLOW_CROSS_WS:-$(_cfg allow_cross_ws 'false')}"
 # reviewer ペインの自動生成（create-if-missing）。ask(既定)/auto/off。生成の起動確認・競合待ちの上限秒。
 REVIEWER_AUTOCREATE="${XREV_REVIEWER_AUTOCREATE:-$(_cfg reviewer_autocreate 'ask')}"
-CREATE_TIMEOUT="${XREV_REVIEWER_CREATE_TIMEOUT_SECONDS:-$(_cfg reviewer_create_timeout_seconds 30)}"
-[[ "$CREATE_TIMEOUT" =~ ^[0-9]+$ ]] || CREATE_TIMEOUT=30
-# wire（1物理行）の文字数上限（fail closed）。数値検証に加え範囲も検証し、範囲外・非数値は既定へ
-# フォールバックする（CREATE_TIMEOUT と同様の方針）。根拠・詳細は references/protocol.md 参照。
-WIRE_MAX_CHARS="${XREV_WIRE_MAX_CHARS:-$(_cfg wire_max_chars 64000)}"
-[[ "$WIRE_MAX_CHARS" =~ ^[0-9]+$ ]] || WIRE_MAX_CHARS=64000
-(( WIRE_MAX_CHARS >= 1000 && WIRE_MAX_CHARS <= 1000000 )) || WIRE_MAX_CHARS=64000
-READ_LINES="${XREV_READ_SCREEN_LINES:-$(_cfg read_screen_lines 400)}"
-SETTLE_SECS="${XREV_SEND_SETTLE_SECONDS:-$(_cfg send_settle_seconds 2)}"
-RESP_TIMEOUT="${XREV_RESPONSE_TIMEOUT_SECONDS:-$(_cfg response_timeout_seconds 180)}"
-RESP_POLL="${XREV_RESPONSE_POLL_SECONDS:-$(_cfg response_poll_seconds 3)}"
+# 以下は数値設定。_xrev_uint で「正整数 + キー別上限 + 桁数上限」を検証してから使う。
+# 範囲外・非数値は既定へフォールバックし stderr へ警告する（根拠・詳細は references/protocol.md）。
+CREATE_TIMEOUT="$(_xrev_uint "${XREV_REVIEWER_CREATE_TIMEOUT_SECONDS:-$(_cfg reviewer_create_timeout_seconds 30)}" 1 600 30 'reviewer_create_timeout_seconds')"
+# wire（1物理行）の文字数上限（fail closed）。
+WIRE_MAX_CHARS="$(_xrev_uint "${XREV_WIRE_MAX_CHARS:-$(_cfg wire_max_chars 64000)}" 1000 1000000 64000 'wire_max_chars')"
+READ_LINES="$(_xrev_uint "${XREV_READ_SCREEN_LINES:-$(_cfg read_screen_lines 400)}" 10 10000 400 'read_screen_lines')"
+SETTLE_SECS="$(_xrev_uint "${XREV_SEND_SETTLE_SECONDS:-$(_cfg send_settle_seconds 2)}" 0 60 2 'send_settle_seconds')"
+RESP_TIMEOUT="$(_xrev_uint "${XREV_RESPONSE_TIMEOUT_SECONDS:-$(_cfg response_timeout_seconds 180)}" 1 3600 180 'response_timeout_seconds')"
+# 最小 1 秒（0 だと応答待ちが busy-loop 化するため 0 は許可しない）。
+RESP_POLL="$(_xrev_uint "${XREV_RESPONSE_POLL_SECONDS:-$(_cfg response_poll_seconds 3)}" 1 60 3 'response_poll_seconds')"
 
 # reviewer の JSON 応答を画面から確実に切り出すためのセンチネル。
 # Codex には「この 2 行で JSON を挟んで返せ」と指示し、画面ノイズから機械的に抽出する。
 SENTINEL_BEGIN='===XREV-JSON-BEGIN==='
 SENTINEL_END='===XREV-JSON-END==='
-
-_log() { printf '[xrev/transport] %s\n' "$*" >&2; }
 
 # ── cmux 配管（ここだけが cmux に依存）─────────────────────────────────────────
 #
@@ -933,8 +952,7 @@ _detect_content_type() {
 # submit 前の描画待ち秒を本文長から決める（純粋）。長いほど長く待つ（上限8s）。
 _compute_submit_settle() {
   local len="$1" base extra settle
-  base="${XREV_SUBMIT_SETTLE_SECONDS:-$(_cfg submit_settle_seconds 1)}"
-  [[ "$base" =~ ^[0-9]+$ ]] || base=1
+  base="$(_xrev_uint "${XREV_SUBMIT_SETTLE_SECONDS:-$(_cfg submit_settle_seconds 1)}" 0 8 1 'submit_settle_seconds')"
   extra=$(( len / 2000 ))
   settle=$(( base + extra ))
   (( settle > 8 )) && settle=8
@@ -1057,7 +1075,8 @@ PY
 #   確定するまで分割送信などの恒久修正を決め打ちしない。各試行の rc と stderr を捕捉して
 #   最終失敗時に診断ログへ出す（本文は伏せる）。
 _cmux_send_line() {
-  local surface="$1" line="$2" tries=0 max="${XREV_SEND_RETRIES:-5}"
+  local surface="$1" line="$2" tries=0
+  local max; max="$(_xrev_uint "${XREV_SEND_RETRIES:-5}" 1 20 5 'XREV_SEND_RETRIES')"
   local err rc rcs="" last_err=""
   # stderr はコマンド置換で受ける。**production に一時ファイルを持ち込まない**のが要点で、
   # 予測可能な名前による symlink 追従・権限・シグナル時の残留という問題群を構造的に排除する。

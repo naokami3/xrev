@@ -216,3 +216,32 @@ assert_eq "inline(参照OFF)は検証せず converged" "converged" "$(printf '%s
 # reference_fallbacks も round_state 検証の対象（負値は bad_round_state）
 out="$(printf '%s' "x" | XREV_ROUND_STATE='{"transport_attempts":1,"iter":1,"reference_fallbacks":-1}' XREV_REVIEW_FN=_stub_ref_ok _xrev_review_loop_run 1)"
 assert_eq "負の reference_fallbacks → escalate(bad_round_state)" "bad_round_state" "$(printf '%s' "$out" | json_get state_violation)"
+
+# ── 数値設定の検証（bash 算術インジェクション対策・_xrev_uint 経由）──────────────
+# env/config 由来の数値は算術式 (( )) に入る前に _xrev_uint（transport.sh）を通す。ここでは
+# review-loop.sh 側（max_iterations/max_transport_attempts/max_reference_fallbacks）を検証する。
+
+# 1) インジェクション不発: XREV_MAX_ITERATIONS に `x[$(コマンド)]` 形の値を入れても
+#    コマンドは実行されず（マーカーファイル未生成）、既定 5 が使われる。
+rm -f /tmp/xrev-pwned-test
+_stub_approve3() { printf '%s' '{"verdict":"approve","findings":[]}'; }
+out="$(printf '%s' "x" | XREV_MAX_ITERATIONS='x[$(touch /tmp/xrev-pwned-test)]' XREV_REVIEW_FN=_stub_approve3 _xrev_review_loop_run 1)"
+assert_eq "不正な XREV_MAX_ITERATIONS ではコマンドが実行されない" "no" \
+  "$([[ -e /tmp/xrev-pwned-test ]] && echo yes || echo no)"
+assert_eq "不正な XREV_MAX_ITERATIONS は既定 max_iterations=5 にフォールバック" "5" \
+  "$(printf '%s' "$out" | json_get max_iterations)"
+rm -f /tmp/xrev-pwned-test
+
+# 2) 巨大値（20桁）は 64bit 算術オーバーフローを避けるため既定へフォールバックする。
+out="$(printf '%s' "x" | XREV_MAX_ITERATIONS=99999999999999999999 XREV_REVIEW_FN=_stub_approve3 _xrev_review_loop_run 1)"
+assert_eq "20桁の巨大値は既定 max_iterations=5 にフォールバック" "5" \
+  "$(printf '%s' "$out" | json_get max_iterations)"
+
+# 3) max_transport_attempts / max_reference_fallbacks も同様に不正値は既定へフォールバックする。
+out="$(printf '%s' "x" | XREV_MAX_TRANSPORT_ATTEMPTS='x[$(touch /tmp/xrev-pwned-test2)]' XREV_REVIEW_FN=_stub_approve3 _xrev_review_loop_run 1)"
+assert_eq "不正な XREV_MAX_TRANSPORT_ATTEMPTS ではコマンドが実行されない" "no" \
+  "$([[ -e /tmp/xrev-pwned-test2 ]] && echo yes || echo no)"
+rm -f /tmp/xrev-pwned-test2
+
+out="$(printf '%s' "x" | XREV_MAX_REFERENCE_FALLBACKS=999999999999999999999 XREV_REVIEW_FN=_stub_approve3 _xrev_review_loop_run 1)"
+assert_rc "不正な XREV_MAX_REFERENCE_FALLBACKS でも rc=0（フォールバックして続行）" 0 "$?"

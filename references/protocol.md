@@ -113,9 +113,9 @@ encoding にバージョンを付けている。
 ### wire 長の上限（fail closed）
 
 `_build_framed_line` が生成した wire（1物理行）の文字数が `wire_max_chars`（既定 `64000`。
-`XREV_WIRE_MAX_CHARS` / config の `wire_max_chars`。`^[0-9]+$` を満たさない、または範囲
-1000〜1000000 外なら既定値へフォールバック）を超えたら、`xrev_transport_review` は
-エンコード後・送信前に **cmux へ一切送らず** `exit 26` で中止する。
+`XREV_WIRE_MAX_CHARS` / config の `wire_max_chars`。1000〜1000000 の範囲外、または
+`_xrev_uint` の検証（後述）を満たさなければ既定値へフォールバック）を超えたら、
+`xrev_transport_review` は エンコード後・送信前に **cmux へ一切送らず** `exit 26` で中止する。
 
 根拠: [docs/cmux-behavior.md](../docs/cmux-behavior.md) の実測で ASCII 100KB の送信が 5/5
 成功しているが、Linux の env/argv 1本あたり上限（`MAX_ARG_STRLEN` 約128KiB）や巨大 payload
@@ -255,28 +255,37 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | `reviewer` | `codex` | レビュー専用（read-only）の側 |
 | `reviewer_pane_title` | `Review Codex` | 宛先解決に使う cmux ペインタイトル |
 | `keyword` | `@xrev` | 発火キーワード |
-| `max_iterations` | `5` | 往復の安全弁（論理ラウンドの上限） |
-| `max_transport_attempts` | `12` | 通算 transport 試行の上限（論理ラウンドとは別の総量安全弁。超過で escalate） |
+| `max_iterations` | `5` | 往復の安全弁（論理ラウンドの上限）。範囲 1..50 |
+| `max_transport_attempts` | `12` | 通算 transport 試行の上限（論理ラウンドとは別の総量安全弁。超過で escalate）。範囲 1..100 |
 | `reviewer_reads_workspace` | `false` | 参照モード(Phase2)を許可するか。`true` かつ同一WS解決時のみ、diff 本文の代わりにファイル参照を送る |
-| `max_reference_fallbacks` | `3` | 参照→inline フォールバックの通算上限（超過で escalate。無限往復を防ぐ） |
+| `max_reference_fallbacks` | `3` | 参照→inline フォールバックの通算上限（超過で escalate。無限往復を防ぐ）。範囲 0..10 |
 | `stop_at` | `review` | 到達点（review / commit / pr） |
 | `adr` | `false` | ADR 生成の既定（必要有無） |
 | `adr_dir` | `docs/adr` | ADR の出力ディレクトリ（相対は対象リポジトリ基準 / 絶対パス可） |
 | `transport` | `cmux` | 配管実装の選択（将来の差し替え点） |
 | `reviewer_process` | `codex` | 送信前プロセス証明で対象 surface の直下に在るべきプロセス名 |
 | `reviewer_autocreate` | `ask` | reviewer ペインの自動生成方針。`ask`(スキルが一拍確認で確認後生成)/`auto`(無確認で生成)/`off`(生成せず案内) |
-| `reviewer_create_timeout_seconds` | `30` | 自動生成時の codex 起動確認・競合待ちの上限秒 |
+| `reviewer_create_timeout_seconds` | `30` | 自動生成時の codex 起動確認・競合待ちの上限秒。範囲 1..600 |
 | `allow_global_resolve` | `false` | `CMUX_SURFACE_ID` 未注入時のグローバル解決を許すか（危険・opt-in） |
 | `allow_cross_ws` | `false` | 明示サーフェスが呼び出し元と別WSでも送信を許すか（危険・opt-in） |
 | `severity_blockers` | `["critical","high"]` | 収束を妨げる severity |
 | `medium_low_max_rounds` | `2` | medium 以下の指摘に付き合う上限周回（助言値。収束は blocker 0 件で機械判定するためスクリプトは消費せず、スキルが運用指針として参照する） |
-| `read_screen_lines` | `400` | read-screen で読む行数 |
-| `send_settle_seconds` | `2` | 送信（submit）後の反映待ち秒 |
-| `submit_settle_seconds` | `1` | submit 前のペースト描画待ちの基準秒（本文長に比例・上限8s） |
+| `read_screen_lines` | `400` | read-screen で読む行数。範囲 10..10000 |
+| `send_settle_seconds` | `2` | 送信（submit）後の反映待ち秒。範囲 0..60 |
+| `submit_settle_seconds` | `1` | submit 前のペースト描画待ちの基準秒（本文長に比例・上限8s）。範囲 0..8 |
 | `chunk_size` | `0` | 1物理行の分割送信サイズ（0=分割なし・一括送信） |
-| `response_timeout_seconds` | `180` | 応答待ちタイムアウト秒 |
-| `response_poll_seconds` | `3` | 応答ポーリング間隔秒 |
-| `wire_max_chars` | `64000` | 送信直前の wire（1物理行）文字数の上限。超過は送信せず fail closed（`exit 26`） |
+| `response_timeout_seconds` | `180` | 応答待ちタイムアウト秒。範囲 1..3600 |
+| `response_poll_seconds` | `3` | 応答ポーリング間隔秒。範囲 1..60（**最小1**。0 だと応答待ちが busy-loop 化するため許可しない） |
+| `wire_max_chars` | `64000` | 送信直前の wire（1物理行）文字数の上限。超過は送信せず fail closed（`exit 26`）。範囲 1000..1000000 |
+
+上記の数値設定と `XREV_SEND_RETRIES`（範囲 1..20、既定 `5`）は、すべて `transport.sh` の
+共通バリデータ `_xrev_uint <値> <最小> <最大> <既定> <名前>` を経由してから bash の算術式
+`(( ))` に入る。`_xrev_uint` は「正整数（`^[0-9]{1,10}$`。桁数上限で 64bit 算術オーバーフローを
+regex 段階で排除する）+ キー別の範囲」を検証し、範囲外・非数値な値は既定値へフォールバックして
+stderr に1行警告する（可用性優先。stdout は汚さない）。生の値が検証前に算術式へ渡ることはない
+— bash 算術は `x[$(コマンド)]` のような値でコマンド実行を許すため、env/config 由来の数値を
+無検証で `(( ))` に渡すとインジェクションが成立してしまう。`review-loop.sh` の `max_iterations` /
+`max_transport_attempts` / `max_reference_fallbacks` も同じ `_xrev_uint` を通す。
 
 環境変数で個別上書き可: `XREV_CONFIG`, `XREV_REVIEWER_PANE_TITLE`, `XREV_REVIEWER_SURFACE`,
 `XREV_CMUX_BIN`, `XREV_MAX_ITERATIONS`, `XREV_STOP_AT`, `XREV_ADR`, `XREV_ADR_DIR`,
