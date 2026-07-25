@@ -729,22 +729,125 @@ _cmux_clear_input() {
   for _i in 1 2 3 4 5 6; do _cmux send-key "${_XREV_ADDR[@]}" backspace >/dev/null 2>&1 || true; done
 }
 
+# 純粋関数: cmux の stderr を診断ログへ出せる形に整える。
+#   入力: env XREV_DIAG_ERR=cmux の stderr, XREV_DIAG_LINE=送信しようとした本文
+#   出力: 安全な1行の診断文字列
+#
+# 【なぜ秘匿処理が要るか】レビュー payload には未公開のコードや差分が入る。cmux は実際に
+# `Unknown command '<送信テキストの一部>'` の形で入力をエコーして返すため、stderr をそのまま
+# ログへ出すと本文が漏れる。
+#
+# 【方針】「本文と一致しないから安全」という推定を使わない。cmux が引用・省略・エスケープした断片や
+# 24 文字未満の秘密値は一致判定をすり抜けるため、それだけでは秘匿の契約にならない。代わりに
+# **既知形式の allowlist を先に完全一致で当て、外れたものは既定で全体を伏せる** fail closed 構造にする。
+#   1) 実測済みの既知形式に**完全一致**するときだけ、構造化した安全な表現を出す
+#   2) それ以外は未知形式とみなし、内容を一切出さない（長さ・引用符の有無・ASCII 純度のみ）
+# 新しいエラー種別を診断で読めるようにしたいときは allowlist に形式を追加する＝人間のレビューを経る。
+# 推測で allowlist を広げないこと（接頭辞・接尾辞・引用構造が少しでも違えば未知扱いにする）。
+_xrev_redact_diag() {
+  XREV_DIAG_ERR="${XREV_DIAG_ERR:-}" XREV_DIAG_LINE="${XREV_DIAG_LINE:-}" python3 - <<'PY'
+import os, re
+err = os.environ.get("XREV_DIAG_ERR", "")
+line = os.environ.get("XREV_DIAG_LINE", "")
+
+# 巨大な stderr は**正規化する前に**打ち切る（正規表現や走査のコストを抑える DoS 抑制。
+# 正規化後に判定すると、畳み込みのコストを先に払ってしまい抑制にならない）。
+MAX_INPUT = 4096
+raw_len = len(err)
+
+def unknown(reason, s=""):
+    has_quote = ("'" in s) or ('"' in s)
+    print("(%s。長さ=%d(raw) 引用符=%s ASCIIのみ=%s。安全のため全体を秘匿)"
+          % (reason, raw_len, "有" if has_quote else "無",
+             "真" if s.isascii() else "偽"))
+    raise SystemExit(0)
+
+if raw_len > MAX_INPUT:
+    unknown("stderr が長すぎます")
+
+# 【分類の厳密性】元の stderr に改行・タブが含まれていた場合は、畳み込み後に既知形式へ
+# 一致しても未知扱いにする。畳み込みで偽装された未知エラーを既知エラーと誤分類しないため
+# （秘匿性は畳み込み後でも保たれるが、診断の分類まで信用できる状態にしておく）。
+had_multiline = bool(re.search(r"[\r\n\t]", err))
+
+# 制御文字を除去し、空白を畳んで1行にする（ログの可読性と、改行によるログ偽装の防止）。
+s = re.sub(r"[\x00-\x1f\x7f]", " ", err)
+s = re.sub(r"\s+", " ", s).strip()
+
+if not s:
+    print("(stderr は空)")
+    raise SystemExit(0)
+if had_multiline:
+    unknown("改行/タブを含む stderr", s)
+
+def describe(frag):
+    """引用断片を、内容を明かさない記述へ置き換える。位置は一意に定まるときだけ添える。"""
+    note = "payload断片 %d文字" % len(frag)
+    if not line:
+        return "<%s>" % note
+    cnt = line.count(frag) if frag else 0
+    if cnt == 1:
+        # 一意に定まるときだけ byte 位置を出す。ただしこれは**補助情報**であって、
+        # フレーミング境界の証拠ではない（境界特定には既知マーカーの埋め込みが要る）。
+        note += " / 本文の byte offset %d（補助情報）" % len(line[:line.find(frag)].encode("utf-8"))
+    elif cnt > 1:
+        note += " / 本文中に %d 箇所（位置は特定不能）" % cnt
+    else:
+        # 本文に無い断片を payload 由来と誤認しないよう明示する。
+        note += " / 本文中に存在しない"
+    return "<%s>" % note
+
+# 1) 既知形式（実測済みの2形式のみ）。完全一致を必須にする。
+#    Unknown command の断片は引用符を含みうるため、後置部分をアンカーにした貪欲マッチで切り出す。
+m = re.fullmatch(r"Error: ERROR: Unknown command '(.*)'\. Use 'help' for available commands\.", s)
+if m:
+    print("Error: ERROR: Unknown command '%s'（help 案内は省略）" % describe(m.group(1)))
+    raise SystemExit(0)
+if re.fullmatch(r"Error: Command timed out", s):
+    print(s)   # payload を含まない定型
+    raise SystemExit(0)
+
+# 2) 既知形式に当たらないものは未知形式として全体を伏せる。
+unknown("未知形式の stderr", s)
+PY
+}
+
 # 1物理行を reviewer 入力欄へ送る（確定はしない）。cmux 依存。
 # 【実機知見】送信先が Codex のとき、ビジー（前応答の処理中）や入力欄の残留（テキスト/
-#   ペーストチップ）があると cmux send が非ゼロで失敗する。cmux send 自体の長さ上限ではない
-#   （プレーンシェルへは長文も成功）。そこで「送信前にクリア → 失敗なら待って再試行」する。
-# （長大時のチャンク送信は XREV_CHUNK_SIZE で将来対応。既定は一括送信）
+#   ペーストチップ）があると cmux send が非ゼロで失敗する。そこで「送信前にクリア →
+#   失敗なら待って再試行」する。
+# 【未解決・重要】この関数は実機で全リトライ失敗する事例が確認されている（往復が完走しない）。
+#   単純な文字数・バイト数の上限という仮説は**否定済み**:
+#     ASCII 60000 バイト = 成功 / 日本語 60000 バイト(2万文字) = 失敗 /
+#     実 payload 43149 バイト = 失敗 / 同一入力が1回目失敗・2回目成功（**非決定的**）。
+#   観測できたエラーは 2 種:
+#     "Error: Command timed out" と "Error: ERROR: Unknown command '<送信テキストの断片>'"。
+#   後者の断片は送信テキスト中の文字列と一致する（実 payload では byte offset 32769 の文字）。
+#   同期ずれ・RPC のフレーミング境界・UTF-8 の境界処理・受信側 TUI の負荷はいずれも**未確定の仮説**。
+#   確定するまで分割送信などの恒久修正を決め打ちしない。各試行の rc と stderr を捕捉して
+#   最終失敗時に診断ログへ出す（本文は伏せる）。
 _cmux_send_line() {
   local surface="$1" line="$2" tries=0 max="${XREV_SEND_RETRIES:-5}"
+  local err rc rcs="" last_err=""
+  # stderr はコマンド置換で受ける。**production に一時ファイルを持ち込まない**のが要点で、
+  # 予測可能な名前による symlink 追従・権限・シグナル時の残留という問題群を構造的に排除する。
+  # （_cmux は "$CMUX_BIN" "$@" で状態を持たないため、サブシェル化しても実挙動は変わらない。
+  #   スタブが状態を持つのはテストの都合であり、その面倒はテスト側で引き受ける。）
   _cmux_clear_input "$surface"          # 残留を除去してから送る（混入による prompt 破壊を防ぐ）
   _xrev_build_addr "$surface"
   while (( tries < max )); do
-    _cmux send "${_XREV_ADDR[@]}" "$line" >/dev/null 2>&1 && return 0
+    err="$(_cmux send "${_XREV_ADDR[@]}" "$line" 2>&1 1>/dev/null)"; rc=$?
+    (( rc == 0 )) && return 0
+    rcs="${rcs}${rcs:+,}${rc}"; last_err="$err"
     # 失敗：busy/残留の可能性 → 少し待ち、再度クリアして再試行（busy 解消を待つ）。
     tries=$(( tries + 1 ))
     _xrev_sleep 2
     _cmux_clear_input "$surface"
   done
+  # 全滅時のみ診断を出す（成功時に無用なログを増やさない）。バイト長は仮説検証の主要な手掛かり。
+  local nbytes; nbytes="$(printf '%s' "$line" | wc -c | tr -d ' ')"
+  _log "送信に ${max} 回失敗しました（rc=[${rcs}] 文字数=${#line} バイト数=${nbytes}）。"
+  _log "cmux stderr: $(XREV_DIAG_ERR="$last_err" XREV_DIAG_LINE="$line" _xrev_redact_diag)"
   return 6
 }
 
