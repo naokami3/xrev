@@ -150,7 +150,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | 14   | reviewer surface が実ターミナルでない（read-screen 不可。cmux エージェント統合パネル等） |
 | 15   | ワークスペース不整合（caller WS 特定不能 / 解決後に WS が変化 / 明示が別WS） |
 | 16   | 同一WS内で reviewer タイトルが複数一致（曖昧） |
-| 17   | プロセス証明失敗（対象 surface の直下プロセスが許可名でない / top 取得不可） |
+| 17   | プロセス証明失敗（対象 surface の前景プロセスが許可名でない / top・ps 取得不可 / Enter 直前に前景が変化） |
 | 18   | 参照モードなのに同一WS解決でない（reference モードを拒否し inline へ切替を促す） |
 | 19   | reviewer 自動生成は試みたが codex の起動を確認できなかった（autocreate_failed） |
 | 20   | reviewer 生成の競合で期限切れ（別 primary が生成中 or 残留ロック→人間。reviewer_contention） |
@@ -286,9 +286,23 @@ cmux に流さず、reviewer に「自分で diff を取得してレビュー」
    今も同一WSに存在し、呼び出し元も同一WSに居続けているかを確認（ref 再利用・WS移動・差し替えを `exit 15` で弾く）。
 2. **端末性プリフライト**。`read-screen` の成否で判定（成功＝空でも usable / `not a terminal` 等＝`exit 14` /
    一時失敗は限定リトライ）。cmux のエージェント統合パネル（PTY 無し）は read-screen 不可なので reviewer に使えない。
-3. **プロセス証明**。`cmux top --all --processes --format tsv` を送信直前に1回取得し、対象 surface の**直下プロセス**が
-   `reviewer_process`（既定 `codex`）であることを確認（`exit 17`）。Codex 終了後に shell へ戻った端末へ payload を
-   送って**コマンド実行**される事故を防ぐ。tree の `identify` はプロセスを出さないため top を使う。
+3. **プロセス証明**。対象 surface の tty で**前景プロセスグループ**を握るプロセスが `reviewer_process`
+   （既定 `codex`）であることを確認（`exit 17`）。Codex 終了後に shell へ戻った端末へ payload を送って
+   **コマンド実行**される事故を防ぐ。手順は `cmux top --all --processes --format tsv` で対象 surface の
+   直下プロセスを **PID 付き**で取得し、その PID 群を `ps -o pid=,pgid=,tpgid=,comm=` に渡して
+   `pgid == tpgid` を満たす1件を特定、その `comm` の basename を許可名と完全一致で照合する。
+   tree の `identify` はプロセスを出さないため top を使う。
+
+   直下プロセスの**件数**では判定しない。実機の cmux では surface 直下が常に
+   `[アプリ, sleep, ログインシェル]` の複数件になり、「直下が厳密に1件」は原理的に成立しない
+   （旧実装はこれで全ペインを拒否していた）。また cmux の name 列は実行ファイル名とは限らない
+   （Claude Code が `2.1.220` 等のバージョン文字列で報告される）ため、プロセス同定は必ず PID 経由で
+   `ps` に委ねる。
+
+   検査は **3 点**で行う: (iii) payload 構築前の早期棄却 / (iii-b) 本文送信の直前 /
+   (iii-c) **Enter の直前（最終ゲート）**。(iii-c) で前景が変わっていれば Enter を送らずに中止する
+   （送信済みの本文が入力行に残る旨を案内する）。限界は
+   [`../docs/security-design.md`](../docs/security-design.md) を参照。
 
 `transport.sh resolve --json` は機械可読の診断契約（`{ok, exit_code, surface_ref, surface_uuid, workspace,
 resolve_path}`）を返す。`resolve_path` は `explicit|same_ws|global`。

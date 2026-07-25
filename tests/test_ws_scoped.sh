@@ -95,37 +95,135 @@ tree_dupuuid='{"windows":[{"ref":"window:1","workspaces":[{"ref":"workspace:1","
 XREV_LISTING="$tree_dupuuid" _locate_surface "dup" >/dev/null 2>&1; rc=$?
 assert_rc "重複UUID → 曖昧 rc6" 6 "$rc"
 
-# ── _verify_reviewer_process（プロセス証明: 直下が厳密に1件 codex のときだけ送信許可）──
-# _cmux_top_processes をスタブして top 取得をテスト下に置く。
+# ── _verify_reviewer_process（プロセス証明: tty の前景プロセスが codex のときだけ送信許可）──
+#
+# 【この節が守る仕様】判定基準は「直下プロセスの件数」ではなく「pgid == tpgid を満たす前景プロセス」。
+# 実機 cmux では surface 直下が常に [アプリ, sleep, ログインシェル] の複数件になるため、旧実装の
+# 「直下が厳密に1件 codex」は原理的に成立せず全ペインを拒否していた（往復が一切開始できない回帰）。
+# fixture は実機 `cmux top` / `ps` の形状をそのまま写し、緩和ではなく判定軸の変更であることを固定する。
 _orig_top_fn="$(declare -f _cmux_top_processes)"
-_mk_top() { # 引数: "surface:N=proc[,proc...]" を TSV 行へ
-  local spec row
+_orig_ps_fn="$(declare -f _ps_snapshot)"
+_mk_top() { # 引数: "surface:N=PID:name[,PID:name...]" を top TSV 行へ
+  local spec
   for spec in "$@"; do
     local s="${spec%%=*}" procs="${spec#*=}" p
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' 0.0 1 1 surface "$s" pane:1 title
-    IFS=','; for p in $procs; do [[ -n "$p" ]] && printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' 0.0 1 1 process 100 "$s" "$p"; done; unset IFS
+    IFS=','; for p in $procs; do
+      [[ -n "$p" ]] && printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' 0.0 1 1 process "${p%%:*}" "$s" "${p#*:}"
+    done; unset IFS
   done
 }
+_mk_ps() { local r; for r in "$@"; do printf '%s\n' "$r"; done; }  # "pid pgid tpgid comm"
 _TEST_TOP=""; _cmux_top_processes() { printf '%s' "$_TEST_TOP"; }
+_TEST_PS="";  _ps_snapshot() { cat >/dev/null; printf '%s' "$_TEST_PS"; }
 
-_TEST_TOP="$(_mk_top "surface:9=codex")"
-_verify_reviewer_process "surface:9"; assert_rc "直下が codex 単独 → 許可(rc0)" 0 "$?"
+# 実機形状（surface:3 の実測をそのまま写した fixture）:
+#   codex(4728) が前景 S+ / sleep(13900) は別 pgid / zsh(1489) はログインシェルで comm が "-/bin/zsh"。
+_REAL_TOP="$(_mk_top "surface:9=4728:codex,13900:sleep,1489:zsh")"
+_REAL_PS="$(_mk_ps "4728 4728 4728 /Users/naokami/.local/bin/codex" \
+                   "13900 4726 4728 /bin/sleep" \
+                   "1489 1489 4728 -/bin/zsh")"
 
-_TEST_TOP="$(_mk_top "surface:9=codex,zsh")"
-_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "codex と shell が同居 → 拒否(非0)" 1 "$?"
+_TEST_TOP="$_REAL_TOP"; _TEST_PS="$_REAL_PS"
+_verify_reviewer_process "surface:9"; assert_rc "実機形状(codex+sleep+zsh・前景=codex) → 許可(rc0)" 0 "$?"
 
-_TEST_TOP="$(_mk_top "surface:9=zsh")"
-_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "直下が shell のみ → 拒否(非0)" 1 "$?"
+# 素のシェルペイン。codex 終了後に shell へ戻った端末＝安全目標そのもの。必ず拒否する。
+_TEST_TOP="$(_mk_top "surface:9=12028:zsh")"
+_TEST_PS="$(_mk_ps "12028 12028 12028 -/bin/zsh")"
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "素のシェルのみ(前景=zsh) → 拒否" 1 "$?"
 
-_TEST_TOP="$(_mk_top "surface:8=codex")"  # 対象 surface に直下プロセス無し
+# codex は生きているが前景がシェル（codex が停止/サスペンドされた状態）。同居では通さない。
+_TEST_TOP="$_REAL_TOP"
+_TEST_PS="$(_mk_ps "4728 4728 1489 /Users/naokami/.local/bin/codex" \
+                   "13900 4726 1489 /bin/sleep" \
+                   "1489 1489 1489 -/bin/zsh")"
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "codex 同居でも前景が zsh → 拒否" 1 "$?"
+
+# codex が子プロセスへ端末を譲渡し、前景 pgrp が直下のどれとも一致しない。系譜追跡で緩和せず一時拒否する
+# （可用性より安全を優先する意図的な制約。詳細は docs/security-design.md）。
+_TEST_PS="$(_mk_ps "4728 4728 5555 /Users/naokami/.local/bin/codex" \
+                   "13900 4726 5555 /bin/sleep" \
+                   "1489 1489 5555 -/bin/zsh")"
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "前景が直下に存在しない(端末譲渡中) → 拒否" 1 "$?"
+
+# 前景候補が複数（pgid が重複）。一意に定まらないものは通さない。
+_TEST_PS="$(_mk_ps "4728 4728 4728 /Users/naokami/.local/bin/codex" \
+                   "13900 4728 4728 /bin/sleep" \
+                   "1489 1489 4728 -/bin/zsh")"
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "前景候補が複数 → 拒否" 1 "$?"
+
+# tpgid が割れる＝同一 tty を共有していない観測。信用しない。
+_TEST_PS="$(_mk_ps "4728 4728 4728 /Users/naokami/.local/bin/codex" \
+                   "13900 4726 9999 /bin/sleep" \
+                   "1489 1489 4728 -/bin/zsh")"
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "tpgid が全件一致しない → 拒否" 1 "$?"
+
+# 制御端末なし（tpgid <= 0）。前景の概念が無いので判定不能＝拒否。
+_TEST_PS="$(_mk_ps "4728 4728 -1 /Users/naokami/.local/bin/codex" \
+                   "13900 4726 -1 /bin/sleep" \
+                   "1489 1489 -1 -/bin/zsh")"
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "制御端末なし(tpgid<=0) → 拒否" 1 "$?"
+
+# ps は一部 PID が消えても残りを出して exit 0 を返す（実機挙動）。欠落を完全な観測と誤認しない。
+_TEST_PS="$(_mk_ps "4728 4728 4728 /Users/naokami/.local/bin/codex" \
+                   "1489 1489 4728 -/bin/zsh")"
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "ps 結果が一部欠落 → 拒否" 1 "$?"
+
+# 要求していない PID が混ざる観測も信用しない。
+_TEST_PS="$(_mk_ps "4728 4728 4728 /Users/naokami/.local/bin/codex" \
+                   "13900 4726 4728 /bin/sleep" \
+                   "1489 1489 4728 -/bin/zsh" \
+                   "7777 7777 4728 /bin/cat")"
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "ps 結果に余剰 PID → 拒否" 1 "$?"
+
+_TEST_PS="$(_mk_ps "4728 4728 4728 /Users/naokami/.local/bin/codex" \
+                   "13900 4726 4728 /bin/sleep" \
+                   "1489 1489 4728 -/bin/zsh" \
+                   "4728 4728 4728 /bin/cat")"
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "ps 結果に PID 重複 → 拒否" 1 "$?"
+
+_TEST_PS=""
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "ps 取得不可(空) → 拒否" 1 "$?"
+
+_TEST_PS="$(_mk_ps "4728 x 4728 /Users/naokami/.local/bin/codex" \
+                   "13900 4726 4728 /bin/sleep" \
+                   "1489 1489 4728 -/bin/zsh")"
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "ps の数値フィールドが不正 → 拒否" 1 "$?"
+
+# cmux top 側の PID が不正／重複していれば ps 照合の前提が崩れる。
+_TEST_TOP="$(_mk_top "surface:9=abc:codex")"; _TEST_PS="$(_mk_ps "4728 4728 4728 /bin/codex")"
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "top の PID が非数値 → 拒否" 1 "$?"
+
+_TEST_TOP="$(_mk_top "surface:9=4728:codex,4728:zsh")"
+_TEST_PS="$(_mk_ps "4728 4728 4728 /bin/codex")"
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "top の PID が重複 → 拒否" 1 "$?"
+
+# 許可名の比較は basename 完全一致。部分一致は採らない（偽陽性を避ける）。
+_TEST_TOP="$(_mk_top "surface:9=4728:codex")"
+_TEST_PS="$(_mk_ps "4728 4728 4728 /opt/homebrew/bin/codex")"
+_verify_reviewer_process "surface:9"; assert_rc "comm が絶対パスでも basename 一致 → 許可" 0 "$?"
+
+_TEST_PS="$(_mk_ps "4728 4728 4728 /usr/local/bin/codex-wrapper")"
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "類似名(codex-wrapper)は部分一致で通さない → 拒否" 1 "$?"
+
+_TEST_PS="$(_mk_ps "4728 4728 4728 /bin/codex")"
+XREV_SAVED_PROC="$REVIEWER_PROCESS"; REVIEWER_PROCESS="claude"
+_verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "許可名を変えると別プロセスは拒否" 1 "$?"
+_TEST_PS="$(_mk_ps "4728 4728 4728 /Users/x/.local/bin/claude")"
+_verify_reviewer_process "surface:9"; assert_rc "許可名を変えれば主従を入れ替えられる(claude)" 0 "$?"
+REVIEWER_PROCESS="$XREV_SAVED_PROC"
+
+_TEST_TOP="$(_mk_top "surface:8=4728:codex")"  # 対象 surface に直下プロセス無し
 _verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "対象surfaceに直下プロセス無し → 拒否(非0)" 1 "$?"
 
 _TEST_TOP=""
 _verify_reviewer_process "surface:9" 2>/dev/null; assert_rc "top 取得不可 → 拒否(非0)" 1 "$?"
 
-eval "$_orig_top_fn"  # スタブを元に戻す
+eval "$_orig_top_fn"; eval "$_orig_ps_fn"  # スタブを元に戻す
 
-# ── _top_surface_processes（top TSV から直下プロセスを抽出）──────────────────
+# ── _top_surface_processes（top TSV から直下プロセスを PID 付きで抽出）──────────
+# cmux の name 列は実行ファイル名とは限らない（実機で Claude Code は "2.1.185" 等のバージョン文字列）。
+# 同定を ps に委ねるため PID を落とさず返すことがここでの契約。
 top="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
   0.0 1 1 surface surface:2 pane:2 'Review Codex' \
   0.0 1 1 process 96186 surface:2 codex \
@@ -134,9 +232,9 @@ top="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
   0.0 1 1 process 46530 surface:4 2.1.185)"
 
 assert_eq "surface:2 の直下は codex のみ（孫の caffeinate は含めない）" \
-  "codex" "$(XREV_TOP="$top" _top_surface_processes "surface:2" | paste -sd, -)"
-assert_eq "surface:4 の直下は claude プロセス" \
-  "2.1.185" "$(XREV_TOP="$top" _top_surface_processes "surface:4" | paste -sd, -)"
+  "96186:codex" "$(XREV_TOP="$top" _top_surface_processes "surface:2" | tr '\t' ':' | paste -sd, -)"
+assert_eq "surface:4 の直下は claude プロセス（PID を保持する）" \
+  "46530:2.1.185" "$(XREV_TOP="$top" _top_surface_processes "surface:4" | tr '\t' ':' | paste -sd, -)"
 assert_eq "存在しない surface は空" \
   "" "$(XREV_TOP="$top" _top_surface_processes "surface:99")"
 

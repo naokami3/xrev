@@ -49,7 +49,10 @@ if ! _cmux_set_title "$REVIEWER_PANE_TITLE"; then
 fi
 echo "[start-reviewer] タブを '$REVIEWER_PANE_TITLE' に設定しました。codex を起動します…" >&2
 
-# exec で置き換える＝サーフェス直下プロセスが codex 単独になる（プロセス証明ゲートの前提）。
+# exec で置き換えるのはシェルを残さず codex に tty の前景を握らせるため（プロセス証明ゲートの前提）。
+# 【注意】exec してもサーフェス直下プロセスが codex 単独にはならない。cmux はペインのログインシェルと
+# 周期 sleep も直下として報告し続けるため、直下は複数件のまま。ゲートが見るのは件数ではなく
+# 「前景プロセスグループを握るのが codex か」である（references/protocol.md 参照）。
 # 万一 exec に失敗した場合は、規約タイトルのまま codex でない状態が残るため復旧手順を明示する。
 exec "$codex_bin" "$@"
 echo "[start-reviewer] codex の起動(exec)に失敗しました。タブ名が '$REVIEWER_PANE_TITLE' のまま残っています。" >&2

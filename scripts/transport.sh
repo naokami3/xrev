@@ -304,9 +304,11 @@ print("%s\t%s\t%s" % hits[0])
 PY
 }
 
-# 純粋関数: cmux top の TSV から、指定 surface ref の「直下プロセス名」を列挙する。
+# 純粋関数: cmux top の TSV から、指定 surface ref の「直下プロセス」を列挙する。
 # top の行(TSV): cpu, mem, count, kind, id, parent, name。kind=process かつ parent=surface ref が直下。
-#   入力: $1=surface ref, env XREV_TOP=top TSV / 出力: 直下プロセス名を1行ずつ
+#   入力: $1=surface ref, env XREV_TOP=top TSV / 出力: "PID<TAB>name" を1行ずつ
+# PID(5列目)も返すのが要点。cmux の name 列は実行ファイル名とは限らない（実機で Claude Code が
+# "2.1.220" というバージョン文字列で報告される）ため、プロセス同定は PID 経由で ps に委ねる。
 _top_surface_processes() {
   XREV_TOP="${XREV_TOP:-}" python3 - "$1" <<'PY'
 import os, sys
@@ -316,7 +318,7 @@ for line in os.environ.get("XREV_TOP", "").splitlines():
     if len(p) < 7:
         continue
     if p[3] == "process" and p[5] == ref:
-        print(p[6])
+        print("%s\t%s" % (p[4], p[6]))
 PY
 }
 
@@ -461,21 +463,122 @@ _probe_terminal_usable() {
   printf 'transient'
 }
 
-# プロセス証明: 対象 surface の直下プロセスが「厳密に1件 かつ 許可名(REVIEWER_PROCESS)と完全一致」か。
-#   top を送信直前に1回取得して鮮度を担保。取得不能・複数直下・空・許可名以外はいずれも非ゼロ(=送信拒否)。
-#   「1件でも含めば通す」だと shell と codex が同居する surface で入力先が shell の可能性を排除できないため、
-#   厳密1件を要求する（shell へ payload を Enter 送信する事故を防ぐ）。
+# ps スナップショット取得（cmux 非依存の外部コマンド。テストではスタブする）。
+#   入力(stdin): PID を1行1件 / 出力: "pid pgid tpgid comm" を1行1件（ps の既定区切り＝空白）
+# 【注意】ps は「一部の PID が消えていても残りを出して exit 0」を返す（実機確認）。したがって
+# 呼び出し側で「要求した PID が過不足なく返ったか」を必ず検証すること（欠落を完全なスナップショットと
+# 誤認しないため）。ここでは取得のみを行い、判定は _decide_foreground_owner に委ねる。
+_ps_snapshot() {
+  local args=() p
+  while IFS= read -r p; do
+    [[ -n "$p" ]] && args+=(-p "$p")
+  done
+  (( ${#args[@]} )) || return 1
+  ps -o pid=,pgid=,tpgid=,comm= "${args[@]}" 2>/dev/null
+}
+
+# 純粋関数: 「対象 surface でキー入力を受け取るプロセス」が許可名かを判定する。
+#   入力: $1=許可名, env XREV_DIRECT="PID<TAB>name" 行群, env XREV_PS=_ps_snapshot 出力
+#   出力: 成功時は検出したプロセス名 / 失敗時は拒否理由。exit 0=許可 / 1=拒否（fail closed）
+#
+# 【判定原理】件数ではなく **tty のフォアグラウンドプロセスグループ** を見る。実機の cmux では
+# surface の直下は常に [アプリ, sleep, ログインシェル] の複数件になり「直下が厳密に1件」は原理的に
+# 成立しない。一方 pgid == tpgid を満たす直下プロセスはちょうど1件存在し、それが実際にキー入力を
+# 受け取るプロセスなので、安全目標（shell へ payload を送り込みコマンド実行される事故の防止）を
+# 件数条件より正確に表現できる。素のシェルペインでは shell が前景として検出され従来どおり拒否される。
+_decide_foreground_owner() {
+  XREV_DIRECT="${XREV_DIRECT:-}" XREV_PS="${XREV_PS:-}" python3 - "$1" <<'PY'
+import os, sys
+
+def deny(msg):
+    sys.stdout.write(msg)
+    sys.exit(1)
+
+def as_int(s):
+    try:
+        return int(s, 10)
+    except ValueError:
+        return None
+
+expected = os.path.basename(sys.argv[1])
+if not expected:
+    deny("許可プロセス名(reviewer_process)が空です")
+
+# 1) cmux top 由来の直下プロセス。PID は正の整数かつ重複なしを要求する。
+direct = {}
+for line in os.environ.get("XREV_DIRECT", "").splitlines():
+    if not line.strip():
+        continue
+    parts = line.split("\t")
+    if len(parts) < 2:
+        deny("直下プロセス一覧の形式が不正です")
+    pid, name = as_int(parts[0].strip()), parts[1].strip()
+    if pid is None or pid <= 0:
+        deny("直下プロセスの PID が不正です (%s)" % parts[0].strip())
+    if pid in direct:
+        deny("直下プロセスの PID が重複しています (%d)" % pid)
+    direct[pid] = name
+if not direct:
+    deny("直下プロセスを特定できません")
+
+# 2) ps 結果。要求 PID と過不足なく一致することを要求する（部分欠落を完全な観測と誤認しない）。
+rows = {}
+for line in os.environ.get("XREV_PS", "").splitlines():
+    if not line.strip():
+        continue
+    f = line.split(None, 3)
+    if len(f) < 4:
+        deny("ps 出力の形式が不正です")
+    pid, pgid, tpgid = as_int(f[0]), as_int(f[1]), as_int(f[2])
+    if pid is None or pgid is None or tpgid is None:
+        deny("ps 出力の数値フィールドが不正です")
+    if pid in rows:
+        deny("ps 出力に PID の重複があります (%d)" % pid)
+    rows[pid] = (pgid, tpgid, f[3].strip())
+if set(rows) != set(direct):
+    missing = sorted(set(direct) - set(rows))
+    extra = sorted(set(rows) - set(direct))
+    deny("ps の観測が直下プロセスと一致しません（欠落=%s 余剰=%s）" % (missing or "なし", extra or "なし"))
+
+# 3) 全プロセスが同一 tty を共有し、前景プロセスグループが確定していること。
+tpgids = {v[1] for v in rows.values()}
+if len(tpgids) != 1:
+    deny("直下プロセスの制御端末が一致しません（tpgid=%s）" % sorted(tpgids))
+tpgid = tpgids.pop()
+if tpgid <= 0:
+    deny("制御端末の前景プロセスグループを特定できません（tpgid=%d）" % tpgid)
+
+# 4) 前景プロセスグループに属する直下プロセスがちょうど1件であること。
+fg = [pid for pid, v in rows.items() if v[0] == tpgid]
+if len(fg) != 1:
+    names = sorted(os.path.basename(rows[p][2]) for p in fg)
+    deny("前景プロセスが一意に定まりません（該当=%d件 %s）" % (len(fg), names or "なし"))
+
+# 5) その1件が許可名であること。ps の comm は絶対パス（ログインシェルは "-/bin/zsh"）で返るため
+#    basename 化して比較する。部分一致・引数照合は偽陽性を招くので採らない。
+actual = os.path.basename(rows[fg[0]][2])
+if actual != expected:
+    deny("前景プロセスが '%s' ではありません（実際=%s）" % (expected, actual or "不明"))
+sys.stdout.write(actual)
+PY
+}
+
+# プロセス証明: 対象 surface でキー入力を受け取るプロセスが許可名(REVIEWER_PROCESS)かを検証する。
+#   top を検査のたびに取得して鮮度を担保。取得不能・観測不整合・許可名以外はいずれも非ゼロ(=送信拒否)。
+# 【重要】この検証は「その瞬間」の観測にすぎない。検査から実際の入力確定(Enter)までの間に codex が
+# 終了すれば payload が shell へ渡りうるため、呼び出し側は **Enter の直前を最終ゲート**として
+# 再検証すること（xrev_transport_review の (iii-c) を参照）。
 _verify_reviewer_process() {
-  local surface="$1" top names count
+  local surface="$1" top direct ps_out detail
   top="$(_cmux_top_processes)"
   [[ -n "$top" ]] || { _log "cmux top を取得できません（プロセス証明不可）。"; return 1; }
-  names="$(XREV_TOP="$top" _top_surface_processes "$surface")"
-  [[ -n "$names" ]] || { _log "reviewer surface($surface)の直下プロセスを特定できません。"; return 1; }
-  count="$(printf '%s\n' "$names" | grep -c .)"
-  if [[ "$count" -ne 1 || "$names" != "$REVIEWER_PROCESS" ]]; then
-    _log "reviewer surface($surface)の直下プロセスが '$REVIEWER_PROCESS' 単独ではありません（直下=[$(printf '%s' "$names" | paste -sd, -)]）。"
+  direct="$(XREV_TOP="$top" _top_surface_processes "$surface")"
+  [[ -n "$direct" ]] || { _log "reviewer surface($surface)の直下プロセスを特定できません。"; return 1; }
+  ps_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_snapshot)"
+  detail="$(XREV_DIRECT="$direct" XREV_PS="$ps_out" _decide_foreground_owner "$REVIEWER_PROCESS")" || {
+    _log "reviewer surface($surface)のプロセス証明に失敗: ${detail}"
     return 1
-  fi
+  }
 }
 
 # reviewer ペインの最終確定入力（プロンプト送信）。本文（1物理行）を送り終えたあとに呼ぶ。
@@ -776,7 +879,7 @@ xrev_ensure_reviewer() {
     10) : ;;  # absent → 生成判断へ
     16) _log "同一WSに reviewer が複数あり曖昧です。作成せず確認してください。"; return 16 ;;
     14) _log "同一WSの reviewer が実ターミナルでありません（壊れ）。作成せず確認してください。"; return 14 ;;
-    17) _log "同一WSの reviewer の直下プロセスが '$REVIEWER_PROCESS' ではありません。作成せず確認してください。"; return 17 ;;
+    17) _log "同一WSの reviewer の前景プロセスが '$REVIEWER_PROCESS' ではありません。作成せず確認してください。"; return 17 ;;
     15) _log "呼び出し元のワークスペースを特定できません（cmux ペイン内で実行してください）。"; return 15 ;;
     # 一時障害(tree取得不能等)は「不在を証明できない」ので生成しない。再試行/人間判断に委ねる。
     *)  _log "reviewer の状態を確認できませんでした（一時障害）。生成せず中止します。"; return 11 ;;
@@ -895,9 +998,11 @@ xrev_transport_review() {
     *) _log "reviewer surface($surface)の画面取得に繰り返し失敗しました（中止）。"; return 11 ;;
   esac
 
-  # (iii) プロセス証明（直下プロセスが許可名=$REVIEWER_PROCESS か。Codex 終了後に shell へ戻った端末への誤送信を防ぐ）
+  # (iii) プロセス証明（前景プロセスが許可名=$REVIEWER_PROCESS か。Codex 終了後に shell へ戻った端末への誤送信を防ぐ）
+  # ここは早期棄却のゲート。payload 構築や画面読み取りの前に壊れた宛先を弾く。
   if ! _verify_reviewer_process "$surface"; then
-    _log "reviewer surface($surface)の直下プロセスが '$REVIEWER_PROCESS' ではありません（reviewer 未稼働/別用途の端末の恐れ）。送信を中止します。"
+    _log "reviewer surface($surface)の前景プロセスが '$REVIEWER_PROCESS' ではありません（reviewer 未稼働/別用途の端末の恐れ）。送信を中止します。"
+    _log "復旧: 当該ペインで codex を起動し直すか、タブ名 '$REVIEWER_PANE_TITLE' が別用途の端末に付いていないか確認してください。"
     return 17
   fi
 
@@ -914,6 +1019,13 @@ xrev_transport_review() {
   local before_count
   before_count="$(_scan_review_blocks "$(_cmux_read_screen "$surface")" "$round_id" | head -1)"
   [[ "$before_count" =~ ^[0-9]+$ ]] || before_count=0
+
+  # (iii-b) 本文送信の直前に再検証。(iii) からベースライン取得（read-screen）を挟むため、
+  # その間に codex が終了していれば本文がシェルの入力バッファへ流れ込む。窓を最小化する。
+  if ! _verify_reviewer_process "$surface"; then
+    _log "本文送信の直前に reviewer の前景プロセスが変化しました（誤送信防止のため中止）。"
+    return 17
+  fi
 
   # 1物理行を送信 → 描画待ち → 切り詰め検出 → Enter 1回で確定。
   _cmux_send_line "$surface" "$line" || { _log "送信に失敗しました。"; return 11; }
@@ -932,6 +1044,24 @@ xrev_transport_review() {
     return 13
   fi
   [[ "$intact" == "ok" ]] || _log "ペースト到達を確認できませんでした（確認不能）。続行します。"
+
+  # (iii-c) 最終ゲート: Enter の直前に再検証する。ここが安全目標の要。
+  # 本文送信から描画待ち・切り詰め検出まで最大10秒前後あり、その間に codex が終了すると本文は
+  # シェルの入力行に残る。しかも _check_paste_intact はシェルがエコーした行でも END マーカーを
+  # 見つけて "ok" を返すため、切り詰め検出は誤送信の防波堤にならない。Enter を送るか否かを
+  # 決める直前の観測だけが、payload がコマンド実行される事故を防げる。
+  if ! _verify_reviewer_process "$surface"; then
+    _log "Enter 送信の直前に reviewer の前景プロセスが変化しました。コマンド実行を避けるため Enter を送りません。"
+    # 【重要】Enter を送らないだけでは安全な終端にならない。送信済みの本文は入力行に残り、
+    # 前景が shell に戻っている以上、その後の偶発的な Enter や再送でコマンド実行され得る。
+    # かつ Codex の composer は ctrl+u/ctrl+a/ctrl+k/ctrl+w で消去できないことを実機確認済みで
+    # （反応するのは backspace の1文字ずつのみ）、xrev には残留を自動破棄する確実な手段が無い。
+    # したがってこのペインは**汚染された**ものとして扱い、再利用を禁止する。
+    _log "【重要】送信済みの本文が reviewer ペイン($surface)の入力行に残っています。xrev はこれを自動破棄できません。"
+    _log "このペインは汚染されたものとして扱ってください: Enter を押さずにペインを閉じ、reviewer を開き直してから再実行してください。"
+    _log "（残留したまま再送すると本文が混入します。同じペインを使い回さないでください。）"
+    return 17
+  fi
   _cmux_submit "$surface" || true
 
   # 応答待ち：round_id 一致の新着妥当ブロックが出るまで待つ。
