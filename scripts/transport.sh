@@ -1787,6 +1787,229 @@ xrev_transport_review() {
 # sleep ラッパ（フォアグラウンド sleep が制限される環境向けの薄い抽象）。
 _xrev_sleep() { sleep "$1" 2>/dev/null || true; }
 
+# ── doctor: 外部ツール契約の一括診断（非破壊・再実行可能）───────────────────────
+#
+# 【背景】xrev は cmux / Codex / Claude Code のバージョンアップのたびに壊れるが、壊れ方が
+# 「全拒否」「タイムアウト」「無言沈黙」に化けて原因が読めない。ここで外部ツールへの契約仮定
+# （tree/top の JSON・TSV 形状、ps の出力形式、フックの入出力契約 等）を一括検査し、
+# 人間可読な診断を出す。
+#
+# 【不変条件】検査はすべて非変更・再実行可能。ペイン生成・送信・タイトル変更などの副作用を
+# 持つ検査は絶対に追加しないこと（doctor は「壊れているかもしれない配管に触れず調べる」ためのもの）。
+#
+# 出力: 1検査1行 "[ok]/[warn]/[fail] 検査名: 詳細"（stdout。機械処理より人間可読を優先するため
+# あえて stderr ではなく stdout に出す）。最後に "ok=N warn=N fail=N" のサマリ行。
+# exit: fail>0 → 1 / fail=0 → 0（warn は exit に影響しない）。詳細は references/protocol.md。
+
+# 純粋関数（cmux 非依存・単体テスト可能）: cmux tree の JSON が想定形状か検査する（doctor 検査5）。
+#   入力: stdin=tree(--all --json --id-format both 相当)の JSON 文字列
+#   出力: 1行診断（成功・失敗いずれも1行）
+#   exit: 0=形状OK（ref="surface:*" title(str) uuid/id/uidいずれか、を持つ要素が1件以上）/ 非0=崩れ
+_doctor_check_tree_shape() {
+  local prog
+  read -r -d '' prog <<'PY' || true
+import json, sys
+raw = sys.stdin.read()
+if not raw.strip():
+    print("tree の出力が空です")
+    sys.exit(1)
+try:
+    data = json.loads(raw)
+except Exception as e:
+    print("JSON として parse できません: %s" % e)
+    sys.exit(1)
+
+count = 0
+def walk(o):
+    global count
+    if isinstance(o, dict):
+        ref = o.get("ref")
+        title = o.get("title")
+        if isinstance(ref, str) and ref.startswith("surface:") and isinstance(title, str):
+            if any(k in o for k in ("uuid", "id", "uid")):
+                count += 1
+        for v in o.values():
+            if isinstance(v, (list, dict)):
+                walk(v)
+    elif isinstance(o, list):
+        for x in o:
+            walk(x)
+walk(data)
+if count == 0:
+    print('ref="surface:*" title(str) かつ uuid/id/uid のいずれかを持つ要素が見つかりません')
+    sys.exit(1)
+print("surface 要素を %d 件確認しました" % count)
+PY
+  python3 -c "$prog"
+}
+
+# 純粋関数（cmux 非依存・単体テスト可能）: cmux top の TSV が想定形状か検査する（doctor 検査6）。
+#   入力: stdin=top(--all --processes --format tsv 相当)の TSV 文字列
+#   出力: 1行診断
+#   exit: 0=形状OK（7列以上・kind列(4列目)にprocessが存在・process行の5列目が数値PID）/ 非0=崩れ
+_doctor_check_top_shape() {
+  local prog
+  read -r -d '' prog <<'PY' || true
+import sys
+raw = sys.stdin.read()
+if not raw.strip():
+    print("top の出力が空です")
+    sys.exit(1)
+lines = [l for l in raw.splitlines() if l.strip() != ""]
+has_process = False
+for l in lines:
+    cols = l.split("\t")
+    if len(cols) < 7:
+        print("TSV の列数が7列未満の行があります: %r" % l)
+        sys.exit(1)
+    if cols[3] == "process":
+        has_process = True
+        pid = cols[4]
+        if not pid.isdigit():
+            print("process 行の PID(5列目)が数値ではありません: %r" % pid)
+            sys.exit(1)
+if not has_process:
+    print("kind(4列目)=process の行が見つかりません")
+    sys.exit(1)
+print("top TSV を確認しました（%d 行・process 行あり）" % len(lines))
+PY
+  python3 -c "$prog"
+}
+
+# doctor: 1検査1行の報告と ok/warn/fail 集計。
+_DOCTOR_OK=0; _DOCTOR_WARN=0; _DOCTOR_FAIL=0
+_doctor_report() {
+  local level="$1" name="$2" detail="$3"
+  case "$level" in
+    ok)   _DOCTOR_OK=$(( _DOCTOR_OK + 1 )) ;;
+    warn) _DOCTOR_WARN=$(( _DOCTOR_WARN + 1 )) ;;
+    fail) _DOCTOR_FAIL=$(( _DOCTOR_FAIL + 1 )) ;;
+  esac
+  printf '[%s] %s: %s\n' "$level" "$name" "$detail"
+}
+
+# 公開: 外部ツール契約の一括診断本体。検査は独立に実行し、1つの失敗で後続を止めない。
+xrev_doctor() {
+  _DOCTOR_OK=0; _DOCTOR_WARN=0; _DOCTOR_FAIL=0
+
+  # 1) python3: 存在とバージョン
+  if command -v python3 >/dev/null 2>&1; then
+    _doctor_report ok "python3" "$(python3 --version 2>&1)"
+  else
+    _doctor_report fail "python3" "python3 が見つかりません（以降 python3 が要る検査は実行できません）"
+  fi
+
+  # 2) cmux バイナリ: 解決結果とバージョン。実測検証済み(0.64.20)と異なれば warn（fail にはしない）。
+  local known_ver="0.64.20" cmux_ver
+  if command -v "$CMUX_BIN" >/dev/null 2>&1 || [[ -x "$CMUX_BIN" ]]; then
+    cmux_ver="$(_cmux --version 2>&1 | head -1)"
+    if [[ -z "$cmux_ver" ]]; then
+      _doctor_report warn "cmux バイナリ" "bin=${CMUX_BIN} バージョンを取得できません"
+    elif printf '%s' "$cmux_ver" | grep -qF "$known_ver"; then
+      _doctor_report ok "cmux バイナリ" "bin=${CMUX_BIN} version=${cmux_ver}"
+    else
+      _doctor_report warn "cmux バイナリ" "bin=${CMUX_BIN} version=${cmux_ver}（実測検証済みは ${known_ver}。docs/cmux-behavior.md の実測知見が当てはまらない可能性。挙動が変わっていないか注意してください）"
+    fi
+  else
+    _doctor_report fail "cmux バイナリ" "見つかりません（bin=${CMUX_BIN}）。cmux ペイン内で実行するか XREV_CMUX_BIN で絶対パスを指定してください"
+  fi
+
+  # 3) cmux 接続: _cmux_preflight 相当（ping）。
+  if _cmux_preflight >/dev/null 2>&1; then
+    _doctor_report ok "cmux 接続" "ping 成功（bin=${CMUX_BIN}）"
+  else
+    _doctor_report fail "cmux 接続" "ping に失敗しました。xrev は cmux ペイン内で実行してください（外部から動かす場合は CMUX_SOCKET_PASSWORD を設定）"
+  fi
+
+  # 4) env 注入: CMUX_SURFACE_ID(無しはfail) / CMUX_WORKSPACE_ID(無しはwarn)
+  if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then
+    _doctor_report ok "env 注入(CMUX_SURFACE_ID)" "CMUX_SURFACE_ID=${CMUX_SURFACE_ID}"
+  else
+    _doctor_report fail "env 注入(CMUX_SURFACE_ID)" "未注入です（同一ワークスペースの宛先解決ができません。cmux ペイン内で実行してください）"
+  fi
+  if [[ -n "${CMUX_WORKSPACE_ID:-}" ]]; then
+    _doctor_report ok "env 注入(CMUX_WORKSPACE_ID)" "CMUX_WORKSPACE_ID=${CMUX_WORKSPACE_ID}"
+  else
+    _doctor_report warn "env 注入(CMUX_WORKSPACE_ID)" "未注入です"
+  fi
+
+  # 5) tree 形状（_doctor_check_tree_shape に委譲）
+  local tree tree_msg tree_rc
+  tree="$(_cmux_tree_uuids)"
+  tree_msg="$(printf '%s' "$tree" | _doctor_check_tree_shape)"; tree_rc=$?
+  if (( tree_rc == 0 )); then
+    _doctor_report ok "tree 形状" "$tree_msg"
+  else
+    _doctor_report fail "tree 形状" "cmux tree の JSON 形状が想定と異なります（バージョンアップで宛先解決が壊れている可能性）: ${tree_msg}"
+  fi
+
+  # 6) top 形状（_doctor_check_top_shape に委譲）
+  local top top_msg top_rc
+  top="$(_cmux_top_processes)"
+  top_msg="$(printf '%s' "$top" | _doctor_check_top_shape)"; top_rc=$?
+  if (( top_rc == 0 )); then
+    _doctor_report ok "top 形状" "$top_msg"
+  else
+    _doctor_report fail "top 形状" "cmux top の TSV 形状が想定と異なります（プロセス証明が全拒否になっている可能性）: ${top_msg}"
+  fi
+
+  # 7) ps 契約: 「pid pgid tpgid comm」の4フィールドを返すこと
+  local ps_out
+  ps_out="$(printf '%s\n' "$$" | _ps_snapshot)"
+  if [[ -n "$ps_out" ]] && printf '%s\n' "$ps_out" | awk 'NF != 4 { exit 1 }'; then
+    _doctor_report ok "ps 契約" "pid pgid tpgid comm の4フィールドを確認しました（$(printf '%s' "$ps_out" | head -1)）"
+  else
+    _doctor_report fail "ps 契約" "ps が「pid pgid tpgid comm」の4フィールドを返しません（出力=${ps_out}）"
+  fi
+
+  # 8) reviewer 解決: 環境状態の情報表示（present以外もfailにはしない）
+  _XREV_RES_REF=""
+  _cmux_resolve_surface >/dev/null 2>&1
+  local resolve_rc=$?
+  case "$resolve_rc" in
+    0)  _doctor_report ok "reviewer 解決" "present（surface=${_XREV_RES_REF} path=${_XREV_RES_PATH}）" ;;
+    10) _doctor_report warn "reviewer 解決" "absent（ensure-reviewer で生成可能です）" ;;
+    *)  _doctor_report warn "reviewer 解決" "code=${resolve_rc}（環境状態の情報であり契約違反ではないため fail にはしません）" ;;
+  esac
+
+  # 9) reviewer バイナリ（不在は警告）・launch 引数の決定可否（失敗は fail）
+  local codex="${XREV_CODEX_BIN:-codex}"
+  if command -v "$codex" >/dev/null 2>&1; then
+    _doctor_report ok "reviewer バイナリ" "bin=${codex} version=$("$codex" --version 2>&1 | head -1)"
+  else
+    _doctor_report warn "reviewer バイナリ" "見つかりません（bin=${codex}）。送信検証は前景プロセス名しか見ないため致命ではありませんが、ensure-reviewer は失敗します"
+  fi
+  local largs_out
+  if largs_out="$(_xrev_reviewer_launch_args "$codex" 2>&1)"; then
+    _doctor_report ok "reviewer launch 引数" "$(printf '%s' "$largs_out" | tr '\n' ' ')"
+  else
+    _doctor_report fail "reviewer launch 引数" "決定できません（自動生成が全滅します）: ${largs_out}"
+  fi
+
+  # 10) フック契約セルフテスト
+  # 【限界】これは「xrev 側の実装が契約どおりか」の検証にすぎない。Claude Code 本体が
+  # UserPromptSubmit のフィールド名やイベント仕様そのものを変えた場合は検出できない。
+  local hook_path out_a out_b
+  hook_path="$(_xrev_script_dir)/../hooks/user-prompt-submit.sh"
+  if [[ -f "$hook_path" ]]; then
+    out_a="$(printf '%s' '{"prompt":"@xrev テスト"}' | XREV_CONFIG="$XREV_CONFIG" bash "$hook_path" 2>/dev/null)"
+    out_b="$(printf '%s' '{"prompt":"関係ない話"}' | XREV_CONFIG="$XREV_CONFIG" bash "$hook_path" 2>/dev/null)"
+    if [[ "$out_a" == *additionalContext* && -z "$out_b" ]]; then
+      _doctor_report ok "フック契約セルフテスト" "@xrev 検知時に additionalContext を出力し、非検知時は無出力でした"
+    else
+      _doctor_report fail "フック契約セルフテスト" "フックの入出力契約が壊れています（Claude Code の仕様変更または plugin 破損）"
+    fi
+  else
+    _doctor_report fail "フック契約セルフテスト" "フック本体が見つかりません（path=${hook_path}）"
+  fi
+
+  # 11) 検出不能な既知の縮退（検査ではなく固定の info 行）
+  printf '[info] 既知の検出不能な縮退: Codex TUI の "Pasted Content N chars" 文言と cmux エラー文言（"not a terminal" 等）の変更は doctor では検出できません。切り詰め検出の unknown 警告が毎回出る場合は文言変更を疑ってください。\n'
+
+  printf 'ok=%d warn=%d fail=%d\n' "$_DOCTOR_OK" "$_DOCTOR_WARN" "$_DOCTOR_FAIL"
+  (( _DOCTOR_FAIL == 0 ))
+}
+
 # 直接実行されたら簡易セルフテスト（実機用）。source されたときは何もしない。
 if [[ "${BASH_SOURCE[0]:-}" == "${0}" ]]; then
   case "${1:-}" in
@@ -1833,6 +2056,9 @@ print(json.dumps({
     review)
       shift
       xrev_transport_review "${1:-テスト payload}" ;;
+    doctor)
+      # 外部ツール契約の一括診断（バージョンアップ後はまず実行）。非破壊・再実行可能。
+      xrev_doctor; exit $? ;;
     *)
       cat >&2 <<USAGE
 usage:
@@ -1843,6 +2069,7 @@ usage:
   transport.sh diff-hash [<range>]  # 参照モードの決定論 diff ハッシュ（既定 HEAD）
   transport.sh ensure-reviewer      # 同一WSの reviewer を保証（あれば採用・無ければ生成）
   transport.sh review "<payload>"   # 1往復だけ送って JSON を受ける
+  transport.sh doctor               # 外部ツール契約の一括診断（非破壊・再実行可能）
 USAGE
       exit 64 ;;
   esac

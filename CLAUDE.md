@@ -15,6 +15,7 @@ bash tests/run.sh                         # ユニットテスト（cmux 不要�
 bash -n scripts/*.sh hooks/*.sh           # 構文チェック
 scripts/transport.sh ping                 # cmux 接続確認（cmux ペイン内で実行）
 scripts/transport.sh resolve              # reviewer ペインの宛先解決確認
+scripts/transport.sh doctor               # 外部ツール契約の一括診断（バージョンアップ後はまず実行）
 scripts/transport.sh review "<payload>"   # 1 往復の手動テスト（実機）
 ```
 
