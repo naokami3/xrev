@@ -6,9 +6,19 @@ on:
     branches: [main]
   pull_request:
 
+# fork からの PR 実行も含め、必要最小限の権限に絞る。
+permissions:
+  contents: read
+
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # macOS 実機運用が前提のため、ps の tpgid/comm 挙動差を CI でも検出できるよう
+        # ubuntu に加えて macos-latest でも走らせる。
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: バージョン確認
