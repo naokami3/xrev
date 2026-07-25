@@ -107,6 +107,8 @@ encoding にバージョンを付けている。
   reviewer 側は復号に失敗したらレビューを行わず、`verdict="request_changes"` と
   `category="bug"` / `message="decode_error"` の finding を1件だけ返す。
   inline へのフォールバックは**しない**（同じ ASCII wire を通るので回避にならない）。
+  `message="decode_error"` の finding は、その severity や config の `severity_blockers`
+  設定に関わらず、常に blocker として集計される（誤収束防止）。
 
 ### reviewer 出力の例
 

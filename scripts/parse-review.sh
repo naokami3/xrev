@@ -37,7 +37,6 @@ try:
         cfg = json.load(f)
 except Exception:
     cfg = {}
-blockers_set = set(cfg.get("severity_blockers", ["critical", "high"]))
 
 raw = os.environ.get("XREV_REVIEW_INPUT", "")
 
@@ -46,6 +45,21 @@ def fail(reason):
                       "verdict": None, "counts": {}, "blockers": 0, "total": 0},
                      ensure_ascii=False))
     sys.exit(1)
+
+ALLOWED_SEVERITIES = {"critical", "high", "medium", "low", "nit"}
+
+# severity_blockers の型検証（fail closed）。
+# config が読めない場合（cfg={}）は従来どおり既定値で続行するが、
+# キーが存在するのに型・要素が壊れている場合は誤収束防止のため拒否する。
+if "severity_blockers" in cfg:
+    sb = cfg["severity_blockers"]
+    if not isinstance(sb, list) or not all(
+        isinstance(s, str) and s in ALLOWED_SEVERITIES for s in sb
+    ):
+        fail("severity_blockers が不正です（許可 severity の配列のみ）")
+    blockers_set = set(sb)
+else:
+    blockers_set = set(["critical", "high"])
 
 try:
     data = json.loads(raw)
@@ -66,6 +80,7 @@ if not isinstance(findings, list):
 levels = ["critical", "high", "medium", "low", "nit"]
 categories = ["bug", "security", "design", "perf", "style"]
 counts = {lv: 0 for lv in levels}
+blockers = 0
 for i, f in enumerate(findings):
     if not isinstance(f, dict):
         fail("findings[%d] が object でない" % i)
@@ -88,8 +103,11 @@ for i, f in enumerate(findings):
     if "suggested_fix" in f and not isinstance(f.get("suggested_fix"), str):
         fail("findings[%d].suggested_fix が文字列でない" % i)
     counts[sev] += 1
+    # blocker 集計: severity_blockers に該当する、または decode_error（wire 復号失敗の契約）。
+    # 同一 finding が両方に該当しても二重カウントしない。
+    if sev in blockers_set or f.get("message") == "decode_error":
+        blockers += 1
 
-blockers = sum(counts[s] for s in counts if s in blockers_set)
 total = sum(counts.values())
 
 print(json.dumps({
