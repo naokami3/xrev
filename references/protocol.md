@@ -47,6 +47,66 @@
 - **round_id** は高エントロピー（`secrets` 由来）。スクロールバックの過去応答との衝突を避ける。
 - **切り詰め検出**: Codex の TUI は長いペーストを `[Pasted Content N chars]` に畳むため、その
   文字数 N が送信長と一致するかで欠落を検出する（不一致=中止、確認不能=警告して続行）。
+  スクロールバックには過去ラウンドの表示も残るため、**最後の一致**を今回の分とみなす。
+
+### wire encoding `XREV-ASCII-V1`（ASCII-only・暫定措置）
+
+**これは cmux 側の不具合に対する暫定回避策**である。上流が修正され普及したら削除可否を判断できるよう、
+encoding にバージョンを付けている。
+
+- **なぜ必要か**: cmux 0.64.20 の受信側 `ControlClientLineReader` は最大 4095 バイトずつ `read(2)` し、
+  **各チャンクを独立に UTF-8 変換して、失敗したチャンクを丸ごと捨てる**。Unix domain socket の
+  `read(2)` は write 境界を保存しないため、多バイト文字が読み取り境界で分断されると最大 4095 バイトが
+  消え、残った断片が V1 コマンドとして解釈されて `ERROR: Unknown command '<断片>'` になる。
+  ASCII は各バイトが単独で正しい UTF-8 なのでこの欠陥の影響を受けない。
+  実測（各5回）: ASCII 100KB=0失敗 / 日本語 30KB=3失敗 / 日本語 36KB=5失敗 /
+  同一本文を ASCII 化した 62KB=0失敗。**長さではなく非ASCIIの有無で分離する。**
+
+- **wire 形式**（機械処理は `ENCODING` の値だけで版を判定する。後続の HINT は reviewer 向けの補助）:
+
+  ```
+  XREV_REVIEW round_id=<rid> ENCODING=XREV-ASCII-V1 LEN_INSTR=<a> LEN_OUT=<b> LEN_PAYLOAD=<c>
+    :: <ASCII hint> :: <instr><out><payload> :: END_ROUND_<rid>
+  ```
+
+  ヘッダーの正規表現:
+  `^XREV_REVIEW round_id=([A-Za-z0-9_-]{1,64}) ENCODING=([A-Za-z0-9_.-]{1,32}) LEN_INSTR=(\d+) LEN_OUT=(\d+) LEN_PAYLOAD=(\d+) :: `
+  未知の `ENCODING` 値は**拒否**する。長さは wire 上の文字数で数える。
+
+- **長さ付きフィールドにする理由**: `instr` には `'|| LNNNN:'` や `<XREV-NL>` が**説明文として**
+  含まれる。区切り探索では領域を分離できないため、長さで切り出す。
+
+- **escape 規則**: 印字可能 ASCII（0x20–0x7E）以外のコードポイントをすべて `\uXXXX` にする。
+  非BMP はサロゲート対（`\uXXXX\uXXXX`）。DEL や制御文字も生では出さない。
+  encode 直前に「バックスラッシュ・改行・CR・TAB が 0 個」、直後に「全文字が 0x20–0x7E」を検証する。
+  前者が成り立つので **wire 上の `\` は必ず xrev が生成した `\uXXXX` の一部**になり、復号が一意に定まる。
+
+- **復号手順（正典）**。実装は `_xrev_decode_line`。
+
+  1. ヘッダーを解釈し `ENCODING` を検証、長さでフィールドを切り出す（不足・末尾マーカー不一致は拒否）
+  2. 各フィールドの `\uXXXX` を復号する。`\u[0-9A-Fa-f]{4}` **のみ**を認識し、正しい high+low
+     サロゲート対だけを非BMP文字へ統合する。孤立サロゲート・桁不足・非16進・`\u` 以外の
+     バックスラッシュは**すべて拒否**（リテラル維持にしない）
+  3. **`payload` 領域だけ**に frame 解析を適用する。`instr`/`out` は Unicode 復号のみ。
+     `PAYLOAD_FRAMED` は行番号が 1..n で欠番・重複・順序変更なく並ぶことを検証する
+     （桁数は 10000 行以降 5 桁になるので `\d{4,}` で受ける）
+
+     **frame の字句仕様**: レコードは `|| L<NNNN>: <行本文>` で、`%04d` の canonical 表現のみ受理する
+     （`L00001` のような先頭ゼロ付きは拒否）。レコード同士は**単一の空白1文字**で連結されるため、
+     decoder は**最終行以外の末尾から空白をちょうど1つだけ**取り除く。本文が行境界で始まらない場合と、
+     非最終行の末尾に連結空白が無い場合は拒否する。`\uXXXX` 復号では**印字可能 ASCII（0x20–0x7E）の
+     escape も拒否する** — encoder は生成しないため、受理すると復号後に `|| L0002: ` や `<XREV-BS>` を
+     合成でき、payload の衝突退避を経由せず frame/token 解析へ流し込めてしまう。
+  4. 生成トークンを戻す（`<XREV-BS>`→`\` / `<XREV-TAB>`→tab）
+  5. `XREVQ` 列を**最長一致・左から右へ単一走査・出力を再走査しない**で復元する
+
+  手順5が単一走査でなければならない理由: 原文 `XREVQnl` は encode で `XREVQXREVQnl` になる。
+  `XREVQnl` を先に置換しても `XREVQXREVQ` を先に置換しても、反復置換では制御トークンへ誤変換される。
+
+- **失敗時の契約**: 送信側は encode/検証に失敗したら**送信せず**中止する。
+  reviewer 側は復号に失敗したらレビューを行わず、`verdict="request_changes"` と
+  `category="bug"` / `message="decode_error"` の finding を1件だけ返す。
+  inline へのフォールバックは**しない**（同じ ASCII wire を通るので回避にならない）。
 
 ### reviewer 出力の例
 
@@ -122,7 +182,7 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 `transport_error` の決定 JSON には `transport_exit_code`（transport の生終了コード）と `transport_reason`
 （安定文字列）を含める。外部 exit は 22 のままだが、primary はこの reason で利用者向け修正案を機械的に選べる:
 `cmux_unavailable`/`resolve_failed`/`send_failed`/`timeout`/`truncated`/`non_terminal`/`ws_mismatch`/
-`ambiguous`/`process_mismatch`/`autocreate_failed`/`reviewer_contention`/`cmux_not_found`/`not_in_pane`。
+`ambiguous`/`process_mismatch`/`autocreate_failed`/`reviewer_contention`/`encode_failed`/`cmux_not_found`/`not_in_pane`。
 
 **ループ安全弁（round_state・Phase1b）**: review-loop は決定 JSON に `round_state`（`{iter, transport_attempts}`）
 を含める。primary は**この round_state を次回呼び出しの `XREV_ROUND_STATE`(JSON) にそのまま渡す契約**。
@@ -154,6 +214,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | 18   | 参照モードなのに同一WS解決でない（reference モードを拒否し inline へ切替を促す） |
 | 19   | reviewer 自動生成は試みたが codex の起動を確認できなかった（autocreate_failed） |
 | 20   | reviewer 生成の競合で期限切れ（別 primary が生成中 or 残留ロック→人間。reviewer_contention） |
+| 23   | payload のエンコードに失敗（cmux へは未送信。encode_failed。round_id/content_type 不正・不変条件違反等） |
 | 30   | cmux CLI が見つからない |
 | 31   | cmux 接続不可（preflight 失敗・ペイン外実行） |
 

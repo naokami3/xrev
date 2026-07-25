@@ -655,15 +655,56 @@ PY
 #   - cmux send は \n,\t を実改行/実タブへ自動展開するため、本文の \ と tab をトークン化する。
 #   - 改行は plain なら <XREV-NL>、framed なら "|| LNNNN:" の行境界へ畳む（実改行を送らない）。
 #   - 末尾に END_ROUND_<id> を置き切り詰めを検出可能にする。
+# ── ASCII-only wire encoding (XREV-ASCII-V1) ────────────────────────────────────
+#
+# 【なぜ ASCII に閉じるか】cmux 0.64.20 の受信側 ControlClientLineReader は最大 4095 バイトずつ
+# read(2) し、各チャンクを独立に UTF-8 変換して、失敗したチャンクを丸ごと捨てる。Unix domain socket の
+# read は write 境界を保存しないため、多バイト文字が読み取り境界で分断されると最大 4095 バイトが消え、
+# 残った断片が V1 コマンドとして解釈されて "Unknown command '<断片>'" になる。ASCII は各バイトが
+# 単独で正しい UTF-8 なのでこの欠陥の影響を受けない（実測: ASCII 100KB は 5/5 成功、日本語 30KB は
+# 3/5 失敗、同じ本文を ASCII 化した 62KB は 5/5 成功）。
+# **これは cmux 側の不具合に対する暫定回避策**であり、上流修正が普及したら削除可否を判断する。
+# 判断できるよう encoding にバージョン(XREV-ASCII-V1)を付ける。詳細は references/protocol.md。
+#
+# 【wire 形式】機械処理は ENCODING の値だけで版を判定する（後続の HINT は reviewer 向けの補助）。
+#   XREV_REVIEW round_id=<rid> ENCODING=XREV-ASCII-V1 LEN_INSTR=<a> LEN_OUT=<b> LEN_PAYLOAD=<c>
+#     :: <ASCII hint> :: <instr_esc><out_esc><payload_esc> :: END_ROUND_<rid>
+# 長さ付きフィールドにするのは、区切り文字が本文へ紛れても領域を一意に切り出せるようにするため
+# （instr/out には '|| LNNNN:' や '<XREV-NL>' という**説明文**が含まれるので、区切り探索では分離できない）。
+XREV_ASCII_ENCODING="XREV-ASCII-V1"
+XREV_ASCII_HINT="ASCII-ONLY WIRE. Slice fields by LEN_INSTR/LEN_OUT/LEN_PAYLOAD (counts are characters of this line). Unescape backslash-uXXXX in every field exactly once; pair high+low surrogates for non-BMP; reject any other backslash. Then, ONLY for the payload field, parse the frame and decode tokens in a single left-to-right pass with longest match, and never rescan decoded output."
+
+
+# payload を1物理行にエンコードする（送信の正典）。
+#   $1=content_type / $2=round_id / $3=payload
+# 手順（reverse は _xrev_decode_line が正典）:
+#   1) "XREVQ" を二重化 → 2) 制御トークンを XREVQ 表記へ退避 → 3) \ と TAB をトークン化
+#   4) 改行を行境界へ畳む → 5) 各フィールドを ASCII 化（非ASCIIのみ \uXXXX）
+# 5 の直前に「バックスラッシュ・改行・CR・TAB が残っていない」ことを、直後に「全文字が 0x20-0x7E」を
+# 検証する。前者が成り立つので、wire 上の "\" は必ず xrev が生成した \uXXXX の一部になり復号が一意になる。
 _build_framed_line() {
-  XREV_BUILD_PAYLOAD="$3" python3 - "$1" "$2" "$SENTINEL_BEGIN" "$SENTINEL_END" <<'PY'
+  XREV_BUILD_PAYLOAD="$3" XREV_ENC="$XREV_ASCII_ENCODING" XREV_HINT="$XREV_ASCII_HINT" \
+    python3 - "$1" "$2" "$SENTINEL_BEGIN" "$SENTINEL_END" <<'PY'
 import os, sys
 ct, rid, sb, se = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 body = os.environ.get("XREV_BUILD_PAYLOAD", "")
+enc_name = os.environ["XREV_ENC"]
+hint = os.environ["XREV_HINT"]
 
-# 1) 制御トークン衝突の回避（可逆エスケープ）。本文に元から含まれる制御トークンを、
-#    導入子 XREVQ で始まるリテラル表記へ退避する。導入子自身を最初に二重化して衝突回避。
-#    （reviewer は復元規則に従い、XREVQ 列を区切りでなく本文の文字列として読む）
+def die(msg):
+    sys.stderr.write("[xrev/transport] エンコード失敗: %s\n" % msg)
+    sys.exit(1)
+
+# round_id はヘッダーの機械可読値なので許可文字と長さを検証する。
+_HDR_OK = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+# str.isalnum() は日本語なども真になるため使わない。decoder 側の [A-Za-z0-9_-] と定義を揃える。
+if not (1 <= len(rid) <= 64) or any(c not in _HDR_OK for c in rid):
+    die("round_id が不正です（ASCII 英数字と - _ のみ、1〜64文字）")
+if not (1 <= len(ct) <= 32) or any(c not in _HDR_OK for c in ct):
+    die("content_type が不正です（ASCII 英数字と - _ のみ、1〜32文字）")
+
+# 1) 制御トークン衝突の回避（可逆エスケープ）。導入子 XREVQ を最初に二重化して衝突を避ける。
+#    復号は「最長一致・左から右へ単一走査・出力を再走査しない」で行う（_xrev_decode_line 参照）。
 body = body.replace("XREVQ", "XREVQXREVQ")
 for tok, esc in (("<XREV-NL>", "XREVQnl"), ("<XREV-BS>", "XREVQbs"),
                  ("<XREV-TAB>", "XREVQtab"), ("END_ROUND_", "XREVQer"), ("|| L", "XREVQll")):
@@ -672,25 +713,175 @@ for tok, esc in (("<XREV-NL>", "XREVQnl"), ("<XREV-BS>", "XREVQbs"),
 body = body.replace("\\", "<XREV-BS>").replace("\t", "<XREV-TAB>")
 lines = body.split("\n")
 if ct == "plain":
-    enc = "PAYLOAD_PLAIN || " + " <XREV-NL> ".join(lines)
+    payload = "PAYLOAD_PLAIN || " + " <XREV-NL> ".join(lines)
 else:
     recs = " ".join("|| L%04d: %s" % (i + 1, ln) for i, ln in enumerate(lines))
-    enc = "PAYLOAD_FRAMED content_type=%s lines=%d %s" % (ct, len(lines), recs)
+    payload = "PAYLOAD_FRAMED content_type=%s lines=%d %s" % (ct, len(lines), recs)
+
 instr = ("これはエンコードされたレビュー依頼です。復元規則: <XREV-NL>=改行 / "
          "'|| LNNNN:'=行境界(framed時) / <XREV-BS>=バックスラッシュ / <XREV-TAB>=タブ。"
          "XREVQ で始まる列は本文のリテラル文字列(区切りではない): "
          "XREVQnl='<XREV-NL>' / XREVQbs='<XREV-BS>' / XREVQtab='<XREV-TAB>' / "
          "XREVQer='END_ROUND_' / XREVQll='|| L' / XREVQXREVQ='XREVQ'。"
-         "これらを元の複数行に復元して内容を理解し、批判的にレビューしてください。")
+         "これらの復元は payload フィールドだけに適用し、左から右へ一度だけ走査してください"
+         "(復元後の文字列を再走査しない)。この説明文自体には適用しません。"
+         "復元して内容を理解し、批判的にレビューしてください。")
 out = ("出力は必ず %s と %s の2行マーカーで挟み、間には1行コンパクトJSONのみを置くこと"
        "(マーカー外・JSON前後に説明文を書かない)。JSONはトップレベルに round_id(=\"%s\") と "
        "verdict(approve|request_changes) と findings[] を持ち、各 finding は "
        "file/severity(critical|high|medium|low|nit)/category(bug|security|design|perf|style)/message を必須とする。"
+       "wire の復号に失敗した場合はレビューを行わず、verdict=\"request_changes\" と "
+       "findings に category=\"bug\" message=\"decode_error\" を1件だけ入れて返すこと。"
        % (sb, se, rid))
-line = "XREV_REVIEW round_id=%s :: %s :: %s :: %s :: END_ROUND_%s" % (rid, instr, out, enc, rid)
-# 保険: エンコード後に実改行/タブが残らないよう最終中和
-line = line.replace("\n", " <XREV-NL> ").replace("\t", "<XREV-TAB>")
+
+# 3) ASCII 化の前提検証。ここが成り立つので wire 上の "\" は必ず xrev 由来になる。
+for name, field in (("instr", instr), ("out", out), ("payload", payload)):
+    for bad, label in (("\\", "バックスラッシュ"), ("\n", "改行"), ("\r", "CR"), ("\t", "TAB")):
+        if bad in field:
+            die("%s フィールドに%sが残っています" % (name, label))
+
+def esc(s):
+    # 印字可能 ASCII(0x20-0x7E)はそのまま、それ以外はすべて \uXXXX へ。
+    # DEL(0x7F)やその他の制御文字も wire へ生で出さない（不変条件を常に満たせるようにする）。
+    o = []
+    for ch in s:
+        c = ord(ch)
+        if 0x20 <= c <= 0x7E:
+            o.append(ch)
+        elif c <= 0xFFFF:
+            if 0xD800 <= c <= 0xDFFF:
+                die("サロゲートコードポイント単体は送信できません")
+            o.append("\\u%04X" % c)
+        else:
+            v = c - 0x10000
+            o.append("\\u%04X\\u%04X" % (0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF)))
+    return "".join(o)
+
+fi, fo, fp = esc(instr), esc(out), esc(payload)
+line = ("XREV_REVIEW round_id=%s ENCODING=%s LEN_INSTR=%d LEN_OUT=%d LEN_PAYLOAD=%d :: %s :: %s%s%s :: END_ROUND_%s"
+        % (rid, enc_name, len(fi), len(fo), len(fp), hint, fi, fo, fp, rid))
+
+# 4) wire 不変条件: 全文字が印字可能 ASCII（0x20-0x7E）で、1物理行であること。
+for ch in line:
+    if not (0x20 <= ord(ch) <= 0x7E):
+        die("wire に印字可能 ASCII 以外が残っています (U+%04X)" % ord(ch))
 sys.stdout.write(line)
+PY
+}
+
+# 純粋関数: wire 1行を元の payload へ復号する（プロトコルの正典実装。テストの往復検証に使う）。
+#   入力: env XREV_DECODE_LINE / 出力: 復号した payload。不正な wire は exit 1（fail closed）。
+_xrev_decode_line() {
+  XREV_DECODE_LINE="${XREV_DECODE_LINE:-}" XREV_ENC="$XREV_ASCII_ENCODING" python3 - <<'PY'
+import os, re, sys
+line = os.environ.get("XREV_DECODE_LINE", "")
+enc_name = os.environ["XREV_ENC"]
+
+def die(msg):
+    sys.stderr.write("[xrev/transport] 復号失敗: %s\n" % msg)
+    sys.exit(1)
+
+m = re.match(r"^XREV_REVIEW round_id=([A-Za-z0-9_-]{1,64}) ENCODING=([A-Za-z0-9_.-]{1,32}) "
+             r"LEN_INSTR=(\d+) LEN_OUT=(\d+) LEN_PAYLOAD=(\d+) :: ", line)
+if not m:
+    die("ヘッダーを解釈できません")
+rid, enc, a, b, c = m.group(1), m.group(2), int(m.group(3)), int(m.group(4)), int(m.group(5))
+if enc != enc_name:
+    die("未知の encoding: %s（対応は %s のみ）" % (enc, enc_name))
+
+rest = line[m.end():]
+sep = rest.find(" :: ")            # HINT は固定 ASCII で ' :: ' を含まない
+if sep < 0:
+    die("HINT の終端が見つかりません")
+fields = rest[sep + 4:]
+if len(fields) < a + b + c:
+    die("フィールド長がヘッダーの宣言に足りません（切り詰めの恐れ）")
+f_instr, f_out, f_payload = fields[:a], fields[a:a + b], fields[a + b:a + b + c]
+tail = fields[a + b + c:]
+if tail != " :: END_ROUND_%s" % rid:
+    die("末尾マーカーが一致しません")
+
+def unesc(s):
+    o = []; i = 0; n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch != "\\":
+            o.append(ch); i += 1; continue
+        if s[i:i + 2] != "\\u" or not re.fullmatch(r"[0-9A-Fa-f]{4}", s[i + 2:i + 6]):
+            die("バックスラッシュが \\uXXXX を開始していません")
+        v = int(s[i + 2:i + 6], 16); i += 6
+        if 0xD800 <= v <= 0xDBFF:                       # high surrogate → low が続くこと
+            if s[i:i + 2] != "\\u" or not re.fullmatch(r"[0-9A-Fa-f]{4}", s[i + 2:i + 6]):
+                die("high surrogate に low surrogate が続いていません")
+            w = int(s[i + 2:i + 6], 16); i += 6
+            if not (0xDC00 <= w <= 0xDFFF):
+                die("low surrogate が範囲外です")
+            o.append(chr(0x10000 + ((v - 0xD800) << 10) + (w - 0xDC00)))
+        elif 0xDC00 <= v <= 0xDFFF:
+            die("孤立した low surrogate です")
+        elif 0x20 <= v <= 0x7E:
+            # encoder は印字可能 ASCII を escape しない。これを受理すると、復号後に
+            # '|| L0002: ' や '<XREV-BS>' といった構造トークンを合成でき、payload の
+            # 衝突退避を経由せずに frame/token 解析へ流し込めてしまう。canonical な
+            # wire には現れない表現なので拒否する。
+            die("印字可能 ASCII の escape は canonical wire に現れません (U+%04X)" % v)
+        else:
+            o.append(chr(v))
+    return "".join(o)
+
+# instr / out は Unicode 復号のみ（説明文中の '|| LNNNN:' 等を構造として解釈しない）
+unesc(f_instr); unesc(f_out)
+payload = unesc(f_payload)
+
+# frame 解析は payload 領域だけに適用する
+if payload.startswith("PAYLOAD_PLAIN || "):
+    lines = payload[len("PAYLOAD_PLAIN || "):].split(" <XREV-NL> ")
+elif payload.startswith("PAYLOAD_FRAMED "):
+    hm = re.match(r"^PAYLOAD_FRAMED content_type=[A-Za-z0-9_-]{1,32} lines=(\d+) ", payload)
+    if not hm:
+        die("PAYLOAD_FRAMED のヘッダーを解釈できません")
+    n = int(hm.group(1))
+    body = payload[hm.end():]
+    # 行番号は 1..n が欠番・重複・順序変更なく並ぶことを検証する（読み捨てない）。
+    # 桁数は encoder の %04d が 10000 行以降で 5 桁になるため \d{4,} で受ける。
+    marks = list(re.finditer(r"\|\| L(\d{4,}): ", body))
+    if len(marks) != n:
+        die("行境界の数が宣言(%d)と一致しません（実際=%d）" % (n, len(marks)))
+    if marks and marks[0].start() != 0:
+        die("PAYLOAD_FRAMED の本文が行境界で始まっていません")
+    lines = []
+    for idx, mk in enumerate(marks):
+        # encoder の %04d が出す表現は一意なので、数値ではなく文字列で照合する
+        # （L00001 のような余分な先頭ゼロを持つ非 canonical 表現を受理しない）。
+        if mk.group(1) != "%04d" % (idx + 1):
+            die("行番号が canonical ではありません（位置%d で L%s）" % (idx + 1, mk.group(1)))
+        end = marks[idx + 1].start() if idx + 1 < len(marks) else len(body)
+        seg = body[mk.end():end]
+        # レコードは " " で連結されているので、最終行以外は連結由来の空白を1つだけ取り除く。
+        if idx + 1 < len(marks):
+            if not seg.endswith(" "):
+                die("行境界の連結空白が見つかりません（位置%d）" % (idx + 1))
+            seg = seg[:-1]
+        lines.append(seg)
+else:
+    die("PAYLOAD マーカーがありません")
+
+def detok(s):
+    # 生成トークンの復元（本文由来の同名文字列は XREVQ 表記へ退避済みなので衝突しない）
+    s = s.replace("<XREV-BS>", "\\").replace("<XREV-TAB>", "\t")
+    # XREVQ 列の復元: 最長一致・左から右へ単一走査・出力は再走査しない
+    rules = (("XREVQXREVQ", "XREVQ"), ("XREVQtab", "<XREV-TAB>"), ("XREVQnl", "<XREV-NL>"),
+             ("XREVQbs", "<XREV-BS>"), ("XREVQer", "END_ROUND_"), ("XREVQll", "|| L"))
+    o = []; i = 0; n = len(s)
+    while i < n:
+        for pat, rep in rules:
+            if s.startswith(pat, i):
+                o.append(rep); i += len(pat); break
+        else:
+            o.append(s[i]); i += 1
+    return "".join(o)
+
+sys.stdout.write("\n".join(detok(ln) for ln in lines))
 PY
 }
 
@@ -863,9 +1054,11 @@ _check_paste_intact() {
 import os, sys, re
 elen = int(os.environ["XREV_ELEN"]); mark = os.environ["XREV_MARK"]
 dw = "".join(l.strip() for l in sys.stdin.read().splitlines())
-m = re.search(r"Pasted Content\s+(\d+)\s+chars", dw)
-if m:
-    print("ok" if int(m.group(1)) == elen else "truncated"); sys.exit(0)
+# スクロールバックには過去ラウンドの "Pasted Content N chars" も残る。最初の一致を採ると
+# 前のラウンドの数値と今回の送信長を比べて誤判定するため、**最後の一致**を今回の分とみなす。
+ms = re.findall(r"Pasted Content\s+(\d+)\s+chars", dw)
+if ms:
+    print("ok" if int(ms[-1]) == elen else "truncated"); sys.exit(0)
 print("ok" if mark in dw else "unknown")
 ' <<<"$screen"
 }
@@ -1115,7 +1308,14 @@ xrev_transport_review() {
   round_id="${XREV_ROUND_ID:-$(python3 -c 'import secrets;print("r"+secrets.token_hex(8))' 2>/dev/null)}"
   [[ -n "$round_id" ]] || round_id="r$$$RANDOM$RANDOM"
   ct="${XREV_CONTENT_TYPE:-$(_detect_content_type "$payload")}"
-  line="$(_build_framed_line "$ct" "$round_id" "$payload")"
+  # encode の失敗（round_id/content_type 不正、不変条件違反、サロゲート単体など）は必ず送信中止にする。
+  # 本スクリプトは set -e ではないため、rc を見ないと壊れた/空の wire をそのまま送ってしまう。
+  # 専用コード(23)にするのは、cmux へ一度も送っていない失敗を「送信失敗(11)」として報告すると
+  # 利用者向け診断や将来の再試行判断が不正確になるため。
+  if ! line="$(_build_framed_line "$ct" "$round_id" "$payload")" || [[ -z "$line" ]]; then
+    _log "payload のエンコードに失敗しました（cmux へは送信していません）。"
+    return 23
+  fi
   _log "round_id=${round_id} content_type=${ct} len=${#line}"
 
   # 送信前ベースライン：この round_id に一致する妥当ブロック数（通常0、防御的に数える）。
