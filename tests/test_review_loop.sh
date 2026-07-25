@@ -87,6 +87,14 @@ out="$(printf '%s' "" | XREV_PARSED="" _format_decision transport_error 1 5 26 1
 assert_eq "trc=26 は decision=transport_error のまま" "transport_error" "$(printf '%s' "$out" | json_get decision)"
 assert_eq "trc=26 は transport_reason=payload_too_large" "payload_too_large" "$(printf '%s' "$out" | json_get transport_reason)"
 
+# trc=25（Enter 送信=プロンプト確定の失敗。最大2回再試行しても失敗）→ transport_error / submit_failed
+# timeout(12) とは別コードで区別されることを確認する。
+_stub_submit_failed() { return 25; }
+out="$(printf '%s' "ダミー差分" | XREV_REVIEW_FN=_stub_submit_failed _xrev_review_loop_run 1)"; rc=$?
+assert_rc "trc=25 で rc=22(transport_error)" 22 "$rc"
+assert_eq "trc=25 は decision=transport_error" "transport_error" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "trc=25 は transport_reason=submit_failed" "submit_failed" "$(printf '%s' "$out" | json_get transport_reason)"
+
 # ── ループ安全弁: round_state（通算 transport 試行の上限・巻戻し検知）──
 _stub_approve2() { printf '%s' '{"verdict":"approve","findings":[]}'; }
 

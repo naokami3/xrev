@@ -221,7 +221,7 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 （安定文字列）を含める。外部 exit は 22 のままだが、primary はこの reason で利用者向け修正案を機械的に選べる:
 `cmux_unavailable`/`resolve_failed`/`send_failed`/`timeout`/`truncated`/`non_terminal`/`ws_mismatch`/
 `ambiguous`/`process_mismatch`/`autocreate_failed`/`reviewer_contention`/`encode_failed`/`payload_too_large`/
-`cmux_not_found`/`not_in_pane`。
+`submit_failed`/`cmux_not_found`/`not_in_pane`。
 
 `transport_exit_code=24`（`invalid_response`。センチネルで完成した応答はあるが妥当な review JSON
 を含まない契約違反。`timeout` と区別され primary は再出力を促す）は `transport_error` ではなく
@@ -261,6 +261,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | 20   | reviewer 生成の競合で期限切れ（別 primary が生成中 or 残留ロック→人間。reviewer_contention） |
 | 23   | payload のエンコードに失敗（cmux へは未送信。encode_failed。round_id/content_type 不正・不変条件違反等） |
 | 24   | センチネルで完成した応答はあるが妥当な review JSON を含まない（契約違反。invalid_response）。`timeout`(12) と区別され、primary は再出力を促す。 |
+| 25   | Enter 送信(プロンプト確定)に失敗（最大2回まで再試行しても失敗）。本文は入力欄に残存。`timeout`(12) と区別される（submit_failed）。 |
 | 26   | wire（1物理行）の文字数が上限(`wire_max_chars`)を超過（cmux へは未送信。payload_too_large） |
 | 30   | cmux CLI が見つからない |
 | 31   | cmux 接続不可（preflight 失敗・ペイン外実行） |

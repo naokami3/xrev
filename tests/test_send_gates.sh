@@ -130,6 +130,35 @@ _scan_review_blocks() {
 }
 _cmux_read_screen() { printf ''; }
 
+# 8) 変更1: Enter 送信(send-key)が常に失敗する → 最大2回まで再試行し、全滅したら rc25 で
+#    応答待ちループに入らない（RESP_TIMEOUT を巨大値にしてもすぐ返ることで確認する。手法は
+#    上の rBROKEN テストと同じ：もし誤って応答待ちへ落ちればテストがハングして検知できる）。
+#    再試行の直前は必ずプロセス証明を再実行する契約なので、台本は5回分(iii/iii-b/iii-c/
+#    retry1前/retry2前)すべて許可(0)にし、send-key(=_cmux_submit)の失敗だけで rc25 に
+#    倒れることを検証する。
+_SG_SUBMIT_COUNT=0
+_cmux_submit() { _SG_SUBMIT_COUNT=$(( _SG_SUBMIT_COUNT + 1 )); _SG_CALLS="$_SG_CALLS submit"; return 1; }
+_SG_SAVED_RESP_TIMEOUT="$RESP_TIMEOUT"
+RESP_TIMEOUT=100000
+_sg_run 0 0 0 0 0
+assert_rc "Enter送信が全滅 → rc25（submit_failed、timeoutとは別コード）" 25 "$_SG_RC"
+assert_eq "Enter送信が全滅 → send-key は計3回(初回+再試行2回)呼ばれる" "3" "$_SG_SUBMIT_COUNT"
+RESP_TIMEOUT="$_SG_SAVED_RESP_TIMEOUT"
+
+# 9) 変更1: Enter 送信が失敗し、かつ再試行前のプロセス証明で前景が変化（codex が死んで
+#    shell に落ちた等）→ 安全条件（前景が codex のままのときだけ再送してよい）により
+#    Enter を再送せず、既存の (iii-c) 最終ゲート失敗と同じ汚染ペイン扱い(rc17)にする。
+#    台本: (iii)=許可 (iii-b)=許可 (iii-c初回)=許可 → ここで初回 send-key 失敗 →
+#    再試行直前の検証(4回目)=拒否 → Enter は1回しか呼ばれない。
+_SG_SUBMIT_COUNT=0
+_cmux_submit() { _SG_SUBMIT_COUNT=$(( _SG_SUBMIT_COUNT + 1 )); _SG_CALLS="$_SG_CALLS submit"; return 1; }
+_sg_run 0 0 0 1
+assert_rc "Enter送信失敗+再試行前に前景変化 → rc17（汚染ペイン扱い）" 17 "$_SG_RC"
+assert_eq "Enter送信失敗+前景変化 → 再送せず送信は初回の1回だけ" "1" "$_SG_SUBMIT_COUNT"
+
+_cmux_submit() { _SG_CALLS="$_SG_CALLS submit"; return 0; }
+unset _SG_SUBMIT_COUNT _SG_SAVED_RESP_TIMEOUT
+
 # ── 後片付け: 実体を読み直してスタブを捨てる（後続の test_*.sh へ漏らさない）────────
 # shellcheck source=/dev/null
 source "$SCRIPTS/transport.sh"

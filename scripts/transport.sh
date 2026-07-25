@@ -612,6 +612,22 @@ _cmux_submit() {
   _cmux send-key "${_XREV_ADDR[@]}" enter >/dev/null 2>&1 || return 7
 }
 
+# 「Enter を送らない/これ以上再送しない」と決めたときの共通ログ（汚染ペイン警告一式）。
+#   $1=surface, $2=状況説明（呼び出し元ごとに変わるのはこの1行だけ）
+# 呼び出し元: (iii-c) 最終ゲート失敗時、および Enter 再送前の再検証失敗時（変更1）。
+_xrev_log_tainted_pane() {
+  local surface="$1" reason="$2"
+  _log "$reason"
+  # 【重要】Enter を送らないだけでは安全な終端にならない。送信済みの本文は入力行に残り、
+  # 前景が shell に戻っている以上、その後の偶発的な Enter や再送でコマンド実行され得る。
+  # かつ Codex の composer は ctrl+u/ctrl+a/ctrl+k/ctrl+w で消去できないことを実機確認済みで
+  # （反応するのは backspace の1文字ずつのみ）、xrev には残留を自動破棄する確実な手段が無い。
+  # したがってこのペインは**汚染された**ものとして扱い、再利用を禁止する。
+  _log "【重要】送信済みの本文が reviewer ペイン($surface)の入力行に残っています。xrev はこれを自動破棄できません。"
+  _log "このペインは汚染されたものとして扱ってください: Enter を押さずにペインを閉じ、reviewer を開き直してから再実行してください。"
+  _log "（残留したまま再送すると本文が混入します。同じペインを使い回さないでください。）"
+}
+
 # reviewer ペインの画面を読み取る（スクロールバック込み）。
 _cmux_read_screen() {
   local surface="$1"
@@ -1496,7 +1512,17 @@ xrev_transport_review() {
     _log "ペースト文字数が送信長(${#line})と一致しません。切り詰めの恐れがあるため中止します。"
     return 13
   fi
-  [[ "$intact" == "ok" ]] || _log "ペースト到達を確認できませんでした（確認不能）。続行します。"
+  # 【縮退の可視化・変更2】ここに到達するのは "ok" か "unknown" のみ（"truncated" は上で return 済み）。
+  # unknown は fail closed にすると正常運用まで壊すため続行はするが、この経路が恒常化するのは
+  # 切り詰め検出そのものが実質無効化されている（＝防護の縮退）ことを意味するため、利用者が
+  # 見逃さないよう理由候補と保守手順まで含めた警告にする（挙動自体は従来どおり「続行」のまま）。
+  if [[ "$intact" != "ok" ]]; then
+    _log "警告: ペースト到達を確認できませんでした（確認不能=unknown）。続行しますが切り詰め検出は機能していません。"
+    _log "確認不能の理由候補: (a) Codex TUI の「Pasted Content N chars」表示文言がバージョンアップで変わった"
+    _log "                     (b) 本文が短くインライン表示された（END マーカー不可視）"
+    _log "この警告が毎回出る場合は Codex TUI の文言変更が疑われます。切り詰め検出が実質無効化されているため、"
+    _log "docs/cmux-behavior.md の該当節を確認のうえ _check_paste_intact の正規表現を実機の表示に合わせて更新してください。"
+  fi
 
   # (iii-c) 最終ゲート: Enter の直前に再検証する。ここが安全目標の要。
   # 本文送信から描画待ち・切り詰め検出まで最大10秒前後あり、その間に codex が終了すると本文は
@@ -1504,18 +1530,39 @@ xrev_transport_review() {
   # 見つけて "ok" を返すため、切り詰め検出は誤送信の防波堤にならない。Enter を送るか否かを
   # 決める直前の観測だけが、payload がコマンド実行される事故を防げる。
   if ! _verify_reviewer_process "$surface"; then
-    _log "Enter 送信の直前に reviewer の前景プロセスが変化しました。コマンド実行を避けるため Enter を送りません。"
-    # 【重要】Enter を送らないだけでは安全な終端にならない。送信済みの本文は入力行に残り、
-    # 前景が shell に戻っている以上、その後の偶発的な Enter や再送でコマンド実行され得る。
-    # かつ Codex の composer は ctrl+u/ctrl+a/ctrl+k/ctrl+w で消去できないことを実機確認済みで
-    # （反応するのは backspace の1文字ずつのみ）、xrev には残留を自動破棄する確実な手段が無い。
-    # したがってこのペインは**汚染された**ものとして扱い、再利用を禁止する。
-    _log "【重要】送信済みの本文が reviewer ペイン($surface)の入力行に残っています。xrev はこれを自動破棄できません。"
-    _log "このペインは汚染されたものとして扱ってください: Enter を押さずにペインを閉じ、reviewer を開き直してから再実行してください。"
-    _log "（残留したまま再送すると本文が混入します。同じペインを使い回さないでください。）"
+    _xrev_log_tainted_pane "$surface" "Enter 送信の直前に reviewer の前景プロセスが変化しました。コマンド実行を避けるため Enter を送りません。"
     return 17
   fi
-  _cmux_submit "$surface" || true
+
+  # (変更1) Enter 送信（プロンプト確定）の失敗を検知・限定リトライする。
+  # 【なぜ無視してはいけないか】従来は `_cmux_submit || true` で失敗を握りつぶしていた。送信できて
+  # いなければ Codex には何も届いておらず応答が来ないのは当然なのに、RESP_TIMEOUT(既定180秒)を
+  # 丸ごと待って timeout(12) と誤診断してしまい、「送れなかった」と「Codex が返さない」を区別できない。
+  # 【再試行の安全条件】Enter の再送は「前景が codex のまま」のときだけ安全である。codex が死んで
+  # shell に落ちていれば Enter はコマンド実行になってしまう。そのため各再試行の直前に必ず
+  # _verify_reviewer_process を再実行し、前景が変化していたら再試行せず (iii-c) と同じ汚染ペイン
+  # 扱い（return 17）にする。この安全条件は絶対に外さないこと。
+  local submit_tries=0 submit_max_retries=2 submit_ok=0
+  while :; do
+    if _cmux_submit "$surface"; then
+      submit_ok=1
+      break
+    fi
+    (( submit_tries >= submit_max_retries )) && break
+    submit_tries=$(( submit_tries + 1 ))
+    _xrev_sleep 1
+    if ! _verify_reviewer_process "$surface"; then
+      _xrev_log_tainted_pane "$surface" "Enter 再送の直前に reviewer の前景プロセスが変化しました。コマンド実行を避けるため再送しません。"
+      return 17
+    fi
+  done
+  if (( submit_ok == 0 )); then
+    _log "Enter 送信(プロンプト確定)に失敗しました。本文は入力欄に残っています。"
+    _log "reviewer ペインで手動で Enter を押すか、ペインを開き直してから再実行してください。"
+    _log "注: 前景は codex のまま（直前に検証済み）なので shell への流入ではありませんが、"
+    _log "残留本文があるため再送時に混入するおそれがあります。同じペインを使い回さないでください。"
+    return 25
+  fi
 
   # 応答待ち：round_id 一致の新着妥当ブロックが出るまで待つ。
   local waited=0 screen scan count block broken
