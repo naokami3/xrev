@@ -8,15 +8,34 @@
 #
 #   stdin: フックイベント JSON（.tool_input.file_path を読む）。
 #
+#   前提: python3 が無い場合、またはイベント JSON の parse 自体が失敗する場合は
+#   「検証できない」ことを exit 2 で明示する（fail-open で黙って検証をスキップしない）。
+#   一方、JSON の parse には成功したが file_path が無い/空（対象外ツールの呼び出し）は
+#   従来どおり exit 0（素通し）。
+#
 set -uo pipefail
 
+if ! command -v python3 >/dev/null 2>&1; then
+  printf '[xrev] python3 が見つからないため編集ファイルの検証ができません。\n' >&2
+  exit 2
+fi
+
 event="$(cat)"
+# parse 失敗（入力契約破壊）と file_path 欠如（対象外ツール）を区別するため、
+# parse 失敗時だけ専用マーカーを出力する。
 fp="$(printf '%s' "$event" | python3 -c 'import json,sys
 try:
     d=json.load(sys.stdin)
-    print(d.get("tool_input",{}).get("file_path",""))
 except Exception:
-    print("")' 2>/dev/null)"
+    print("__XREV_PARSE_ERROR__")
+    sys.exit(0)
+print(d.get("tool_input",{}).get("file_path","") or "")')"
+rc=$?
+
+if [ "$rc" -ne 0 ] || [ "$fp" = "__XREV_PARSE_ERROR__" ]; then
+  printf '[xrev] イベントJSONの解析に失敗しました。Claude Code の入力仕様が変わっている可能性があります。\n' >&2
+  exit 2
+fi
 
 [ -n "$fp" ] || exit 0
 [ -f "$fp" ] || exit 0
