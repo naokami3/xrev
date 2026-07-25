@@ -69,6 +69,28 @@ if ! _cmux_set_title "$REVIEWER_PANE_TITLE"; then
 fi
 echo "[start-reviewer] タブを '$REVIEWER_PANE_TITLE' に設定しました。codex を起動します…" >&2
 
+# 【遅延リネーム（実機知見）】codex は起動時に cwd 由来の名前（例 "xrev"）でタブ名を自ら
+# 上書きすることが実機で確認されている（transport.sh の _xrev_create_reviewer 内コメント参照）。
+# 上の「exec 前」のタイトル設定は即時フィードバックとして有用だが、codex 起動後に上書きされて
+# しまう可能性が高く、規約タイトル 'Review Codex' が定着しないと宛先解決（title 一致）が
+# exit 10 で失敗しうる。本プロセスは直後に exec で codex に置き換わるため、「起動確認後に
+# 同一プロセスから追いリネームする」ことはできない。そこで exec 前にバックグラウンドの子プロセス
+# を起動し、codex 起動後と思われるタイミングで transport.sh set-title により定着させ直す
+# （best-effort）。子プロセスには CMUX_SURFACE_ID 等の env がそのまま継承されるため、
+# set-title は自分自身のペインに効く。
+# 4秒間隔×3回（最後は約12秒後）にしているのは、codex がタブ名を上書きする正確な時点が
+# 起動環境やマシン負荷で揺れて読めないため。複数回リトライし、最後の1回で確実に上書きし
+# 返すことを狙う控えめな固定値（回数・間隔とも根拠はここまでの理由のみで、実測による
+# 最適化ではない）。失敗は無視する（best-effort。失敗してもタイトルが codex 上書き後の
+# ままで残るだけで、ensure-reviewer 経路とは独立に手動で set-title をやり直せる）。
+(
+  for _xrev_delay_i in 1 2 3; do
+    sleep 4
+    "$DIR/transport.sh" set-title "$REVIEWER_PANE_TITLE" >/dev/null 2>&1
+  done
+) &
+disown $! 2>/dev/null || true
+
 # exec で置き換えるのはシェルを残さず codex に tty の前景を握らせるため（プロセス証明ゲートの前提）。
 # 【注意】exec してもサーフェス直下プロセスが codex 単独にはならない。cmux はペインのログインシェルと
 # 周期 sleep も直下として報告し続けるため、直下は複数件のまま。ゲートが見るのは件数ではなく
