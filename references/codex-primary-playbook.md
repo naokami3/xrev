@@ -61,11 +61,20 @@ cmux ペイン外で起動されており、この状態では何を準備して
 `CMUX_*` はあるのに ping が失敗する場合は、その事実（env の有無・ping の exit code）を
 そのままユーザーへ報告して判断を仰ぐ。
 
-確認が取れたら、**自分（codex）が primary であることを自己申告**してから往復に入る:
+確認が取れたら往復に入る。**codex の実行モデルに合わせた 2 つの必須事項**（実運用の初回試行で確定）:
+
+1. **環境変数は毎コマンド前置**: codex のシェルはコマンドごとに新規で `export` は持ち越されない。
+   `XREV_PRIMARY=codex`（自己申告）等は、`transport.sh` / `review-loop.sh` を呼ぶ**各コマンドの先頭に
+   毎回前置**する。
+2. **transport 系はサンドボックス外実行（エスカレーション）**: cmux ソケットへの接続は codex の
+   サンドボックス内では遮断される（実測: ペイン内・CMUX_* 注入済みでも ping が exit 31。
+   サンドボックス外実行では成功）。`transport.sh`（ping/resolve/ensure-reviewer/diff-hash）と
+   `review-loop.sh` の呼び出しはエスカレーション承認で実行する。毎回の承認が煩わしければ
+   セッション単位の承認を使う。read-only の `keyword-match.sh` や playbook の読み取りは
+   サンドボックス内のままでよい。
 
 ```bash
-export XREV_PRIMARY=codex
-export XREV_CONFIG="$XREV_ROOT/config/xrev.default.json"
+XREV_PRIMARY=codex "$XREV_ROOT/scripts/transport.sh" ping   # ← この形で毎回前置・要エスカレーション
 ```
 
 **`XREV_CONFIG` に主従反転プリセット（`xrev.codex-primary.json`）を明示する必要は無くなった**:
@@ -74,7 +83,7 @@ export XREV_CONFIG="$XREV_ROOT/config/xrev.default.json"
 Claude` / `reviewer_process=claude` / `reviewer_reads_workspace=true` も連動して導出）を機械的に
 解決する。`xrev.codex-primary.json` は**この主従反転を明示的に固定したい場合にのみ**使うプリセットと
 して残っている（例: auto 解決に頼らず値を config ファイルへ書き切っておきたい運用）。使う場合は
-`export XREV_CONFIG="$XREV_ROOT/config/xrev.codex-primary.json"` を上記の代わりに設定する（挙動は
+`XREV_CONFIG="$XREV_ROOT/config/xrev.codex-primary.json"` を各コマンドに前置する（挙動は
 等価）。詳細・派生規則の正典は [protocol.md](protocol.md) の「設定キー一覧」を参照。
 
 reviewer の有無確認・自動生成の契約詳細（`reviewer_autocreate` の ask/auto/off・競合ロック・
@@ -89,10 +98,9 @@ reviewer の有無確認・自動生成の契約詳細（`reviewer_autocreate` �
 （`$XREV_ROOT/scripts/review-loop.sh` を介す。cmux は直接叩かない）:
 
 ```bash
-export XREV_PRIMARY=codex
-export XREV_CONFIG="$XREV_ROOT/config/xrev.default.json"
+# 毎コマンド前置 + サンドボックス外実行（2 章の必須事項）
 ITER=1
-printf '%s' "$payload" | XREV_ROUND_STATE="$prev_round_state" \
+printf '%s' "$payload" | XREV_PRIMARY=codex XREV_ROUND_STATE="$prev_round_state" \
   "$XREV_ROOT/scripts/review-loop.sh" "$ITER"
 ```
 

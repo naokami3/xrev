@@ -117,21 +117,31 @@ xrev の主従反転（primary=codex / reviewer=claude）を、このマシン�
 使えるようにするグローバル一度きりの導入スニペット。$CODEX_HOME/AGENTS.md（CODEX_HOME 未設定なら
 既定 ~/.codex/AGENTS.md）に追加する（プロジェクトごとの AGENTS.md への貼り付けは不要）。
 
-### XREV_ROOT の設定
+### XREV_ROOT（このマシンの xrev の場所）
 
-```bash
-export XREV_ROOT="__XREV_ROOT_ABS__"
-```
+XREV_ROOT = __XREV_ROOT_ABS__
+
+**実行モデルの注意（codex）**: シェルはコマンドごとに新規なので `export` は次のコマンドへ
+持ち越されない。以下のコマンドはすべて **1 回の呼び出しの中で環境変数を前置**して実行すること
+（例: `XREV_ROOT=__XREV_ROOT_ABS__ "$XREV_ROOT/..."` の形ではなく、値を直接埋めた
+`__XREV_ROOT_ABS__/scripts/...` で呼んでよい）。
+
+**サンドボックスの注意（必須）**: cmux ソケットへの接続はサンドボックス内では遮断される
+（実測: ペイン内でも ping が exit 31）。`transport.sh` / `review-loop.sh` の呼び出しは
+**サンドボックス外実行（エスカレーション承認）で行うこと**。毎回の承認が煩わしい場合は
+セッション単位の承認を使う。read-only 系（keyword-match.sh・前提検査の test）は
+サンドボックス内のままでよい。
 
 ### 前提検査（使う前に毎回確認する）
 
 ```bash
-test -d "$XREV_ROOT" || { echo "XREV_ROOT ($XREV_ROOT) が見つかりません"; exit 1; }
+test -d "__XREV_ROOT_ABS__" || { echo "XREV_ROOT (__XREV_ROOT_ABS__) が見つかりません"; exit 1; }
 for f in scripts/transport.sh scripts/review-loop.sh \\
          references/codex-primary-playbook.md config/xrev.default.json; do
-  test -e "$XREV_ROOT/$f" || { echo "期待するファイルがありません: $XREV_ROOT/$f"; exit 1; }
+  test -e "__XREV_ROOT_ABS__/$f" || { echo "期待するファイルがありません: $f"; exit 1; }
 done
-"$XREV_ROOT/scripts/transport.sh" doctor
+# doctor はソケット接続検査を含むため、サンドボックス外実行が必要
+"__XREV_ROOT_ABS__/scripts/transport.sh" doctor
 ```
 
 ### 発火判定
@@ -140,16 +150,18 @@ done
 ハードコードしない。既定は @xrev）。
 
 ```bash
-printf '%s' "$依頼文" | XREV_CONFIG="$XREV_ROOT/config/xrev.default.json" \\
-  bash "$XREV_ROOT/scripts/keyword-match.sh"
+printf '%s' "$依頼文" | XREV_CONFIG="__XREV_ROOT_ABS__/config/xrev.default.json" \\
+  bash "__XREV_ROOT_ABS__/scripts/keyword-match.sh"
 ```
 
 ### 手順
 
-発火したら `export XREV_PRIMARY=codex` を自己申告してから
-$XREV_ROOT/references/codex-primary-playbook.md を読み、その手順に従うこと（既定 config の
-reviewer は auto であり、この自己申告だけで primary=codex・reviewer=claude が導出される。
-config ファイルを明示的に固定したい場合のみ $XREV_ROOT/config/xrev.codex-primary.json を使う）。
+発火したら __XREV_ROOT_ABS__/references/codex-primary-playbook.md を読み、その手順に従うこと。
+自分（codex）が primary であることは、**transport.sh / review-loop.sh を呼ぶ各コマンドに
+`XREV_PRIMARY=codex` を前置**して自己申告する（export は持ち越されないため毎回前置する。
+既定 config の reviewer は auto であり、この自己申告だけで primary=codex・reviewer=claude が
+導出される。config ファイルを明示的に固定したい場合のみ
+XREV_CONFIG=__XREV_ROOT_ABS__/config/xrev.codex-primary.json を同様に前置する）。
 """.replace("__XREV_ROOT_ABS__", root))
 PY
 }

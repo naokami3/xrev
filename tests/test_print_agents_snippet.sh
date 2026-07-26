@@ -38,8 +38,12 @@ source "$SNIPPET_SCRIPT"
 out="$(bash "$SNIPPET_SCRIPT" 2>/dev/null)"
 rc=$?
 assert_rc "通常実行は exit0" 0 "$rc"
-assert_contains "出力に XREV_ROOT の絶対パス（実リポジトリルート）を含む" "$out" "export XREV_ROOT=\"$XREV_ROOT\""
-assert_contains "出力に \$XREV_ROOT 相対参照（transport.sh）を含む" "$out" '$XREV_ROOT/scripts/transport.sh'
+# 実行モデル変更（codex は export を持ち越さない）に伴い、スニペットは export ではなく
+# 「XREV_ROOT = <絶対パス>」の宣言と、絶対パスを直接埋めたコマンド例を出力する。
+assert_contains "出力に XREV_ROOT の絶対パス（実リポジトリルート）の宣言を含む" "$out" "XREV_ROOT = $XREV_ROOT"
+assert_contains "出力に絶対パス直埋めの transport.sh 参照を含む" "$out" "$XREV_ROOT/scripts/transport.sh"
+assert_contains "出力にサンドボックス外実行（エスカレーション）の注意を含む" "$out" 'サンドボックス外実行'
+assert_contains "出力に環境変数の毎コマンド前置の注意を含む" "$out" '前置'
 assert_contains "出力に keyword-match.sh への参照を含む" "$out" 'keyword-match.sh'
 assert_contains "出力に前提検査（期待ファイルの存在確認）を含む" "$out" '期待するファイルがありません'
 assert_contains "出力に codex-primary-playbook.md への参照を含む" "$out" 'codex-primary-playbook.md'
@@ -68,7 +72,7 @@ cache_err="$(cat "$_pas_dir/stderr.log")"
 
 assert_rc "キャッシュ配下実行でも exit0" 0 "$cache_rc"
 assert_contains "キャッシュ配下実行で警告が出る" "$cache_err" "プラグインキャッシュ配下"
-assert_contains "キャッシュ配下実行でも出力自体は止めない（XREV_ROOT定義を含む）" "$cache_out" "export XREV_ROOT="
+assert_contains "キャッシュ配下実行でも出力自体は止めない（XREV_ROOT宣言を含む）" "$cache_out" "XREV_ROOT = "
 
 # ── (c) ファイルを一切生成しない ──────────────────────────────────────────
 _before="$(find "$_pas_dir" -type f | sort)"
