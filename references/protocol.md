@@ -245,7 +245,8 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 （安定文字列）を含める。外部 exit は 22 のままだが、primary はこの reason で利用者向け修正案を機械的に選べる:
 `cmux_unavailable`/`resolve_failed`/`send_failed`/`timeout`/`truncated`/`non_terminal`/`ws_mismatch`/
 `ambiguous`/`process_mismatch`/`reviewer_policy_mismatch`/`autocreate_failed`/`reviewer_contention`/
-`encode_failed`/`payload_too_large`/`submit_failed`/`cmux_not_found`/`not_in_pane`/`integrity_unverifiable`。
+`encode_failed`/`payload_too_large`/`submit_failed`/`cmux_not_found`/`not_in_pane`/`integrity_unverifiable`/
+`reviewer_config_conflict`（D1。新設 `exit 29`）。
 
 `transport_exit_code=24`（`invalid_response`。センチネルで完成した応答はあるが妥当な review JSON
 を含まない契約違反。`timeout` と区別され primary は再出力を促す）は `transport_error` ではなく
@@ -288,7 +289,8 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | 25   | Enter 送信(プロンプト確定)に失敗（最大2回まで再試行しても失敗）。本文は入力欄に残存。`timeout`(12) と区別される（submit_failed）。 |
 | 26   | wire（1物理行）の文字数が上限(`wire_max_chars`)を超過（cmux へは未送信。payload_too_large） |
 | 27   | reviewer が安全ポリシー（sandbox=read-only かつ承認=never）で起動していない（最終 argv の意味検証に不合格。reviewer_policy_mismatch）。`xrev_transport_review` では各送信ゲート（早期棄却・本文送信直前・Enter直前・Enter再送前）でプロセス証明と同じゲートで毎回再検証される（不具合Bへの対処。TOCTOU防止）。`XREV_ALLOW_UNVERIFIED_REVIEWER=1` で opt-out 可（下記「reviewer read-only 強制」参照） |
-| 28   | reviewer 種別（`reviewer_process` の basename）に応じた送信完全性の検証手段が確立できない（integrity_unverifiable）。codex/claude 以外の未知種別、または claude・inline（claude は参照モード専用のため inline は wire 長に関わらず無条件）。claude は参照モード（`XREV_REFERENCE_MODE=1`）を使うこと（参照モードはこの検査自体をスキップする）。いずれも cmux へは一切送信していない |
+| 28   | reviewer 種別（semantic kind。D1: 解決済み `reviewer` 名。旧来は `reviewer_process` の basename だったが置き換わった）に応じた送信完全性の検証手段が確立できない（integrity_unverifiable）。codex/claude 以外の未知種別、または claude・inline（claude は参照モード専用のため inline は wire 長に関わらず無条件）。claude は参照モード（`XREV_REFERENCE_MODE=1`）を使うこと（参照モードはこの検査自体をスキップする）。いずれも cmux へは一切送信していない |
+| 29   | reviewer 設定に矛盾がある（reviewer_config_conflict。D1）。`reviewer_process` の明示値の basename が `codex`/`claude` のどちらかで解決済み `reviewer` と異なる、または `reviewer=claude` で `reviewer_reads_workspace` が明示 `false`。`xrev_transport_review`（resolve すら試みず送信前に拒否）・`xrev_ensure_reviewer`（`_xrev_classify_reviewer` を呼ぶ前）・`start-reviewer.sh`（タイトル変更・exec の前）の3経路すべてで、副作用の前に共有ゲート `_xrev_guard_reviewer_conflicts` により一貫して返る（指摘3・2巡目）。詳細は「reviewer の auto 解決と semantic kind」節 |
 | 30   | cmux CLI が見つからない |
 | 31   | cmux 接続不可（preflight 失敗・ペイン外実行） |
 
@@ -296,19 +298,19 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 
 | キー | 既定 | 説明 |
 |------|------|------|
-| `primary` | `claude` | 設計・生成・修正反映を担う側 |
-| `reviewer` | `codex` | レビュー専用（read-only）の側 |
-| `reviewer_pane_title` | `Review Codex` | 宛先解決に使う cmux ペインタイトル |
+| `primary` | `claude` | 設計・生成・修正反映を担う側。`XREV_PRIMARY`（env）> config の `primary` > 既定 `claude` の順で解決する |
+| `reviewer` | `auto`（D1） | レビュー専用（read-only）の側。解決順: 1) `XREV_REVIEWER`（env・明示最優先） 2) config の値が `auto` 以外ならその値 3) `auto`: 「primary の相手方」（`{claude→codex, codex→claude}`。primary が claude/codex のどちらでもなければ fail closed）。既定 config（primary=claude・reviewer=auto）は解決結果 `codex` で従来と完全同値（後方互換） |
+| `reviewer_pane_title` | `auto`（D1） | 宛先解決に使う cmux ペインタイトル。明示値（`XREV_REVIEWER_PANE_TITLE` env、または config の値が `auto` 以外）があればそれを使う。`auto` は解決済み `reviewer` から導出（`codex`→`Review Codex` / `claude`→`Review Claude`）。誤 title の検査はしない（既存の process 証明 `exit 17` が送信前に止めるため。下記「reviewer 設定の矛盾検査」参照） |
 | `keyword` | `@xrev` | 発火キーワード |
 | `max_iterations` | `5` | 往復の安全弁（論理ラウンドの上限）。範囲 1..50 |
 | `max_transport_attempts` | `12` | 通算 transport 試行の上限（論理ラウンドとは別の総量安全弁。超過で escalate）。範囲 1..100 |
-| `reviewer_reads_workspace` | `false` | 参照モード(Phase2)を許可するか。`true` かつ同一WS解決時のみ、diff 本文の代わりにファイル参照を送る |
+| `reviewer_reads_workspace` | `auto`（D1） | 参照モード(Phase2)を許可するか。`true` かつ同一WS解決時のみ、diff 本文の代わりにファイル参照を送る。明示値（config の値が `auto` 以外。env 上書きは無い）があればそれを使う。`auto` は解決済み `reviewer` から導出（`claude`→`true` / `codex`→`false`）。**reviewer=claude で明示 `false` は設定エラー**（claude は参照モード専用のため。下記「reviewer 設定の矛盾検査」参照） |
 | `max_reference_fallbacks` | `3` | 参照モード検証失敗時の再試行・フォールバック通算上限（超過で escalate。無限往復を防ぐ）。名称は「参照→inline フォールバック」由来だが、意味は reviewer 種別非依存に一般化されている（codex=inline へのフォールバック回数 / claude=参照モードのままの再試行回数）。範囲 0..10 |
 | `stop_at` | `review` | 完了アクション（review / commit / pr） |
 | `adr` | `false` | ADR 生成の既定（必要有無） |
 | `adr_dir` | `docs/adr` | ADR の出力ディレクトリ（相対は対象リポジトリ基準 / 絶対パス可） |
 | `transport` | `cmux` | 通信層実装の選択（将来の差し替え点） |
-| `reviewer_process` | `codex` | 送信前プロセス証明で対象 surface の直下に在るべきプロセス名 |
+| `reviewer_process` | `auto`（D1） | 送信前プロセス証明で対象 surface の直下に在るべきプロセス名（前景 comm 名の照合専用。安全ポリシー種別・送信完全性方式等の semantic kind 判定には使わない。下記参照）。明示値（`XREV_REVIEWER_PROCESS` env、または config の値が `auto` 以外）があればそれを使う。`auto` は解決済み `reviewer` をそのまま使う。明示値の basename が `codex`/`claude` のどちらかで解決済み `reviewer` と異なる場合は設定エラー（それ以外の明示値＝ラッパ名等は前景照合にのみ使い種別判定に影響させない） |
 | `reviewer_launch_args` | `{"codex":["--sandbox","read-only","--ask-for-approval","never"],"claude":["--permission-mode","plan"]}` | reviewer バイナリ名をキーに持つ object。起動経路（`start-reviewer.sh` / `ensure-reviewer` の自動生成）で機械的に付与する read-only 相当の起動引数。値そのものが安全ポリシー（sandbox=read-only かつ承認=never）を満たすことを意味検証する（満たさなければ fail closed）。既存ペインを採用する経路では launch 引数の付与はしないが、前景プロセスの実効ポリシーは既定で検証する（`XREV_ALLOW_UNVERIFIED_REVIEWER=1` で opt-out 可） |
 | `reviewer_autocreate` | `ask` | reviewer ペインの自動生成方針。`ask`(スキルが一拍確認で確認後生成)/`auto`(無確認で生成)/`off`(生成せず案内) |
 | `reviewer_create_timeout_seconds` | `30` | 自動生成時の codex 起動確認・競合待ちの上限秒。範囲 1..600 |
@@ -333,7 +335,10 @@ stderr に1行警告する（可用性優先。stdout は汚さない）。生�
 無検証で `(( ))` に渡すとインジェクションが成立してしまう。`review-loop.sh` の `max_iterations` /
 `max_transport_attempts` / `max_reference_fallbacks` も同じ `_xrev_uint` を通す。
 
-環境変数で個別上書き可: `XREV_CONFIG`, `XREV_REVIEWER_PANE_TITLE`, `XREV_REVIEWER_SURFACE`,
+環境変数で個別上書き可: `XREV_CONFIG`, `XREV_PRIMARY`（primary の明示指定。D1。入口の自己申告に使う。
+config の `primary` より優先）, `XREV_REVIEWER`（reviewer の明示指定。D1。新設・最優先。config の
+`reviewer` 固定値との差も含め、明示指定は常に優先し質問しない）, `XREV_REVIEWER_PANE_TITLE`,
+`XREV_REVIEWER_SURFACE`,
 `XREV_CMUX_BIN`, `XREV_MAX_ITERATIONS`, `XREV_STOP_AT`, `XREV_ADR`, `XREV_ADR_DIR`,
 `XREV_READ_SCREEN_LINES`, `XREV_SEND_SETTLE_SECONDS`, `XREV_SUBMIT_SETTLE_SECONDS`,
 `XREV_CHUNK_SIZE`, `XREV_CONTENT_TYPE`, `XREV_ROUND_ID`, `XREV_SEND_RETRIES`,
@@ -354,6 +359,141 @@ stderr に1行警告する（可用性優先。stdout は汚さない）。生�
 =fail closed。詳細は「reviewer read-only 強制」参照）。
 `XREV_CONTENT_TYPE`/`XREV_ROUND_ID` は通常自動決定で、テスト・デバッグ時のみ明示する。
 
+### reviewer の auto 解決と semantic kind（D1）
+
+**semantic kind = 解決済み reviewer 名（`codex`/`claude`）を唯一の種別判定源とする。** 安全ポリシー
+検証（`_xrev_check_policy` の kind）・送信完全性方式（`_xrev_integrity_kind`）・launch 引数選択
+（`_xrev_reviewer_launch_args`）・composer クリア方式（`_cmux_clear_input`）はすべてこの semantic
+kind（`transport.sh` の `REVIEWER` 変数。`_xrev_resolve_reviewer` が解決）で決まる。旧来の
+「kind = 前景プロセス名（`reviewer_process`）の basename」という定義は D1 で置き換わった。
+`reviewer_process` はバイナリがラッパ（例 `my-codex-wrapper`）であっても前景 comm 名の照合専用
+であり続け、種別判定には一切影響しない。
+
+**reviewer 設定の矛盾検査（副作用の前・fail closed。`_xrev_check_reviewer_conflicts`）**:
+
+- `reviewer_process` の明示値（`auto` 由来でない値）の basename が `codex`/`claude` のどちらかで、
+  解決済み `reviewer` と異なる場合 → 設定エラー（新設 `exit 29`＝`reviewer_config_conflict` で
+  拒否する）。それ以外の明示値（ラッパ名等）は前景照合にのみ使われ、矛盾として扱わない。
+- `reviewer=claude` で `reviewer_reads_workspace` が明示 `false` の場合 → 設定エラー（同じく
+  `exit 29`）。claude reviewer は参照モード専用のため、参照モードを禁止する組み合わせは矛盾。
+- `reviewer_pane_title` は検査しない（誤 title のまま送信しても、既存の process 証明
+  （`exit 17`）が送信前に止めるため。宛先解決自体は解決済み `reviewer` のタイトルだけを
+  resolve し、両タイトルのペインが共存していても曖昧判定はしない）。
+
+**共有ゲート（`_xrev_guard_reviewer_conflicts`。指摘3・2巡目）**: この矛盾検査は
+`xrev_transport_review`（送信直前）だけでなく、`xrev_ensure_reviewer`（reviewer ペインの自動生成。
+`_xrev_classify_reviewer` を呼ぶ**前**）と `start-reviewer.sh`（タイトル変更・codex の exec 起動の
+**前**）でも同じ1関数を通す。従来は `xrev_transport_review` にしか組み込まれておらず、
+`ensure-reviewer`／`start-reviewer.sh` は矛盾があってもペイン生成・タイトル変更まで進んでから
+（reviewer=claude + reads_workspace 明示 false では使用不能なペインを生成後の送信時に、
+reviewer_process 矛盾では生成後の起動確認が別理由で失敗する形で）気づいていた。既知の矛盾を
+検出できるのに副作用の大きい操作（ペイン生成・exec）へ進めてしまう事故を避けるため、3経路すべてが
+副作用の直前にこの1関数を呼び、判定リストを二重管理しない。
+
+**後方互換**: `XREV_PRIMARY` 未設定・既定 config（`reviewer=auto`）のとき、`primary`（既定
+`claude`）から `reviewer=codex` に解決され、派生3キーも旧来の既定値（`Review Codex`/`codex`/
+`false`）と完全同値になる。**主従反転プリセット（`config/xrev.codex-primary.json`）と等価な状態**
+は、既定 config のまま `XREV_PRIMARY=codex` を自己申告するだけで得られる（`reviewer=claude`・
+`reviewer_pane_title=Review Claude`・`reviewer_process=claude`・`reviewer_reads_workspace=true`
+が auto 解決される）。プリセットファイルは値を config へ明示的に固定しておきたい場合にのみ使う
+（挙動は等価）。
+
+### print-agents-snippet.sh --append-global（D3・グローバル導入）
+
+`scripts/print-agents-snippet.sh` は既定で stdout にスニペットを出すだけだが、`--append-global`
+は codex のグローバル指示ファイル（`$CODEX_HOME/AGENTS.md`。`CODEX_HOME` 未設定なら既定
+`~/.codex/AGENTS.md`）へスニペットを冪等に追記/更新する。R7 実測（`codex exec` を一時
+`CODEX_HOME` で実行し確認済み）: codex は起動時にこのファイルを読み込む。
+
+**対象解決**（lstat 基準・最初に該当した規則のみ）:
+
+1. symlink（存否より先に判定）→ `realpath` 成功必須。失敗（リンク切れ）は無変更で fail closed
+   （リンクを温存する。上書きしない）。
+2. symlink でない既存通常ファイル → `realpath` 正規化。
+3. 存在しない → 初回導入。`CODEX_HOME` ディレクトリ（存在必須。無ければ fail closed。`mkdir` は
+   しない）を `realpath` 正規化し `basename "AGENTS.md"` を結合。
+4. その他（ディレクトリ・FIFO 等）→ 無変更で fail closed。
+
+**path は bash の command substitution を一度も通らない（指摘1・4巡目・正典）**: `--append-global`
+の実処理（対象解決→ロック→マーカー検査→一時ファイル→mv直前再検証→mv）は**すべて単一の python
+プロセス内**で行う。3巡目までの実装は対象解決の結果（kind・canonical path・`CODEX_HOME`）を JSON
+で python→bash へ返し、bash 側が `resolved="$(...)"` のようなコマンド置換で受けてからフィールドを
+再抽出していたが、コマンド置換は末尾の改行を無条件に取り除くため、`CODEX_HOME` や symlink 解決先が
+**改行で終わる有効なパス**だと、そのフィールドを再抽出した時点で末尾の改行が失われ canonical
+target が別パスに変化してしまい、誤配送防止が未達だった（タブや改行が"途中"にあるだけのケースは
+JSON化で救えていたが、末尾の改行はどのみち再抽出の command substitution で失われるため検出でき
+なかった）。ここでは path を運ぶ経路を「python プロセス内のローカル変数」に限定し、bash は
+オプション解釈・スニペット本文の stdin 渡し・python の終了コードの伝播だけを担う。診断メッセージ・
+成功メッセージも python が直接 stderr/stdout へ書く（bash での再組み立てをしない）。
+
+対象解決 `_xrev_resolve_agents_target(home_dir)` と書き込み本体 `_xrev_write_agents_file(...)`
+（下記）は transport.sh の `_xrev_*_py_src` 共有方式に倣い、python の関数定義だけを返す bash
+関数（`_xrev_agents_resolve_py_src` / `_xrev_agents_write_py_src`）として実体を持つ。本番の結合
+ドライバ（`_xrev_append_global`）はこの2つと専用の driver 片を1つの python プロセスへ結合して
+実行し、テスト（下記）も同じ実体を共有する（判定ロジックの二重管理をしない）。単体で対象解決だけを
+確認したいテスト向けに `_xrev_resolve_agents_target`（bash 関数。stdout に JSON を返す）を残して
+いるが、**本番の `--append-global` 経路はこれを経由しない**。
+
+**排他ロック**: 正規対象（realpath 後）の親ディレクトリに固定名 `.<basename>.xrev-lock`（`mkdir`
+原子取得。`TMPDIR` 等の環境依存値はロックパスに含めない）。symlink 経由でも直接 realpath を指した
+別実行でも、ロックは同じ正規対象の親ディレクトリに収束する。取得後に「再読取り→マーカー構造検査→
+一時ファイル生成→パーミッション引き継ぎ(stat→chmod)→mv」を行う（すべて同一 python プロセス内。
+TOCTOU 窓を最小化する）。ロック解放は python の `try`/`finally` で必ず行う（自己解放）。競合時は
+**待機せず無変更で拒否**する（診断で再実行を案内）。
+
+mv 直前に、正規対象の状態が「ロック内で読んだ時点（baseline）」から不変であることを確認する補助
+検査を行う（ロックの代替ではない。非協調プロセス＝エディタ等による同時書き換え対策）。**比較対象は
+種別（`lstat` による通常ファイルか否か）・識別情報（`st_dev`/`st_ino`）・パーミッション（mode）・
+内容 sha256 のすべて**（指摘2・3巡目。旧実装は exists の真偽と内容 sha256 だけを比較しており、
+非協調プロセスが対象を「同一バイト列の別ファイル」（通常ファイルを同内容の symlink に置換する、
+またはエディタの atomic-save のように新しい inode の同内容ファイルへ差し替える）へ入れ替えても
+見逃していた。`os.replace` は symlink を辿らずリンクそのものを置き換えるため、置換後にそこへ
+書き込むのは意図しない対象の破壊になる。また mode だけの変更（内容は不変）も検出できず、
+旧 baseline の mode で静かに上書きしていた）。上記いずれか1つでも変化していれば無変更で拒否する。
+
+**書き込み本体はテスト用の hook を持つ純粋関数（指摘2・4巡目）**: `_xrev_write_agents_file(target,
+begin, end, snippet, hook=None)` は一時ファイル書き出し・パーミッション引き継ぎの直後、mv 直前の
+再検証の直前で `hook`（引数なしの callable。既定 `None`）を呼ぶ。**本番のドライバは常に
+`hook=None` で呼び出し、この引数は一切使わない**。3巡目までの実装は
+`XREV_TEST_AGENTS_WRITE_SYNC_DIR` という環境変数でテスト専用の同期（baseline 取得後に一時停止し、
+外部から `chmod` を注入できるようにする）を行っていたが、**本番コードが無条件に信頼する env
+フックは、利用者環境や上位エージェントから継承されるだけで「任意ディレクトリに `ready` ファイルを
+作成・最大10秒停止」できる外部書込み能力になり、「未設定なら no-op」は安全境界にならない**と判定
+され撤回した。代わりに、書き込みロジックを hook 引数を持つ python 関数として定義し、テストは
+`_xrev_agents_write_py_src`（本番と共有する実体）にテスト専用の小さな driver を結合した自前の
+python プロセスから `hook` へ直接 `chmod` を注入して駆動する（env 経由の到達経路を一切作らない。
+transport.sh の `_xrev_*_py_src` 共有方式と同じ流儀）。symlink 置換・inode 差し替えは「毎回
+新規 inode」という単調に一意な性質を利用した継続レースのままで確実に検出できる（決定論的な
+hook 注入が要るのは mode のような小さな値集合の変化だけ）。
+
+**マーカー**: `<!-- xrev:snippet:BEGIN -->` / `<!-- xrev:snippet:END -->` の対で挟む。0 対=末尾
+追記 / 正確に1対（BEGIN が END より前）=範囲置換（マーカー内側のみ）/ それ以外（欠損・重複・
+入れ子・逆順）=無変更で fail closed。BEGIN/END は常に独立行にする（**指摘2・2巡目**: 呼び出し側は
+`body="$(_xrev_snippet_body)"` という command substitution でスニペット本文を受け取るため、bash が
+本文末尾の改行を無条件に取り除く。writer 側でスニペット本文を必ず1個の末尾改行で終わるよう正規化
+してから END マーカーを続けることで、生成ファイルでも本文最終行の直後に END が連結されず、
+stdout モードと同じ「独立行のマーカーブロック」形式を保つ）。
+
+**契約差（ensure-reviewer の WS ロックとの違い。重要）**: `transport.sh ensure-reviewer` の WS
+ロックは「回収しない」（stale 回収レースを構造的に排除するため）ため競合側は deadline まで present
+を待つ。本ロックは性質が異なる: 生成（cmux ペインという副作用の大きい対象）ではなく既存ファイルへの
+短時間の書き込みであるため、**このプロセスが必ず自己解放し**、**競合したら待機せず即座に拒否する**
+（待つ意味が薄く、待つより早く失敗させて再実行を促す方が診断しやすいため）。
+
+**対象解決の I/O エラー（指摘1・2巡目）**: 対象パスの `lstat`／symlink 先の `stat`／`CODEX_HOME`
+の存在確認は、`FileNotFoundError` だけを「未作成」として受理する。権限拒否や親経路が非ディレクトリ
+であるといった、それ以外の `OSError` を「存在しない」と誤分類して初回導入(new)扱いにはしない
+（fail-open の欠陥だった）。専用の `error` kind として無変更で拒否する（`exit 16`）。また symlink は
+リンク先を実際に `stat`（シンボリックリンクを辿る）して通常ファイルであることまで確認し、
+ディレクトリ等を指す symlink は canonical target にしない（`other` 扱いで拒否）。
+
+**終了コード**（`print-agents-snippet.sh` 独自の名前空間。`transport.sh` の終了コードとは無関係）:
+0=成功 / 10=dangling symlink（リンク温存） / 11=`CODEX_HOME` ディレクトリ不在（`mkdir` しない） /
+12=対象が想定外の種類（symlink のリンク先がディレクトリ等の場合を含む） /
+13=ロック競合（待機せず拒否） / 14=マーカー構造異常（欠損・重複・逆順） /
+15=mv 直前の内容変化（無変更で拒否） / 16=対象解決中の I/O エラー（権限拒否等。指摘1・2巡目） /
+1=その他の内部エラー。
+
 ### 送信の堅牢化（実機知見）
 
 送信先が Codex のとき、**ビジー（前応答の処理中）や入力欄の残留（テキスト/ペーストチップ）**が
@@ -372,6 +512,9 @@ stderr に1行警告する（可用性優先。stdout は汚さない）。生�
 マーケット導入ユーザーがスクリプトのパスを知らなくても、何も手実行せず reviewer が用意されることを狙う。
 設計は 4 ラウンドのクロスレビューで収束。
 
+- **矛盾検査が最優先（指摘3・2巡目）**: `_xrev_classify_reviewer`（分類・resolve＋probe）を呼ぶ**前**に
+  `_xrev_guard_reviewer_conflicts` で reviewer 設定の矛盾を検査する（`exit 29`）。矛盾があるまま
+  ペイン生成へ進み、生成後に別の理由（送信時の `exit 29` や起動確認の失敗）で気づく事故を避ける。
 - **分類**: resolve＋probe で `present`/`absent`/`ambiguous`(16)/`non_terminal`(14)/`process_mismatch`(17) を判別。
   既存が**壊れ(14)/曖昧(16)/別物(17)**のときは**作り直さず人間へ**（誤って二重生成しない）。
 - **生成は absent のときだけ**: caller の WS UUID を明示して `cmux new-pane --type terminal --workspace <WS>` で生成し、

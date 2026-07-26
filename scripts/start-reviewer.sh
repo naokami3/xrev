@@ -35,6 +35,13 @@ _cmux_preflight || {
   exit 31
 }
 
+# D1/指摘3: reviewer 設定の矛盾検査は、副作用（タイトル変更・codex の exec 起動）を起こす前に行う。
+# xrev_transport_review / xrev_ensure_reviewer と共有する単一ゲート（_xrev_guard_reviewer_conflicts）。
+if ! _xrev_guard_reviewer_conflicts; then
+  echo "[start-reviewer] reviewer 設定に矛盾があります（詳細は上のログ参照）。タイトルは変更していません。" >&2
+  exit 29
+fi
+
 # codex の実行可能性は「タイトル変更より前」に確認する。
 # そうしないと codex 未導入時に、素の shell に規約タイトルだけが残り、後続の宛先解決を誤らせる。
 # reviewer バイナリの解決は transport.sh の _xrev_reviewer_bin（C1）に一本化する
@@ -56,8 +63,10 @@ fi
 # launch 引数（read-only 強制）を決定する。transport.sh の単一の生成関数
 # （_xrev_reviewer_launch_args）を使い、自動生成経路(_xrev_create_reviewer)と実装を共有する。
 # config/env が壊れている・未知の reviewer 名の場合は fail closed（exec せず中止）。
+# D1: キーは semantic kind(REVIEWER。transport.sh が解決済み)で引く。バイナリがラッパで
+# basename が codex/claude と異なっていても正しく解決される。
 launch_args=()
-if ! _xrev_launch_out="$(_xrev_reviewer_launch_args "$codex_bin")"; then
+if ! _xrev_launch_out="$(_xrev_reviewer_launch_args "$REVIEWER")"; then
   echo "[start-reviewer] '$codex_bin' の launch 引数を決定できませんでした（config の reviewer_launch_args を確認してください）。タイトルは変更していません。" >&2
   exit 64
 fi
@@ -71,7 +80,8 @@ done <<< "$_xrev_launch_out"
 # 「launch 引数 + ユーザー追加引数」を連結した**最終 argv**に対する意味検証
 # （_xrev_verify_effective_policy）であり、ここで安全ポリシー（sandbox=read-only かつ承認=never）が
 # 一意に有効であることを確認してから exec する。
-_xrev_codex_kind="$(basename -- "$codex_bin")"
+# D1: kind は semantic kind(REVIEWER)を使う（basename($codex_bin)ではない）。
+_xrev_codex_kind="$REVIEWER"
 if ! _xrev_verify_effective_policy "$_xrev_codex_kind" "${launch_args[@]+"${launch_args[@]}"}" "$@" >/dev/null 2>&1; then
   echo "[start-reviewer] 最終的な起動引数（launch 引数＋追加引数）が安全ポリシー（read-only 強制）を一意に満たしません。タイトルは変更していません。" >&2
   echo "[start-reviewer] sandbox/承認系フラグを追加していないか、同じ軸を二重に指定していないか確認してください。" >&2

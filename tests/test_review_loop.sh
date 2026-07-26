@@ -104,6 +104,16 @@ assert_eq "trc=28 は decision=transport_error" "transport_error" "$(printf '%s'
 assert_eq "trc=28 は transport_reason=integrity_unverifiable" "integrity_unverifiable" \
   "$(printf '%s' "$out" | json_get transport_reason)"
 
+# trc=29（D1: reviewer 設定の矛盾。reviewer_process の明示値と解決済み reviewer の不一致、
+# または reviewer=claude での reviewer_reads_workspace 明示 false）→ transport_error /
+# reviewer_config_conflict として写像される。
+_stub_reviewer_config_conflict() { return 29; }
+out="$(printf '%s' "ダミー差分" | XREV_REVIEW_FN=_stub_reviewer_config_conflict _xrev_review_loop_run 1)"; rc=$?
+assert_rc "trc=29 で rc=22(transport_error)" 22 "$rc"
+assert_eq "trc=29 は decision=transport_error" "transport_error" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "trc=29 は transport_reason=reviewer_config_conflict" "reviewer_config_conflict" \
+  "$(printf '%s' "$out" | json_get transport_reason)"
+
 # ── ループ安全弁: round_state（通算 transport 試行の上限・巻戻し検知）──
 _stub_approve2() { printf '%s' '{"verdict":"approve","findings":[]}'; }
 

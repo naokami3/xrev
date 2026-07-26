@@ -62,7 +62,10 @@ _ps_snapshot() {
   done
 }
 
+# 【D1】_xrev_verify_reviewer_policy は前景照合(REVIEWER_PROCESS)と安全ポリシー種別kind(REVIEWER)を
+# 分離して _xrev_verify_foreground_policy へ渡すため、両方を claude に揃える。
 REVIEWER_PROCESS=claude
+REVIEWER=claude
 
 # ── (a) 偽フラグ: 単一 argv 要素の内部に空白区切りで --permission-mode plan を埋め込む ──────
 _fpa_spawn --settings '{"a": "--permission-mode plan"}'
