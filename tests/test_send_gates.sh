@@ -44,7 +44,10 @@ _xrev_sleep() { :; }  # リトライ間の待ちを無効化（テストを遅�
 # インクリメントはサブシェル内で完結して親シェルへ戻らないので、呼び出し回数はファイルに
 # 記録して数える（bash+python3 のみという依存方針は変えない。中間ファイルは repo 外の
 # 一時領域に置き、このテストの最後に削除する）。
-_sg_call_file="$(mktemp -t xrev_sg_calls)"
+# 【移植性】mktemp -t <接頭辞> は macOS では通るが GNU coreutils(Linux) はテンプレートに
+# XXXXXX を要求して失敗する（ubuntu CI だけ空パスになり全アサートが崩れた）。両対応の
+# 明示テンプレート形式を使う。
+_sg_call_file="$(mktemp "${TMPDIR:-/tmp}/xrev_sg_calls.XXXXXX")"
 _sg_reset_calls() { printf '0' > "$_sg_call_file"; }
 _sg_call_count() { cat "$_sg_call_file"; }
 _sg_top_script=()   # 呼び出し順に返す top TSV の台本
@@ -175,8 +178,8 @@ _sg_run() {
 _sg_run_capture() {
   _SG_VP_SEQ=("$@"); _SG_VP_I=0; _SG_POL_I=0; _SG_CALLS=""
   local _sg_outfile _sg_errfile
-  _sg_outfile="$(mktemp -t xrev_sg_stdout)"
-  _sg_errfile="$(mktemp -t xrev_sg_stderr)"
+  _sg_outfile="$(mktemp "${TMPDIR:-/tmp}/xrev_sg_stdout.XXXXXX")"
+  _sg_errfile="$(mktemp "${TMPDIR:-/tmp}/xrev_sg_stderr.XXXXXX")"
   xrev_transport_review "テスト用 payload" >"$_sg_outfile" 2>"$_sg_errfile"
   _SG_RC=$?
   _SG_STDOUT="$(cat "$_sg_outfile")"
