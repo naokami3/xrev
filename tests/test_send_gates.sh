@@ -8,10 +8,20 @@
 #   (iii-b) 本文送信（_cmux_send_line）の直前
 #   (iii-c) 確定入力（_cmux_submit = Enter）の直前 ← 安全目標の最終ゲート
 #
+# 不具合B対応（TOCTOU）: 上記3点は `_xrev_gate_reviewer` を経由し、プロセス証明
+# （`_verify_reviewer_process`）と安全ポリシー実効検証（`_xrev_verify_reviewer_policy`）を
+# **必ず同じゲートで一緒に**行う。どちらか一方だけを検証してもう一方が古いまま、という
+# 構造的な穴を作らないことをここで固定する（プロセス名は一致し続けるがポリシーだけが途中から
+# 崩れるケースを台本で作り、各ゲートで rc27 になることを検証する）。
+#
 # 純粋判定（_decide_foreground_owner）のテストは test_ws_scoped.sh にある。ここで固定するのは
 # **どの時点で検証が走り、失敗したとき何を「しない」か**という制御フロー。実装の行番号ではなく
 # 「send が呼ばれたか」「submit が呼ばれたか」という外部作用の有無と順序だけを見るので、
 # ゲートが移動・削除されればこのテストが落ちる。
+#
+# 不具合A対応（stdoutの契約）: xrev_transport_review の stdout は「reviewer の review JSON
+# だけ」を返す契約であることも固定する（検証系の関数が stdout に何か書いてしまう回帰があると
+# review-loop 側の JSON パースが壊れた実績があるため）。
 #
 # cmux 非依存: 配管の入出力はすべてスタブし、検証結果の並びを台本で与える。
 
@@ -104,6 +114,9 @@ unset _sg_call_file _sg_top_script _sg_ps_script \
 _SG_CALLS=""                      # 外部作用の記録（"send submit" のように順に積む）
 _SG_VP_SEQ=()                     # _verify_reviewer_process の戻り値台本（0=許可 / 1=拒否）
 _SG_VP_I=0                        # 台本の消費位置
+_SG_POL_SEQ=()                    # _xrev_verify_reviewer_policy の戻り値台本（呼び出し順。
+                                   # 空なら常に0=成功。不具合Bのゲート統合テストで使う）
+_SG_POL_I=0                       # 台本の消費位置
 
 _cmux_preflight() { return 0; }
 # uuid を空にして (i) の WS 再検証ブロックを迂回する（そこは別テストの担当）。
@@ -118,9 +131,16 @@ _verify_reviewer_process() {
   _SG_VP_I=$(( _SG_VP_I + 1 ))
   return "$r"
 }
-# 指摘3(変更2): 送信前の安全ポリシー実効検証。既定は「安全」（0）を返し、本ファイルの対象である
-# プロセス証明ゲートの順序・回数の検証に影響させない。rc27 のゲート自体は専用の節で検証する。
-_xrev_verify_reviewer_policy() { return 0; }
+# 指摘3(変更2)/不具合B: 送信前の安全ポリシー実効検証。台本(_SG_POL_SEQ)が空のときは常に「安全」
+# （0）を返し、本ファイルの対象であるプロセス証明ゲートの順序・回数の検証に影響させない。
+# 台本を仕込んだときは呼び出し順に消費する（不具合B: プロセス証明と同じゲートで毎回再検証される
+# ことを検証するため、呼び出し回数そのものが意味を持つ）。
+_xrev_verify_reviewer_policy() {
+  if (( ${#_SG_POL_SEQ[@]} == 0 )); then return 0; fi
+  local r="${_SG_POL_SEQ[$_SG_POL_I]:-0}"
+  _SG_POL_I=$(( _SG_POL_I + 1 ))
+  return "$r"
+}
 _detect_content_type() { printf 'plain'; }
 _build_framed_line() { printf 'FRAMED_LINE_FOR_TEST'; }
 _cmux_read_screen() { printf ''; }
@@ -140,9 +160,28 @@ _xrev_sleep() { :; }
 
 # 台本を仕込んで 1 回走らせ、rc と外部作用の記録を返すヘルパ。
 _sg_run() {
-  _SG_VP_SEQ=("$@"); _SG_VP_I=0; _SG_CALLS=""
+  _SG_VP_SEQ=("$@"); _SG_VP_I=0; _SG_POL_I=0; _SG_CALLS=""
   xrev_transport_review "テスト用 payload" >/dev/null 2>&1
   _SG_RC=$?
+}
+
+# _sg_run と同じ台本仕込みだが、stdout と stderr を別々に残す（不具合Aのstdout純度確認・
+# 不具合Bの汚染ペイン警告確認で使う）。
+# 【注意】$(...) コマンド置換はサブシェルを作るため、その中で xrev_transport_review を呼ぶと
+# _SG_CALLS/_SG_VP_I/_SG_POL_I への書き込みが親シェルへ戻らない（本ファイル冒頭の
+# 「_verify_reviewer_process の観測リトライ」節と同じ注意点）。単純コマンドへのリダイレクトは
+# サブシェルを作らないため、一時ファイル2本（リポジトリ外・テスト内で必ず削除）を介して
+# stdout/stderr を分離することでこれを避ける。
+_sg_run_capture() {
+  _SG_VP_SEQ=("$@"); _SG_VP_I=0; _SG_POL_I=0; _SG_CALLS=""
+  local _sg_outfile _sg_errfile
+  _sg_outfile="$(mktemp -t xrev_sg_stdout)"
+  _sg_errfile="$(mktemp -t xrev_sg_stderr)"
+  xrev_transport_review "テスト用 payload" >"$_sg_outfile" 2>"$_sg_errfile"
+  _SG_RC=$?
+  _SG_STDOUT="$(cat "$_sg_outfile")"
+  _SG_STDERR="$(cat "$_sg_errfile")"
+  rm -f "$_sg_outfile" "$_sg_errfile"
 }
 
 # 1) 全ゲート通過: send → submit がこの順で各1回だけ起きる。
@@ -256,9 +295,73 @@ XREV_ALLOW_UNVERIFIED_REVIEWER=1 _sg_run 0 0 0
 assert_rc "opt-out env → 安全ポリシー不合格でも続行(rc0)" 0 "$_SG_RC"
 assert_eq "opt-out env → send/submit は通常どおり実行される" " send submit" "$_SG_CALLS"
 
-_xrev_verify_reviewer_policy() { return 0; }
+# 台本消費型の既定スタブへ戻す（以降のテストで _SG_POL_SEQ を使えるようにする）。
+_xrev_verify_reviewer_policy() {
+  if (( ${#_SG_POL_SEQ[@]} == 0 )); then return 0; fi
+  local r="${_SG_POL_SEQ[$_SG_POL_I]:-0}"
+  _SG_POL_I=$(( _SG_POL_I + 1 ))
+  return "$r"
+}
+
+# 11) 不具合B(TOCTOU): プロセス名は一貫して許可されるが、2回目以降（本文送信直前 (iii-b)）の
+#     安全ポリシー検証だけが不合格になるケース。初回検証後に reviewer が終了し、同名だが
+#     書き込み可能な reviewer へ挿げ替わった状況を模す。プロセス証明とポリシー検証を同じゲートで
+#     毎回まとめて検証していれば、(iii-b) の時点で rc27 になり、本文送信(_cmux_send_line)も
+#     Enter(_cmux_submit)も一切呼ばれないはず（本文が入力欄に渡る前に止まる）。
+_SG_POL_SEQ=(0 1)
+_sg_run 0 0 0
+assert_rc "(iii-b)でポリシーだけ不合格 → rc27" 27 "$_SG_RC"
+assert_eq "(iii-b)不合格 → send も submit も呼ばれない" "" "$_SG_CALLS"
+_SG_POL_SEQ=()
+
+# 12) 不具合B(TOCTOU): 3回目（Enter直前の最終ゲート (iii-c)）でだけ安全ポリシーが不合格になる
+#     ケース → rc27。本文(_cmux_send_line)は送信済みだが Enter(_cmux_submit)は呼ばれず、
+#     プロセス不一致のときと同じ汚染ペイン警告（_xrev_log_tainted_pane）が出ること。
+_SG_POL_SEQ=(0 0 1)
+_sg_run_capture 0 0 0
+assert_rc "(iii-c)でポリシーだけ不合格 → rc27" 27 "$_SG_RC"
+assert_eq "(iii-c)不合格 → send のみで submit は呼ばれない" " send" "$_SG_CALLS"
+assert_contains "(iii-c)不合格 → 汚染ペイン警告が出る" "$_SG_STDERR" "汚染されたものとして扱ってください"
+_SG_POL_SEQ=()
+
+# 13) 不具合B: ポリシー検証が全ゲートで成功する正常系では、ポリシー検証の呼び出し回数は
+#     プロセス証明と同数（3回）になること＝プロセス証明とポリシー検証が常に同じゲートで
+#     一緒に呼ばれている（片方だけを間引く変更を検知できる）ことの確認。
+#     （台本を明示的に3件与える。空配列は「常に成功」だが呼び出し回数を数えないショートカットに
+#     なるため、ここでは回数そのものを検証したいので使わない。）
+_SG_POL_SEQ=(0 0 0)
+_sg_run 0 0 0
+assert_rc "全ゲート成功（ポリシー込み） → rc0" 0 "$_SG_RC"
+assert_eq "ポリシー検証もプロセス証明と同じ3回走る" "3" "$_SG_POL_I"
+assert_eq "プロセス証明とポリシー検証の呼び出し回数が一致" "$_SG_VP_I" "$_SG_POL_I"
+_SG_POL_SEQ=()
+
+# 14) 不具合B: XREV_ALLOW_UNVERIFIED_REVIEWER=1 のときは安全ポリシー検証そのものを一切呼ばない
+#     （プロセス証明は従来どおり実施する）。かつ、ゲートは1往復で最大3回（(iii)/(iii-b)/(iii-c)）
+#     呼ばれるが、opt-out の警告ログは1往復につき1回だけ出ること（毎ゲートで出さない）。
+XREV_ALLOW_UNVERIFIED_REVIEWER=1 _sg_run_capture 0 0 0
+assert_rc "opt-out env → 完走(rc0)" 0 "$_SG_RC"
+assert_eq "opt-out env → send/submit は通常どおり実行される" " send submit" "$_SG_CALLS"
+assert_eq "opt-out env → 安全ポリシー検証そのものが呼ばれない" "0" "$_SG_POL_I"
+_SG_WARN_COUNT="$(printf '%s\n' "$_SG_STDERR" | grep -c 'XREV_ALLOW_UNVERIFIED_REVIEWER=1 のため')"
+assert_eq "opt-out env → 警告ログは1往復につき1回だけ" "1" "$_SG_WARN_COUNT"
+unset _SG_WARN_COUNT
+
+# 15) 不具合A回帰防止（実機で発生: 検証関数の"ok"がtransportのstdoutを汚染し、review-loopの
+#     JSONパースが失敗する事故が起きた）: xrev_transport_review の成功経路で stdout に
+#     「review JSON のみ」が出ることを検証する。前後に余分な文字（例: 検証関数の"ok"漏れ）が
+#     付いていれば json.loads が例外を投げ、PARSE_OK が出力されない形で落ちる。将来また別の
+#     関数が stdout を汚しても検出できるよう、返り値そのものをパースして確認する。
+_sg_run_capture 0 0 0
+assert_rc "stdout純度確認: 成功経路は rc0" 0 "$_SG_RC"
+_SG_PURITY_PARSED="$(printf '%s' "$_SG_STDOUT" | python3 -c 'import json,sys
+json.loads(sys.stdin.read())
+print("PARSE_OK")' 2>/dev/null)"
+assert_eq "stdout純度確認: stdout は review JSON のみでパース可能" "PARSE_OK" "$_SG_PURITY_PARSED"
+unset _SG_PURITY_PARSED
 
 # ── 後片付け: 実体を読み直してスタブを捨てる（後続の test_*.sh へ漏らさない）────────
 # shellcheck source=/dev/null
 source "$SCRIPTS/transport.sh"
-unset _SG_CALLS _SG_VP_SEQ _SG_VP_I _SG_RC _SG_SAVED_MAX _SG_SAVED_TIMEOUT _SG_SAVED_POLL _SG_SAVED_SETTLE
+unset _SG_CALLS _SG_VP_SEQ _SG_VP_I _SG_POL_SEQ _SG_POL_I _SG_RC _SG_STDOUT _SG_STDERR \
+      _SG_SAVED_MAX _SG_SAVED_TIMEOUT _SG_SAVED_POLL _SG_SAVED_SETTLE

@@ -728,7 +728,10 @@ PY
 # 有効かを確認する。従来は前景プロセス名が REVIEWER_PROCESS と一致することしか見ておらず、手動起動・
 # 旧版の書き込み可能なペインがそのまま採用され得た。
 #   入力: $1=surface ref
-#   出力: なし（exit のみ）。exit 0=安全ポリシー確認 / 1=確認できない（fail closed）
+#   出力: stdout には何も書かない（exit のみ。_xrev_verify_effective_policy の契約をそのまま透過する。
+#     不具合Aの教訓により、この関数は成功時に stdout へ何も書いてはならない — 呼び出し元の
+#     xrev_transport_review は stdout が「reviewer の review JSON だけ」という契約を持つため）。
+#   exit 0=安全ポリシー確認 / 1=確認できない（fail closed）
 _xrev_verify_reviewer_policy() {
   local surface="$1" top direct ps_out ps_args_out fg_argv
   top="$(_cmux_top_processes)"
@@ -796,6 +799,10 @@ _verify_reviewer_launch_args() {
     warr=($rest)
     rest_args=()
     (( ${#warr[@]} > 1 )) && rest_args=("${warr[@]:1}")  # argv[0]（実行ファイルパス）を除く
+    # stderr も含めて捨てる: 直下プロセスは複数あり得て「いずれか1件が合格すればよい」判定なので、
+    # 他の候補（例: sleep サイドカーやログインシェル）が意味検証に落ちるのは正常フローであり、
+    # そのたびに理由を診断ログへ出すと分類のたびにノイズが積み重なる（_xrev_classify_reviewer と
+    # 同じ理由）。
     if _xrev_verify_effective_policy "$kind" "${rest_args[@]+"${rest_args[@]}"}" >/dev/null 2>&1; then
       return 0
     fi
@@ -1468,7 +1475,15 @@ _xrev_shquote() { printf '%q' "$1"; }
 #     ことを要求する（claude は短縮形を持たないため、それ以外の形式は単に「該当なし」として扱われ、
 #     結果的に「指定なし」で fail closed になる）。
 #   未知の reviewer 種別: fail closed（拒否）。
-#   出力: 合格時 stdout に "ok"（exit 0）/ 不合格時 stderr に理由（exit 非ゼロ）。
+#   出力: 合格時は stdout に何も書かない（exit 0。終了コードのみで成否を表現する）/ 不合格時は
+#     stderr に理由（exit 非ゼロ）。
+#   【重要・不具合A（実機で発生した回帰）への対処】この関数は「stdout が結果チャネルである経路」
+#   （例: xrev_transport_review は stdout に reviewer の review JSON だけを返す契約）から直接・間接に
+#   呼ばれる。以前は合格時に stdout へ "ok" を書いており、呼び出し側の1箇所（xrev_transport_review の
+#   (iii) 送信ゲート内、`_xrev_verify_reviewer_policy` 経由）でリダイレクトが漏れていたため、"ok" が
+#   review JSON の手前に混入して JSON パース失敗（decision=invalid）を起こした。原因は「呼び出し側の
+#   リダイレクト漏れ」ではなく「この関数が stdout を結果チャネルとして使っていたこと」自体なので、
+#   合格時に何も出力しないことで、この種の事故を構造的に起こり得なくする。
 _xrev_verify_effective_policy() {
   local prog
   read -r -d '' prog <<'PY' || true
@@ -1527,14 +1542,14 @@ if kind == "codex":
         die("sandbox の実効値が read-only ではありません: %s" % sandbox_vals[0])
     if approval_vals[0] != "never":
         die("承認ポリシーの実効値が never ではありません: %s" % approval_vals[0])
-    sys.stdout.write("ok")
+    # 合格。何も出力しない（成否は終了コードのみで表現する。関数コメント「不具合Aへの対処」参照）。
 elif kind == "claude":
     perm_vals = collect(argv, "--permission-mode", None)
     if len(perm_vals) != 1:
         die("--permission-mode 指定が一意ではありません（%d 件）" % len(perm_vals))
     if perm_vals[0] != "plan":
         die("--permission-mode の実効値が plan ではありません: %s" % perm_vals[0])
-    sys.stdout.write("ok")
+    # 合格。何も出力しない（同上）。
 else:
     die("未知の reviewer 種別です: %s" % kind)
 PY
@@ -1616,7 +1631,11 @@ PY
   while IFS= read -r _la_out_line; do
     [[ -n "$_la_out_line" ]] && args+=("$_la_out_line")
   done <<< "$out"
-  if ! _xrev_verify_effective_policy "$name" "${args[@]+"${args[@]}"}" >/dev/null 2>&1; then
+  # stdout のみ捨てる（合格時は不具合Aの対処により何も出さないが念のための防御）。stderr は
+  # 捨てない: ここは「決定した launch 引数が壊れている」という実害のある失敗であり、
+  # _xrev_verify_effective_policy が返す具体的な理由（どの軸が・どんな値で不合格か）は
+  # 診断に必要なので、以降の _log による総括メッセージに加えて表示させる。
+  if ! _xrev_verify_effective_policy "$name" "${args[@]+"${args[@]}"}" >/dev/null; then
     _log "reviewer(${name}) の launch 引数が安全ポリシー（read-only 強制）を満たしません（config/env の reviewer_launch_args を確認してください）。"
     return 1
   fi
@@ -1693,6 +1712,9 @@ _xrev_classify_reviewer() {
     _log "警告: XREV_ALLOW_UNVERIFIED_REVIEWER=1 のため既存 reviewer の安全ポリシー検証を省略します（read-only/承認 never を保証しません）。"
     printf 'present'; return 0
   fi
+  # stderr も含めて捨てる: ここは「分類」であり policy_mismatch は失敗ではなく正常な分類結果の
+  # 1つ（呼び出し元の xrev_ensure_reviewer が rc=27 を受けて既に案内メッセージを出す）。
+  # _xrev_verify_effective_policy の理由文言を二重に出す必要はない。
   if _xrev_verify_reviewer_policy "$_XREV_RES_REF" >/dev/null 2>&1; then
     printf 'present'; return 0
   fi
@@ -1833,6 +1855,47 @@ xrev_ensure_reviewer() {
   return 20
 }
 
+# 送信ゲート統合ヘルパ（不具合B対応: 安全ポリシー検証の TOCTOU）。
+# 【背景】従来は安全ポリシー実効検証を送信処理の序盤（旧(iii)直後の(iii')）で1回だけ行い、
+# その後の「本文送信直前(iii-b)」「Enter直前の最終ゲート(iii-c)」「Enter再送前」の各ゲートは
+# _verify_reviewer_process（プロセス名のみ）しか再検証していなかった。初回のポリシー検証後に
+# reviewer プロセスが終了し、同名だが書き込み可能な reviewer（例 --sandbox workspace-write の
+# codex）が起動し直した場合、本文送信〜Enter確定までの描画待ち（最大約10秒）の窓で「プロセス名は
+# 一致するがポリシーは既に崩れている」状態を名前検証だけが通過し、無承認のまま payload を確定できて
+# しまう。既存の「shell 誤送信対策(プロセス証明の3点検査)」と同じ形の TOCTOU が安全ポリシー側に
+# 残っていた。
+# 【対処】プロセス証明と安全ポリシー検証を「常に同じゲート」でまとめて行う。送信経路の全ゲート
+# （早期棄却・本文送信直前・Enter直前・Enter再送前）をこのヘルパの呼び出しに置き換え、片方だけを
+# 再検証して他方が古いまま残る構造的な穴を塞ぐ。
+#   入力: $1=surface
+#   出力: なし（理由に応じたログは呼び出し側が出す。ゲートごとに文言が異なるため）。
+#   exit: 0=プロセス証明・安全ポリシーとも確認 / 17=プロセス不一致 / 27=安全ポリシー不一致
+# 【キャッシュしない】安全ポリシー検証は ps を追加で叩くため、ゲートのたびに実行コストが増える。
+# それでもキャッシュしない: キャッシュした結果を後続ゲートで使い回すことは「検査した時点」と
+# 「実際に Enter を送る時点」を再び分離することになり、まさにこの関数が塞ごうとしている TOCTOU を
+# 再導入してしまう。可用性よりも安全側を優先し、毎回取り直す。
+# 【XREV_ALLOW_UNVERIFIED_REVIEWER=1】既存の opt-out 挙動を維持し、ポリシー検証部分だけを省略する
+# （プロセス証明は省略しない）。警告ログは1往復（xrev_transport_review 1回の呼び出し）につき1回だけ
+# 出す。ゲートは1往復で最大5回（(iii)/(iii-b)/(iii-c)/Enter再送最大2回）呼ばれ得るため、素朴に毎回
+# 警告すると同じ内容が繰り返しログに積まれる。xrev_transport_review の先頭で _XREV_UNVERIFIED_WARNED
+# をリセットし、このヘルパは「まだ警告していなければ出す」だけにする。
+_xrev_gate_reviewer() {
+  local surface="$1"
+  _verify_reviewer_process "$surface" || return 17
+  if [[ "${XREV_ALLOW_UNVERIFIED_REVIEWER:-}" == "1" ]]; then
+    if [[ "${_XREV_UNVERIFIED_WARNED:-}" != "1" ]]; then
+      _log "警告: XREV_ALLOW_UNVERIFIED_REVIEWER=1 のため reviewer の安全ポリシー検証を省略します（read-only/承認 never を保証しません）。"
+      _XREV_UNVERIFIED_WARNED=1
+    fi
+    return 0
+  fi
+  # stdout のみ捨てる（不具合Aの対処により合格時は何も出さない契約だが、念のための防御）。
+  # stderr は捨てない: 呼び出し側は理由文言をゲートごとに出し分けるため直接は使わないが、
+  # 診断の手がかりとして残す。
+  _xrev_verify_reviewer_policy "$surface" >/dev/null || return 27
+  return 0
+}
+
 # ── 公開 API ─────────────────────────────────────────────────────────────────
 
 # xrev_transport_review <payload_text>
@@ -1840,6 +1903,9 @@ xrev_ensure_reviewer() {
 #   成功: 0 / JSON を stdout。失敗: 非ゼロ / stderr にログ。
 xrev_transport_review() {
   local payload="$1"
+  # 不具合B対応: XREV_ALLOW_UNVERIFIED_REVIEWER=1 の警告は1往復につき1回に抑える
+  # （_xrev_gate_reviewer が複数回呼ばれるため。往復ごとに毎回リセットする）。
+  _XREV_UNVERIFIED_WARNED=""
   _cmux_preflight || return $?
   # 宛先解決（同一WSスコープ）。グローバル(_XREV_RES_*)を使うためサブシェルにしない。
   # 失敗コード（10/15/16/3）はそのまま返す（review-loop 側で transport_reason に写像）。
@@ -1907,26 +1973,22 @@ xrev_transport_review() {
     *) _log "reviewer surface($surface)の画面取得に繰り返し失敗しました（中止）。"; return 11 ;;
   esac
 
-  # (iii) プロセス証明（前景プロセスが許可名=$REVIEWER_PROCESS か。Codex 終了後に shell へ戻った端末への誤送信を防ぐ）
-  # ここは早期棄却のゲート。payload 構築や画面読み取りの前に壊れた宛先を弾く。
-  if ! _verify_reviewer_process "$surface"; then
-    _log "reviewer surface($surface)の前景プロセスが '$REVIEWER_PROCESS' ではありません（reviewer 未稼働/別用途の端末の恐れ）。送信を中止します。"
-    _log "復旧: 当該ペインで codex を起動し直すか、タブ名 '$REVIEWER_PANE_TITLE' が別用途の端末に付いていないか確認してください。"
-    return 17
-  fi
-
-  # (iii') 安全ポリシー実効検証（指摘3）。既存 reviewer をそのまま「採用」する経路でも、
-  # sandbox=read-only かつ承認=never が実際に有効であることを送信前に確認する。手動起動・旧版の
-  # 書き込み可能なペインへ payload を送り、無承認でワークスペースを変更されてしまう事故を防ぐ。
-  # 既定は検証する（fail closed）。XREV_ALLOW_UNVERIFIED_REVIEWER=1（明示 opt-in）のときだけ省略する
-  # （手動で用意した reviewer を使う運用を壊さないための後方互換）。
-  if [[ "${XREV_ALLOW_UNVERIFIED_REVIEWER:-}" == "1" ]]; then
-    _log "警告: XREV_ALLOW_UNVERIFIED_REVIEWER=1 のため reviewer の安全ポリシー検証を省略します（read-only/承認 never を保証しません）。"
-  elif ! _xrev_verify_reviewer_policy "$surface"; then
-    _log "reviewer surface($surface)が安全ポリシー（read-only + 承認 never）で起動していません。送信を中止します。"
-    _log "復旧: ペインを閉じて ensure-reviewer で作り直すか、start-reviewer.sh で起動し直してください。"
-    return 27
-  fi
+  # (iii) 早期ゲート: プロセス証明＋安全ポリシー実効検証を同じゲートでまとめて行う（不具合B対応。
+  # 詳細は _xrev_gate_reviewer のコメント参照）。ここは早期棄却のゲート。payload 構築や画面読み取りの
+  # 前に壊れた宛先を弾く。
+  local gate_rc
+  _xrev_gate_reviewer "$surface"; gate_rc=$?
+  case "$gate_rc" in
+    0) ;;
+    17)
+      _log "reviewer surface($surface)の前景プロセスが '$REVIEWER_PROCESS' ではありません（reviewer 未稼働/別用途の端末の恐れ）。送信を中止します。"
+      _log "復旧: 当該ペインで codex を起動し直すか、タブ名 '$REVIEWER_PANE_TITLE' が別用途の端末に付いていないか確認してください。"
+      return 17 ;;
+    27)
+      _log "reviewer surface($surface)が安全ポリシー（read-only + 承認 never）で起動していません。送信を中止します。"
+      _log "復旧: ペインを閉じて ensure-reviewer で作り直すか、start-reviewer.sh で起動し直してください。"
+      return 27 ;;
+  esac
 
   # round_id（ラウンド識別子）と content_type を決め、payload を1物理行にエンコードする。
   # round_id は高エントロピー（衝突でスクロールバックの過去応答と混同しないため）。
@@ -1962,11 +2024,14 @@ xrev_transport_review() {
   [[ "$before_broken" =~ ^[0-9]+$ ]] || before_broken=0
 
   # (iii-b) 本文送信の直前に再検証。(iii) からベースライン取得（read-screen）を挟むため、
-  # その間に codex が終了していれば本文がシェルの入力バッファへ流れ込む。窓を最小化する。
-  if ! _verify_reviewer_process "$surface"; then
-    _log "本文送信の直前に reviewer の前景プロセスが変化しました（誤送信防止のため中止）。"
-    return 17
-  fi
+  # その間に reviewer が終了/入れ替わっていれば本文がシェルの入力バッファへ流れ込む、または
+  # 無承認で確定されうる。プロセス証明と安全ポリシーを同じゲートで再検証する（不具合B対応）。
+  _xrev_gate_reviewer "$surface"; gate_rc=$?
+  case "$gate_rc" in
+    0) ;;
+    17) _log "本文送信の直前に reviewer の前景プロセスが変化しました（誤送信防止のため中止）。"; return 17 ;;
+    27) _log "本文送信の直前に reviewer の安全ポリシーが不成立になりました（誤送信防止のため中止）。"; return 27 ;;
+  esac
 
   # 1物理行を送信 → 描画待ち → 切り詰め検出 → Enter 1回で確定。
   _cmux_send_line "$surface" "$line" || { _log "送信に失敗しました。"; return 11; }
@@ -1997,23 +2062,32 @@ xrev_transport_review() {
   fi
 
   # (iii-c) 最終ゲート: Enter の直前に再検証する。ここが安全目標の要。
-  # 本文送信から描画待ち・切り詰め検出まで最大10秒前後あり、その間に codex が終了すると本文は
-  # シェルの入力行に残る。しかも _check_paste_intact はシェルがエコーした行でも END マーカーを
-  # 見つけて "ok" を返すため、切り詰め検出は誤送信の防波堤にならない。Enter を送るか否かを
-  # 決める直前の観測だけが、payload がコマンド実行される事故を防げる。
-  if ! _verify_reviewer_process "$surface"; then
-    _xrev_log_tainted_pane "$surface" "Enter 送信の直前に reviewer の前景プロセスが変化しました。コマンド実行を避けるため Enter を送りません。"
-    return 17
+  # 本文送信から描画待ち・切り詰め検出まで最大10秒前後あり、その間に reviewer が終了する/
+  # 同名だが書き込み可能なプロセスへ挿げ替わる窓がある。しかも _check_paste_intact はシェルが
+  # エコーした行でも END マーカーを見つけて "ok" を返すため、切り詰め検出は誤送信の防波堤にならない。
+  # Enter を送るか否かを決める直前に、プロセス証明と安全ポリシーを同じゲートで再検証する
+  # （不具合B対応）ことだけが、payload がコマンド実行される/無承認で確定される事故を防げる。
+  _xrev_gate_reviewer "$surface"; gate_rc=$?
+  if (( gate_rc != 0 )); then
+    local taint_reason
+    if (( gate_rc == 17 )); then
+      taint_reason="Enter 送信の直前に reviewer の前景プロセスが変化しました。コマンド実行を避けるため Enter を送りません。"
+    else
+      taint_reason="Enter 送信の直前に reviewer の安全ポリシーが不成立になりました。コマンド実行を避けるため Enter を送りません。"
+    fi
+    _xrev_log_tainted_pane "$surface" "$taint_reason"
+    return "$gate_rc"
   fi
 
   # (変更1) Enter 送信（プロンプト確定）の失敗を検知・限定リトライする。
   # 【なぜ無視してはいけないか】従来は `_cmux_submit || true` で失敗を握りつぶしていた。送信できて
   # いなければ Codex には何も届いておらず応答が来ないのは当然なのに、RESP_TIMEOUT(既定180秒)を
   # 丸ごと待って timeout(12) と誤診断してしまい、「送れなかった」と「Codex が返さない」を区別できない。
-  # 【再試行の安全条件】Enter の再送は「前景が codex のまま」のときだけ安全である。codex が死んで
-  # shell に落ちていれば Enter はコマンド実行になってしまう。そのため各再試行の直前に必ず
-  # _verify_reviewer_process を再実行し、前景が変化していたら再試行せず (iii-c) と同じ汚染ペイン
-  # 扱い（return 17）にする。この安全条件は絶対に外さないこと。
+  # 【再試行の安全条件】Enter の再送は「前景が codex のまま、かつ安全ポリシーが崩れていない」ときだけ
+  # 安全である。codex が死んで shell に落ちていれば Enter はコマンド実行になってしまうし、書き込み
+  # 可能な同名プロセスへ挿げ替わっていれば無承認で確定してしまう。そのため各再試行の直前に必ず
+  # _xrev_gate_reviewer（プロセス証明＋安全ポリシー、不具合B対応）を再実行し、いずれかが崩れていたら
+  # 再試行せず (iii-c) と同じ汚染ペイン扱いにする。この安全条件は絶対に外さないこと。
   local submit_tries=0 submit_max_retries=2 submit_ok=0
   while :; do
     if _cmux_submit "$surface"; then
@@ -2023,9 +2097,16 @@ xrev_transport_review() {
     (( submit_tries >= submit_max_retries )) && break
     submit_tries=$(( submit_tries + 1 ))
     _xrev_sleep 1
-    if ! _verify_reviewer_process "$surface"; then
-      _xrev_log_tainted_pane "$surface" "Enter 再送の直前に reviewer の前景プロセスが変化しました。コマンド実行を避けるため再送しません。"
-      return 17
+    _xrev_gate_reviewer "$surface"; gate_rc=$?
+    if (( gate_rc != 0 )); then
+      local taint_reason
+      if (( gate_rc == 17 )); then
+        taint_reason="Enter 再送の直前に reviewer の前景プロセスが変化しました。コマンド実行を避けるため再送しません。"
+      else
+        taint_reason="Enter 再送の直前に reviewer の安全ポリシーが不成立になりました。コマンド実行を避けるため再送しません。"
+      fi
+      _xrev_log_tainted_pane "$surface" "$taint_reason"
+      return "$gate_rc"
     fi
   done
   if (( submit_ok == 0 )); then

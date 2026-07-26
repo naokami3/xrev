@@ -255,7 +255,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | 14   | reviewer surface が実ターミナルでない（read-screen 不可。cmux エージェント統合パネル等） |
 | 15   | ワークスペース不整合（caller WS 特定不能 / 解決後に WS が変化 / 明示が別WS） |
 | 16   | 同一WS内で reviewer タイトルが複数一致（曖昧） |
-| 17   | プロセス証明失敗（対象 surface の前景プロセスが許可名でない / top・ps 取得不可 / Enter 直前に前景が変化） |
+| 17   | プロセス証明失敗（対象 surface の前景プロセスが許可名でない / top・ps 取得不可 / 各送信ゲート（早期棄却・本文送信直前・Enter直前・Enter再送前）のいずれかで前景が変化） |
 | 18   | 参照モードなのに同一WS解決でない（reference モードを拒否し inline へ切替を促す） |
 | 19   | reviewer 自動生成は試みたが codex の起動を確認できなかった。launch 引数（read-only 強制）の決定失敗・起動未確認・実効未確認のいずれも含む（autocreate_failed） |
 | 20   | reviewer 生成の競合で期限切れ（別 primary が生成中 or 残留ロック→人間。reviewer_contention） |
@@ -263,7 +263,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | 24   | センチネルで完成した応答はあるが妥当な review JSON を含まない（契約違反。invalid_response）。`timeout`(12) と区別され、primary は再出力を促す。 |
 | 25   | Enter 送信(プロンプト確定)に失敗（最大2回まで再試行しても失敗）。本文は入力欄に残存。`timeout`(12) と区別される（submit_failed）。 |
 | 26   | wire（1物理行）の文字数が上限(`wire_max_chars`)を超過（cmux へは未送信。payload_too_large） |
-| 27   | reviewer が安全ポリシー（sandbox=read-only かつ承認=never）で起動していない（最終 argv の意味検証に不合格。reviewer_policy_mismatch）。`XREV_ALLOW_UNVERIFIED_REVIEWER=1` で opt-out 可（下記「reviewer read-only 強制」参照） |
+| 27   | reviewer が安全ポリシー（sandbox=read-only かつ承認=never）で起動していない（最終 argv の意味検証に不合格。reviewer_policy_mismatch）。`xrev_transport_review` では各送信ゲート（早期棄却・本文送信直前・Enter直前・Enter再送前）でプロセス証明と同じゲートで毎回再検証される（不具合Bへの対処。TOCTOU防止）。`XREV_ALLOW_UNVERIFIED_REVIEWER=1` で opt-out 可（下記「reviewer read-only 強制」参照） |
 | 30   | cmux CLI が見つからない |
 | 31   | cmux 接続不可（preflight 失敗・ペイン外実行） |
 
@@ -399,6 +399,9 @@ SKILL.md は「reviewer = レビュー専用・read-only」と約束する。こ
      従来の「launch 引数が部分文字列として含まれるか」という判定は、launch 引数の**後ろ**に
      危険な引数が付いていても部分一致さえ満たせば通ってしまう欠陥があったため置き換えた。
   4. **既存ペインを「採用」する経路の実効検証**（`_xrev_verify_reviewer_policy`。下記参照）。
+     `xrev_transport_review` では不具合Bの対処により、この検証を送信序盤の1回だけでなく
+     `_xrev_gate_reviewer` を介して全ての送信ゲート（早期棄却・本文送信直前・Enter直前・
+     Enter再送前）で毎回行う（詳細は「送信前ゲート」節）。
 - **単一の生成関数（型検証）**: `transport.sh` の `_xrev_reviewer_launch_args <reviewer バイナリ名>` を
   両起動経路が共有する。優先順位は env `XREV_REVIEWER_LAUNCH_ARGS`（JSON 配列文字列）> config の
   `reviewer_launch_args[<basename>]`。型検証（object であること・キー存在・文字列のみの配列・
@@ -416,9 +419,10 @@ SKILL.md は「reviewer = レビュー専用・read-only」と約束する。こ
 - **既存ペインを「採用」する経路の実効検証（指摘3への対処）**: 従来は前景プロセス名が
   `reviewer_process`（既定 `codex`）と一致することしか見ておらず、手動起動・旧版の書き込み可能な
   ままの端末がそのまま present（採用）扱いになり得た。`_xrev_classify_reviewer` の present 判定
-  （`_verify_reviewer_process` 成功後）と、送信直前の `xrev_transport_review` の双方で
-  `_xrev_verify_reviewer_policy` を通し、対象 surface の前景プロセスの argv を取得して意味検証に
-  かける。不合格なら `_xrev_classify_reviewer` は `policy_mismatch` を返し `exit 27`、
+  （`_verify_reviewer_process` 成功後）と、`xrev_transport_review` の全送信ゲート（`_xrev_gate_reviewer`
+  経由。不具合Bへの対処により1回だけでなく毎ゲート）の双方で `_xrev_verify_reviewer_policy` を通し、
+  対象 surface の前景プロセスの argv を取得して意味検証にかける。不合格なら `_xrev_classify_reviewer`
+  は `policy_mismatch` を返し `exit 27`、
   `xrev_ensure_reviewer` / `xrev_transport_review` の呼び出し側はこれを受けて「ペインを閉じて
   ensure-reviewer で作り直すか、start-reviewer.sh で起動し直してください」と案内して中止する。
   既定はこの検証を行う（fail closed）。`XREV_ALLOW_UNVERIFIED_REVIEWER=1`（明示 opt-in）のときだけ
@@ -493,12 +497,16 @@ cmux に流さず、reviewer に「自分で diff を取得してレビュー」
    今も同一WSに存在し、呼び出し元も同一WSに居続けているかを確認（ref 再利用・WS移動・差し替えを `exit 15` で弾く）。
 2. **端末性プリフライト**。`read-screen` の成否で判定（成功＝空でも usable / `not a terminal` 等＝`exit 14` /
    一時失敗は限定リトライ）。cmux のエージェント統合パネル（PTY 無し）は read-screen 不可なので reviewer に使えない。
-3. **プロセス証明**。対象 surface の tty で**前景プロセスグループ**を握るプロセスが `reviewer_process`
-   （既定 `codex`）であることを確認（`exit 17`）。Codex 終了後に shell へ戻った端末へ payload を送って
-   **コマンド実行**される事故を防ぐ。手順は `cmux top --all --processes --format tsv` で対象 surface の
-   直下プロセスを **PID 付き**で取得し、その PID 群を `ps -o pid=,pgid=,tpgid=,comm=` に渡して
-   `pgid == tpgid` を満たす1件を特定、その `comm` の basename を許可名と完全一致で照合する。
-   tree の `identify` はプロセスを出さないため top を使う。
+3. **プロセス証明＋安全ポリシー実効検証（`_xrev_gate_reviewer` に統合。不具合Bへの対処）**。
+   対象 surface の tty で**前景プロセスグループ**を握るプロセスが `reviewer_process`
+   （既定 `codex`）であることを確認し（`exit 17`）、**同じゲートで続けて**前景プロセスの argv を
+   取得し `_xrev_verify_effective_policy` により sandbox=read-only かつ承認=never が実効に有効かを
+   確認する（`exit 27`）。Codex 終了後に shell へ戻った端末へ payload を送って**コマンド実行**される
+   事故と、無承認でワークスペースを変更されてしまう事故の両方をここで防ぐ。手順は
+   `cmux top --all --processes --format tsv` で対象 surface の直下プロセスを **PID 付き**で取得し、
+   その PID 群を `ps -o pid=,pgid=,tpgid=,comm=`（安全ポリシー検証時はさらに `args=`）に渡して
+   `pgid == tpgid` を満たす1件を特定、その `comm` の basename を許可名と完全一致で照合したうえで、
+   その argv を意味検証にかける。tree の `identify` はプロセスを出さないため top を使う。
 
    直下プロセスの**件数**では判定しない。実機の cmux では surface 直下が常に
    `[アプリ, sleep, ログインシェル]` の複数件になり、「直下が厳密に1件」は原理的に成立しない
@@ -507,14 +515,27 @@ cmux に流さず、reviewer に「自分で diff を取得してレビュー」
    `ps` に委ねる。
 
    検査は **3 点**で行う: (iii) payload 構築前の早期棄却 / (iii-b) 本文送信の直前 /
-   (iii-c) **Enter の直前（最終ゲート）**。(iii-c) で前景が変わっていれば Enter を送らずに中止する
-   （送信済みの本文が入力行に残る旨を案内する）。限界は
+   (iii-c) **Enter の直前（最終ゲート）**。Enter 送信が失敗し再送する場合も再送の直前に同じゲートを
+   通す。いずれの点でも**プロセス証明と安全ポリシー実効検証を必ず同じゲートで行い、どちらか一方
+   だけを再検証して他方が古いまま残ることを許さない**（後述「TOCTOU は安全ポリシー側にも残る」参照）。
+   (iii-c) やそれ以降のゲートで不一致（前景プロセス不一致・安全ポリシー不成立のいずれか）が
+   検出されれば Enter を送らずに中止し、送信済みの本文が入力行に残る旨を案内する。限界は
    [`../docs/security-design.md`](../docs/security-design.md) を参照。
-4. **(iii') 安全ポリシー実効検証**。(iii) の直後、payload 構築の前に `_xrev_verify_reviewer_policy` で
-   前景プロセスの argv を取得し、`_xrev_verify_effective_policy` により sandbox=read-only かつ
-   承認=never が実効に有効かを確認する（`exit 27`）。前景プロセス名の一致だけでは、手動起動・旧版の
-   書き込み可能なままの端末が採用されてしまうため（詳細は「reviewer read-only 強制」参照）。既定は
-   検証する（fail closed）。`XREV_ALLOW_UNVERIFIED_REVIEWER=1` で opt-out 可。
+
+   `XREV_ALLOW_UNVERIFIED_REVIEWER=1`（明示 opt-in）のときは各ゲートの安全ポリシー部分だけを
+   省略する（プロセス証明は省略しない）。既定は検証する（fail closed）。警告ログは1往復
+   （`xrev_transport_review` の1回の呼び出し）につき1回だけ出す（ゲートごとに出すと同じ警告が
+   最大5回積み重なるため）。
+
+   **TOCTOU は安全ポリシー側にも残る（不具合Bの教訓）**: 従来は安全ポリシー実効検証を送信処理の
+   序盤（旧(iii)直後の(iii')）で1回だけ行い、以降の各ゲートはプロセス名しか再検証していなかった。
+   初回検証後に reviewer プロセスが終了し、同名だが書き込み可能な reviewer（例
+   `--sandbox workspace-write` の codex）が起動し直した場合、本文送信〜Enter確定までの描画待ち
+   （最大約10秒）の窓で「名前は一致するがポリシーは崩れている」状態を名前検証だけが通過し、
+   無承認のまま payload を確定できてしまっていた。プロセス証明と安全ポリシー検証を常に同じゲートで
+   行う現在の構成はこれを塞ぐが、**検査から実際の Enter 送出までのごく短い競合窓自体は原理的に
+   排除できない**（安全ポリシー検証は ps を追加で叩くためコストが増えるが、結果をキャッシュすると
+   まさにこの TOCTOU を再導入するためキャッシュしない）。
 
 `transport.sh resolve --json` は機械可読の診断契約（`{ok, exit_code, surface_ref, surface_uuid, workspace,
 resolve_path}`）を返す。`resolve_path` は `explicit|same_ws|global`。

@@ -150,6 +150,21 @@ assert_rc "config の codex launch 引数が workspace-write は非ゼロ（意�
 rm -f "$tmpcfg_j2"
 
 # ── (k) _xrev_verify_effective_policy（最終 argv の意味検証。正典）の単体テスト ──────
+
+# 不具合A回帰防止: 合格時は stdout に何も書かない（終了コードのみで成否を表現する契約）。
+# 【背景】以前はここで stdout に "ok" を書いており、この関数を stdout がそのまま結果チャネルに
+# なる経路（xrev_transport_review）から呼び出す箇所でリダイレクトが漏れて "ok" が review JSON の
+# 手前に混入し、JSON パース失敗（decision=invalid）を実機で起こした。原因は「呼び出し側の
+# リダイレクト漏れ」ではなく本関数が stdout を結果チャネルとして使っていたことなので、
+# 合格時に完全に無出力であることをこの関数自体の契約として固定する。
+out="$(_xrev_verify_effective_policy codex --sandbox read-only --ask-for-approval never)"; rc=$?
+assert_rc "policy: 合格時のrcは0" 0 "$rc"
+assert_eq "policy: 合格時に stdout へ何も書かない(codex)" "" "$out"
+
+out="$(_xrev_verify_effective_policy claude --permission-mode plan)"; rc=$?
+assert_rc "policy: 合格時のrcは0(claude)" 0 "$rc"
+assert_eq "policy: 合格時に stdout へ何も書かない(claude)" "" "$out"
+
 # 合格: 長形式・=形式・短縮形・結合形式のいずれでも sandbox=read-only かつ承認=never なら合格。
 _xrev_verify_effective_policy codex --sandbox read-only --ask-for-approval never >/dev/null
 assert_rc "policy: 長形式(空白区切り)は合格" 0 "$?"
