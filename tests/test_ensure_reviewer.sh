@@ -16,17 +16,23 @@ out="$(TMPDIR=/tmp _xrev_lock_path 'ABC-12.3')"
 assert_eq "lock path: TMPDIR配下＋サニタイズ" "/tmp/xrev-reviewer-ABC_12_3.lock" "$out"
 assert_contains "lock は /tmp 配下（リポジトリに作らない）" "$out" "/tmp/"
 
-# ── _xrev_classify_reviewer（依存3関数をスタブ）──
+# ── _xrev_classify_reviewer（依存4関数をスタブ）──
+# 指摘3への対処: present 判定は _verify_reviewer_process の成功後、さらに
+# _xrev_verify_reviewer_policy（安全ポリシーの実効検証）を通す。既定は検証する(fail closed)。
+# XREV_ALLOW_UNVERIFIED_REVIEWER=1 のときだけ検証を省略して present を返す（後方互換）。
 _orig_resolve="$(declare -f _cmux_resolve_surface)"
 _orig_probe="$(declare -f _probe_terminal_usable)"
 _orig_proc="$(declare -f _verify_reviewer_process)"
-_set_stubs() { # $1=resolve_rc $2=probe_out $3=proc_rc
+_orig_policy="$(declare -f _xrev_verify_reviewer_policy)"
+_set_stubs() { # $1=resolve_rc $2=probe_out $3=proc_rc $4=policy_rc(既定0=安全ポリシー合格)
+  local policy_rc="${4:-0}"
   eval "_cmux_resolve_surface(){ _XREV_RES_REF=surface:7; _XREV_RES_UUID=u7; _XREV_RES_WS=w; return $1; }"
   eval "_probe_terminal_usable(){ printf '%s' '$2'; }"
   eval "_verify_reviewer_process(){ return $3; }"
+  eval "_xrev_verify_reviewer_policy(){ return $policy_rc; }"
 }
 _set_stubs 0 usable 0
-out="$(_xrev_classify_reviewer)"; assert_rc "resolve0+usable+codex → present(0)" 0 "$?"
+out="$(_xrev_classify_reviewer)"; assert_rc "resolve0+usable+codex+安全policy → present(0)" 0 "$?"
 assert_eq "present 文字列" "present" "$out"
 _set_stubs 0 non_terminal 0
 out="$(_xrev_classify_reviewer)"; assert_rc "非端末 → 14" 14 "$?"
@@ -39,7 +45,21 @@ out="$(_xrev_classify_reviewer)"; assert_rc "解決失敗(10) → absent" 10 "$?
 assert_eq "absent 文字列" "absent" "$out"
 _set_stubs 16 usable 0
 out="$(_xrev_classify_reviewer)"; assert_rc "曖昧(16) → ambiguous" 16 "$?"
-eval "$_orig_resolve"; eval "$_orig_probe"; eval "$_orig_proc"
+
+# ── 安全ポリシー実効検証（指摘3）: 既存ペインの argv が安全でない → policy_mismatch(27) ──────
+_set_stubs 0 usable 0 1
+out="$(_xrev_classify_reviewer 2>/dev/null)"; assert_rc "usable+codex だが安全policy不合格 → policy_mismatch(27)" 27 "$?"
+assert_eq "policy_mismatch 文字列" "policy_mismatch" "$out"
+
+# XREV_ALLOW_UNVERIFIED_REVIEWER=1（明示 opt-in）なら安全policy不合格でも present（警告付き・後方互換）
+_pm_warn="$(mktemp)"
+out="$(XREV_ALLOW_UNVERIFIED_REVIEWER=1 _xrev_classify_reviewer 2>"$_pm_warn")"; rc=$?
+assert_rc "opt-out env は安全policy不合格でも present(0)" 0 "$rc"
+assert_eq "opt-out env でも present 文字列" "present" "$out"
+assert_contains "opt-out env は警告ログを出す" "$(cat "$_pm_warn")" "XREV_ALLOW_UNVERIFIED_REVIEWER"
+rm -f "$_pm_warn"
+
+eval "$_orig_resolve"; eval "$_orig_probe"; eval "$_orig_proc"; eval "$_orig_policy"
 
 # ── _xrev_create_reviewer: launch 引数（read-only 強制）の実効検証 ─────────────────
 # 生成本体そのものを cmux 非依存で動かすため、cmux 呼び出し・宛先解決・プロセス証明・

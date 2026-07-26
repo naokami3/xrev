@@ -63,6 +63,19 @@ while IFS= read -r _xrev_launch_line; do
   [[ -n "$_xrev_launch_line" ]] && launch_args+=("$_xrev_launch_line")
 done <<< "$_xrev_launch_out"
 
+# 【最終ゲート（指摘2への対処）】上の _xrev_reject_unsafe_reviewer_args は前方一致の拒否リストに
+# すぎず、codex の短縮形 `-s`/結合形式 `-sdanger-full-access` 等の後置上書きを漏らしうる
+# （拒否リストに `-s` を足しても、リスト方式である限り将来の新形式には追随できない）。正典の判定は
+# 「launch 引数 + ユーザー追加引数」を連結した**最終 argv**に対する意味検証
+# （_xrev_verify_effective_policy）であり、ここで安全ポリシー（sandbox=read-only かつ承認=never）が
+# 一意に有効であることを確認してから exec する。
+_xrev_codex_kind="$(basename -- "$codex_bin")"
+if ! _xrev_verify_effective_policy "$_xrev_codex_kind" "${launch_args[@]+"${launch_args[@]}"}" "$@" >/dev/null 2>&1; then
+  echo "[start-reviewer] 最終的な起動引数（launch 引数＋追加引数）が安全ポリシー（read-only 強制）を一意に満たしません。タイトルは変更していません。" >&2
+  echo "[start-reviewer] sandbox/承認系フラグを追加していないか、同じ軸を二重に指定していないか確認してください。" >&2
+  exit 64
+fi
+
 if ! _cmux_set_title "$REVIEWER_PANE_TITLE"; then
   echo "[start-reviewer] タブタイトルの設定に失敗しました（rename-tab 不可）。" >&2
   exit 1

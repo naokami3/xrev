@@ -637,16 +637,142 @@ _verify_reviewer_process() {
   return 1
 }
 
-# 起動後の実効検証: reviewer 自動生成（_xrev_create_reviewer）が読み込ませた launch 引数
-# （read-only 強制）が、実際に対象 surface の直下プロセスのコマンドラインへ含まれていることを
-# 確認する。「起動できた」だけでは read-only が実際に効いているかは分からない
-# （引数生成のバグ・cmux send の欠落等でも起動確認自体は通ってしまうため）ので、
-# ここで実プロセスの args を見て機械的に裏取りする。
-#   入力: $1=surface ref, $2..=期待する launch 引数（可変長・0件可）
-#   出力: なし（exit のみ）。exit: 0=直下プロセスのいずれかで全 launch 引数を確認できた（0件なら
-#   直下プロセスの存在のみで成立） / 1=確認できない（呼び出し側は起動を採用しない＝fail closed）
+# 純粋関数: 対象 surface の前景プロセス（tty のフォアグラウンドプロセスグループを握る直下
+# プロセス）の argv を取得する。判定原理は `_decide_foreground_owner` と同じ（pgid==tpgid の
+# 直下プロセスが一意に決まること・許可名と一致すること）だが、`_decide_foreground_owner` は
+# 既存のテスト（test_send_gates.sh）が固定する契約（bool 相当の許可/拒否のみを返す）を持つため、
+# それを変えずに argv も欲しい本用途のために別関数として複製する（意図的な重複。判定条件は
+# 一字一句合わせること）。
+#   入力: $1=許可名(basename), env XREV_DIRECT="PID<TAB>name" 行群(_top_surface_processes 出力),
+#         env XREV_PS="pid pgid tpgid comm" 行群(_ps_snapshot 出力),
+#         env XREV_PS_ARGS="pid args" 行群(_ps_args_snapshot 出力)
+#   出力: 前景プロセスの argv[0]（実行ファイルパス）を除いた引数列を1行1要素で stdout。
+#   exit: 0=前景プロセスを一意に特定し許可名と一致 / 1=特定不能・不一致（fail closed）
+_xrev_foreground_argv() {
+  XREV_DIRECT="${XREV_DIRECT:-}" XREV_PS="${XREV_PS:-}" XREV_PS_ARGS="${XREV_PS_ARGS:-}" python3 - "$1" <<'PY'
+import os, sys
+
+def as_int(s):
+    try:
+        return int(s, 10)
+    except ValueError:
+        return None
+
+expected = os.path.basename(sys.argv[1]) if len(sys.argv) > 1 else ""
+if not expected:
+    sys.exit(1)
+
+direct = {}
+for line in os.environ.get("XREV_DIRECT", "").splitlines():
+    if not line.strip():
+        continue
+    parts = line.split("\t")
+    if len(parts) < 2:
+        sys.exit(1)
+    pid = as_int(parts[0].strip())
+    if pid is None or pid <= 0 or pid in direct:
+        sys.exit(1)
+    direct[pid] = parts[1].strip()
+if not direct:
+    sys.exit(1)
+
+rows = {}
+for line in os.environ.get("XREV_PS", "").splitlines():
+    if not line.strip():
+        continue
+    f = line.split(None, 3)
+    if len(f) < 4:
+        sys.exit(1)
+    pid, pgid, tpgid = as_int(f[0]), as_int(f[1]), as_int(f[2])
+    if pid is None or pgid is None or tpgid is None or pid in rows:
+        sys.exit(1)
+    rows[pid] = (pgid, tpgid, f[3].strip())
+if set(rows) != set(direct):
+    sys.exit(1)
+
+tpgids = {v[1] for v in rows.values()}
+if len(tpgids) != 1:
+    sys.exit(1)
+tpgid = tpgids.pop()
+if tpgid <= 0:
+    sys.exit(1)
+fg = [pid for pid, v in rows.items() if v[0] == tpgid]
+if len(fg) != 1:
+    sys.exit(1)
+fg_pid = fg[0]
+actual = os.path.basename(rows[fg_pid][2])
+if actual != expected:
+    sys.exit(1)
+
+args_map = {}
+for line in os.environ.get("XREV_PS_ARGS", "").splitlines():
+    if not line.strip():
+        continue
+    f = line.split(None, 1)
+    pid = as_int(f[0])
+    if pid is None:
+        continue
+    args_map[pid] = f[1] if len(f) > 1 else ""
+argline = args_map.get(fg_pid)
+if argline is None:
+    sys.exit(1)
+for a in argline.split()[1:]:
+    print(a)
+sys.exit(0)
+PY
+}
+
+# 既存 reviewer を「採用」する経路（_xrev_classify_reviewer の present 判定・および送信直前の
+# xrev_transport_review）の実効ポリシー検証（指摘3）。対象 surface の前景プロセスの argv を取得し、
+# `_xrev_verify_effective_policy` で安全ポリシー（sandbox=read-only かつ承認=never）が実効に
+# 有効かを確認する。従来は前景プロセス名が REVIEWER_PROCESS と一致することしか見ておらず、手動起動・
+# 旧版の書き込み可能なペインがそのまま採用され得た。
+#   入力: $1=surface ref
+#   出力: なし（exit のみ）。exit 0=安全ポリシー確認 / 1=確認できない（fail closed）
+_xrev_verify_reviewer_policy() {
+  local surface="$1" top direct ps_out ps_args_out fg_argv
+  top="$(_cmux_top_processes)"
+  if [[ -z "$top" ]]; then
+    _log "cmux top を取得できません（既存 reviewer の安全ポリシー検証不可）。"
+    return 1
+  fi
+  direct="$(XREV_TOP="$top" _top_surface_processes "$surface")"
+  if [[ -z "$direct" ]]; then
+    _log "reviewer surface($surface)の直下プロセスを特定できません（安全ポリシー検証不可）。"
+    return 1
+  fi
+  ps_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_snapshot)"
+  ps_args_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_args_snapshot)"
+  if ! fg_argv="$(XREV_DIRECT="$direct" XREV_PS="$ps_out" XREV_PS_ARGS="$ps_args_out" _xrev_foreground_argv "$REVIEWER_PROCESS")"; then
+    _log "reviewer surface($surface)の前景プロセスの argv を特定できません（安全ポリシー検証不可）。"
+    return 1
+  fi
+  local -a fg_args=()
+  local _fl
+  while IFS= read -r _fl; do
+    [[ -n "$_fl" ]] && fg_args+=("$_fl")
+  done <<< "$fg_argv"
+  _xrev_verify_effective_policy "$(basename -- "$REVIEWER_PROCESS")" "${fg_args[@]+"${fg_args[@]}"}"
+}
+
+# 起動後の実効検証: reviewer 自動生成（_xrev_create_reviewer）が起動したプロセスの実コマンド
+# ラインが、安全ポリシー（read-only 強制）を一意に満たしていることを確認する。「起動できた」
+# だけでは read-only が実際に効いているかは分からない（引数生成のバグ・cmux send の欠落等でも
+# 起動確認自体は通ってしまうため）ので、ここで実プロセスの args を見て機械的に裏取りする。
+#
+# 【指摘2への対処】従来は「期待する launch 引数が部分文字列として含まれるか」の判定だったため、
+# launch 引数の**後ろ**に危険な引数（例 `-s danger-full-access`）が付いていても、期待した部分
+# 文字列さえ含まれていれば通ってしまっていた。ここでは部分文字列判定をやめ、実コマンドラインを
+# argv へ分解して `_xrev_verify_effective_policy` の意味検証（最終 argv 全体で安全ポリシーが
+# 一意に有効か）に通す。
+#   入力: $1=surface ref, $2=reviewer 種別（basename。codex/claude）
+#   出力: なし（exit のみ）。exit: 0=直下プロセスのいずれかで安全ポリシーの実効を確認できた /
+#   1=確認できない（呼び出し側は起動を採用しない＝fail closed）
+# 【argv 分解を空白区切りで済ませる理由】launch 引数の要素は印字可能ASCIIのみ・空文字列不可という
+# 型検証（_xrev_reviewer_launch_args）を経ており、要素自体に空白を含める運用は想定していない
+# （含めた場合は分解がずれて意味検証が拒否側に倒れるだけで、安全側にしか壊れない）。
 _verify_reviewer_launch_args() {
-  local surface="$1"; shift
+  local surface="$1" kind="$2"
   local top direct ps_out
   top="$(_cmux_top_processes)"
   if [[ -z "$top" ]]; then
@@ -659,18 +785,22 @@ _verify_reviewer_launch_args() {
     return 1
   fi
   ps_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_args_snapshot)"
-  XREV_LARGS_PS="$ps_out" python3 - "$@" <<'PY'
-import os, re, sys
-expected = sys.argv[1:]
-for line in os.environ.get("XREV_LARGS_PS", "").splitlines():
-    m = re.match(r"^\s*\d+\s*(.*)$", line)
-    if not m:
-        continue
-    args = m.group(1)
-    if all(e in args for e in expected):
-        sys.exit(0)
-sys.exit(1)
-PY
+  local line rest
+  local -a warr rest_args
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    # 先頭の PID フィールドだけを分離する（args 自体の空白は分割しない。_ps_args_snapshot 参照）。
+    rest="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]*//')"
+    [[ -n "$rest" ]] || continue
+    # shellcheck disable=SC2206  # 空白区切りで argv へ分解する（本関数のコメント参照）
+    warr=($rest)
+    rest_args=()
+    (( ${#warr[@]} > 1 )) && rest_args=("${warr[@]:1}")  # argv[0]（実行ファイルパス）を除く
+    if _xrev_verify_effective_policy "$kind" "${rest_args[@]+"${rest_args[@]}"}" >/dev/null 2>&1; then
+      return 0
+    fi
+  done <<< "$ps_out"
+  return 1
 }
 
 # reviewer ペインの最終確定入力（プロンプト送信）。本文（1物理行）を送り終えたあとに呼ぶ。
@@ -1308,17 +1438,124 @@ _xrev_shquote() { printf '%q' "$1"; }
 #     違反時は空配列へフォールバックせず fail closed（非ゼロ）にする。
 #   - 未知の reviewer（config に launch 引数が無い）も fail closed（暴発防止の設計原則7とは別に、
 #     「read-only を強制できないなら起動しない」という安全側の既定）。
+#
+# 【最終 argv の意味検証が正典】launch 引数の型検証（文字列のみ・印字可能ASCIIのみ）は「壊れた値を
+# 通さない」ためのものにすぎず、「安全なポリシーか」（sandbox=read-only かつ承認=never が一意に
+# 有効か）は別に検証しなければならない。空配列や ["--sandbox","danger-full-access"] のような config も
+# 型検証だけは通ってしまうし、launch 引数の後ろにユーザー引数で `-s danger-full-access` のような
+# 短縮形・結合形式を後置されると拒否リスト方式（前方一致）ではすり抜ける。そこで
+# `_xrev_verify_effective_policy` を「最終的に reviewer へ渡る argv 列」に対して通し、拒否リストでは
+# なく実効値の意味検証で合否を決める。この関数を (a) launch 引数決定直後
+# （`_xrev_reviewer_launch_args` 内）, (b) start-reviewer.sh の最終 argv（launch 引数＋ユーザー追加引数）,
+# (c) 起動後に実際に走っているプロセスの argv（`_verify_reviewer_launch_args`）, (d) 既存ペイン採用時の
+# 実効検証（`_xrev_verify_reviewer_policy`）の4箇所で共有する。
+
+# 純粋関数: 「最終的に reviewer へ渡る argv 列」が安全ポリシーを一意に満たすかを検証する（正典）。
+#   入力: $1 = reviewer 種別（basename。codex / claude）, $2.. = 最終 argv 列（0件可）
+#   認識する引数形式（codex）:
+#     sandbox   = `--sandbox <値>` / `--sandbox=<値>` / `-s <値>` / `-s<値>`（結合形式）
+#     approval  = `--ask-for-approval <値>` / `--ask-for-approval=<値>` / `-a <値>` / `-a<値>`（結合形式）
+#   判定（codex）:
+#     - sandbox・approval それぞれの指定を左から集め、**ちょうど1回だけ**現れることを要求する
+#       （0回=指定なし・2回以上=同じ軸の複数指定は、たとえ最後の値が安全でも fail closed で拒否。
+#       「後勝ちで良しとする」寛容さは意図的に採らない＝意図の曖昧さを許さない）。
+#     - sandbox の実効値が `read-only`、かつ approval の実効値が `never` であることを要求する。
+#     - `--dangerously-bypass-approvals-and-sandbox` / `--full-auto` / `--yolo`（完全一致。前方一致では
+#       ない）のいずれかが argv に含まれていたら、他条件を満たしていても拒否する。危険フラグの
+#       リストはこの関数の中の1箇所にまとめる（拒否リストの多重管理をしない）。
+#     - 値を要求する形式で値が無い（末尾で切れている）場合も拒否する。
+#   判定（claude）: `--permission-mode <値>` / `--permission-mode=<値>` の実効値が一意に `plan` である
+#     ことを要求する（claude は短縮形を持たないため、それ以外の形式は単に「該当なし」として扱われ、
+#     結果的に「指定なし」で fail closed になる）。
+#   未知の reviewer 種別: fail closed（拒否）。
+#   出力: 合格時 stdout に "ok"（exit 0）/ 不合格時 stderr に理由（exit 非ゼロ）。
+_xrev_verify_effective_policy() {
+  local prog
+  read -r -d '' prog <<'PY' || true
+import sys
+
+def die(msg):
+    sys.stderr.write("[xrev/transport] 安全ポリシー検証失敗: %s\n" % msg)
+    sys.exit(1)
+
+if len(sys.argv) < 2:
+    die("reviewer 種別が指定されていません")
+kind = sys.argv[1]
+argv = sys.argv[2:]
+
+def collect(args, long_flag, short_flag=None):
+    # long_flag（空白区切り/=形式）と short_flag（空白区切り/結合形式）の実効値を左から集める。
+    # 呼び出し側で len(values) を検証する（0=指定なし、2以上=複数指定として fail closed）。
+    values = []
+    long_eq = long_flag + "="
+    i, n = 0, len(args)
+    while i < n:
+        a = args[i]
+        if a == long_flag:
+            if i + 1 >= n:
+                die("%s の値がありません" % long_flag)
+            values.append(args[i + 1]); i += 2; continue
+        if a.startswith(long_eq):
+            values.append(a[len(long_eq):]); i += 1; continue
+        if short_flag is not None:
+            if a == short_flag:
+                if i + 1 >= n:
+                    die("%s の値がありません" % short_flag)
+                values.append(args[i + 1]); i += 2; continue
+            if a.startswith(short_flag) and len(a) > len(short_flag):
+                values.append(a[len(short_flag):]); i += 1; continue
+        i += 1
+    return values
+
+if kind == "codex":
+    # サンドボックス/承認を丸ごと外す既知フラグ（完全一致。1箇所にまとめる）。
+    DANGEROUS_EXACT = (
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--full-auto",
+        "--yolo",
+    )
+    for a in argv:
+        if a in DANGEROUS_EXACT:
+            die("サンドボックス/承認を丸ごと外すフラグが含まれています: %s" % a)
+    sandbox_vals = collect(argv, "--sandbox", "-s")
+    approval_vals = collect(argv, "--ask-for-approval", "-a")
+    if len(sandbox_vals) != 1:
+        die("sandbox 指定が一意ではありません（%d 件）" % len(sandbox_vals))
+    if len(approval_vals) != 1:
+        die("承認ポリシー指定が一意ではありません（%d 件）" % len(approval_vals))
+    if sandbox_vals[0] != "read-only":
+        die("sandbox の実効値が read-only ではありません: %s" % sandbox_vals[0])
+    if approval_vals[0] != "never":
+        die("承認ポリシーの実効値が never ではありません: %s" % approval_vals[0])
+    sys.stdout.write("ok")
+elif kind == "claude":
+    perm_vals = collect(argv, "--permission-mode", None)
+    if len(perm_vals) != 1:
+        die("--permission-mode 指定が一意ではありません（%d 件）" % len(perm_vals))
+    if perm_vals[0] != "plan":
+        die("--permission-mode の実効値が plan ではありません: %s" % perm_vals[0])
+    sys.stdout.write("ok")
+else:
+    die("未知の reviewer 種別です: %s" % kind)
+PY
+  python3 -c "$prog" "$@"
+}
 
 # reviewer の launch 引数を決定する（config/env → 型検証 → 1行1要素で stdout）。
 #   入力: $1 = reviewer バイナリ名（basename を取ってから照合する）
 #   優先順位: env XREV_REVIEWER_LAUNCH_ARGS（JSON 配列文字列。文字列のみの配列を要求） >
 #             config の reviewer_launch_args[<basename>]
 #   出力(stdout): 引数を1行1要素（改行区切り）。引数自体に改行を含むことは型検証で拒否するため
-#     区切りとして安全。exit: 0=決定 / 1=型不正・未知reviewer・JSON不正（fail closed）
+#     区切りとして安全。exit: 0=決定 / 1=型不正・未知reviewer・JSON不正・安全ポリシー不合格（fail closed）
+#
+# 【指摘1への対処】型検証（object/文字列配列/印字可能ASCII）を通っただけでは「安全なポリシーか」は
+# 分からない。空配列や `["--sandbox","danger-full-access"]` も型としては正しいため、決定した
+# launch 引数列そのものを `_xrev_verify_effective_policy` に通し、config/env が壊れている（＝read-only
+# 強制を回避する値になっている）場合は fail closed で拒否する。
 _xrev_reviewer_launch_args() {
   local name; name="$(basename -- "$1")"
-  XREV_LAUNCH_OVERRIDE="${XREV_REVIEWER_LAUNCH_ARGS:-}" XREV_CONFIG_PATH="$XREV_CONFIG" \
-    python3 - "$name" <<'PY'
+  local prog
+  read -r -d '' prog <<'PY' || true
 import json, os, sys
 
 def die(msg):
@@ -1371,14 +1608,32 @@ else:
 for a in launch_args:
     print(a)
 PY
+  local out
+  out="$(XREV_LAUNCH_OVERRIDE="${XREV_REVIEWER_LAUNCH_ARGS:-}" XREV_CONFIG_PATH="$XREV_CONFIG" \
+    python3 -c "$prog" "$name")" || return $?
+  local -a args=()
+  local _la_out_line
+  while IFS= read -r _la_out_line; do
+    [[ -n "$_la_out_line" ]] && args+=("$_la_out_line")
+  done <<< "$out"
+  if ! _xrev_verify_effective_policy "$name" "${args[@]+"${args[@]}"}" >/dev/null 2>&1; then
+    _log "reviewer(${name}) の launch 引数が安全ポリシー（read-only 強制）を満たしません（config/env の reviewer_launch_args を確認してください）。"
+    return 1
+  fi
+  printf '%s\n' "$out"
 }
 
 # 危険な launch 引数上書きの拒否。sandbox/approval 系フラグの前方一致で判定する。
 # 【判定リストはここ1箇所にまとめる】codex/claude の sandbox・承認モード系フラグ。
 #   launch 引数（read-only 強制）の後置上書きを防ぐ（start-reviewer.sh のユーザー追加引数向け）。
+#
+# 【位置づけ（指摘2への対処後）】この拒否リストは前方一致にすぎず、`-s`（codex の sandbox 短縮形）や
+# 未知の危険フラグを漏らしうる。正典の最終判定は `_xrev_verify_effective_policy` による「最終 argv の
+# 意味検証」であり、本関数はそれより前段で分かりやすいエラーメッセージを即座に返すための
+# best-effort な早期棄却にすぎない（本関数を通過しても、後段の意味検証が改めて拒否しうる）。
 _xrev_reject_unsafe_reviewer_args() {
   local -a unsafe_prefixes=(
-    "--sandbox" "--ask-for-approval" "--approval" "--full-auto"
+    "--sandbox" "-s" "--ask-for-approval" "--approval" "--full-auto"
     "--dangerously" "--permission-mode" "--yolo" "-a"
   )
   local arg prefix
@@ -1403,9 +1658,16 @@ _xrev_caller_ws() {
 }
 
 # 同一WSの reviewer の状態を分類する（_cmux_resolve_surface ＋ probe）。
-#   stdout: present|absent|ambiguous|non_terminal|process_mismatch|ws_error|transient
-#   exit:   0(present) / 10(absent) / 16(ambiguous) / 14(non_terminal) / 17(process_mismatch) / 15(ws_error) / 1(transient)
+#   stdout: present|absent|ambiguous|non_terminal|process_mismatch|policy_mismatch|ws_error|transient
+#   exit:   0(present) / 10(absent) / 16(ambiguous) / 14(non_terminal) / 17(process_mismatch) /
+#           27(policy_mismatch) / 15(ws_error) / 1(transient)
 # present のときグローバル _XREV_RES_* に解決結果が入る。
+#
+# 【指摘3への対処】従来は「前景プロセス名が REVIEWER_PROCESS か」しか見ておらず、手動起動・旧版の
+# 書き込み可能なままの端末がそのまま present（採用）扱いになり得た。ここで前景プロセスの argv を
+# 取得し、安全ポリシー（sandbox=read-only かつ承認=never）が実効に有効かを検証してから present と
+# 判定する。既定は検証する（fail closed）。XREV_ALLOW_UNVERIFIED_REVIEWER=1（明示 opt-in）のときだけ
+# 検証を省略する（手動で用意した reviewer を使う運用を壊さないための後方互換。警告ログを出す）。
 _xrev_classify_reviewer() {
   _XREV_RES_REF=""
   _cmux_resolve_surface >/dev/null; local rc=$?
@@ -1424,10 +1686,17 @@ _xrev_classify_reviewer() {
     non_terminal) printf 'non_terminal'; return 14 ;;
     *) printf 'transient'; return 1 ;;   # gone/transient は過渡。待機側で再評価
   esac
-  if _verify_reviewer_process "$_XREV_RES_REF"; then
+  if ! _verify_reviewer_process "$_XREV_RES_REF"; then
+    printf 'process_mismatch'; return 17
+  fi
+  if [[ "${XREV_ALLOW_UNVERIFIED_REVIEWER:-}" == "1" ]]; then
+    _log "警告: XREV_ALLOW_UNVERIFIED_REVIEWER=1 のため既存 reviewer の安全ポリシー検証を省略します（read-only/承認 never を保証しません）。"
     printf 'present'; return 0
   fi
-  printf 'process_mismatch'; return 17
+  if _xrev_verify_reviewer_policy "$_XREV_RES_REF" >/dev/null 2>&1; then
+    printf 'present'; return 0
+  fi
+  printf 'policy_mismatch'; return 27
 }
 
 # ロックパス（TMPDIR 配下・WS UUID 鍵。リポジトリには絶対に作らない）。
@@ -1489,7 +1758,7 @@ _xrev_create_reviewer() {
       # read-only 引数の実効検証。ここまでは「起動できた」だけで、launch 引数が実際に効いて
       # いる保証にはならない（引数生成のバグ・cmux send の欠落等でも起動確認は通り得る）ため、
       # 実プロセスのコマンドラインで裏取りしてから採用する。確認できなければ採用しない(fail closed)。
-      if ! _verify_reviewer_launch_args "$_XREV_RES_REF" "${launch_args[@]+"${launch_args[@]}"}"; then
+      if ! _verify_reviewer_launch_args "$_XREV_RES_REF" "$(basename -- "$codex")"; then
         _log "reviewer は起動しましたが read-only 引数の実効を確認できませんでした（surface=${ref}）。"
         return 19
       fi
@@ -1506,8 +1775,8 @@ _xrev_create_reviewer() {
 }
 
 # 公開: 同一WSの reviewer を保証する（あれば採用・無ければ生成）。stdout に採用 surface ref。
-# exit: 0 / 10(absent かつ autocreate=off) / 14/16/17(既存が壊れ/曖昧/別物→人間) / 15(ws不明) /
-#       19(生成したが起動確認失敗) / 20(競合で期限切れ→人間)。
+# exit: 0 / 10(absent かつ autocreate=off) / 14/16/17(既存が壊れ/曖昧/別物→人間) /
+#       27(既存が安全ポリシー不合格→人間) / 15(ws不明) / 19(生成したが起動確認失敗) / 20(競合で期限切れ→人間)。
 xrev_ensure_reviewer() {
   _cmux_preflight || return $?
   # 注意: classify は _XREV_RES_* グローバルをセットするため $() で捕捉しない（サブシェルで失われる）。
@@ -1519,6 +1788,7 @@ xrev_ensure_reviewer() {
     16) _log "同一WSに reviewer が複数あり曖昧です。作成せず確認してください。"; return 16 ;;
     14) _log "同一WSの reviewer が実ターミナルでありません（壊れ）。作成せず確認してください。"; return 14 ;;
     17) _log "同一WSの reviewer の前景プロセスが '$REVIEWER_PROCESS' ではありません。作成せず確認してください。"; return 17 ;;
+    27) _log "reviewer ペインが安全ポリシー（read-only + 承認 never）で起動していません。ペインを閉じて ensure-reviewer で作り直すか、start-reviewer.sh で起動し直してください。"; return 27 ;;
     15) _log "呼び出し元のワークスペースを特定できません（cmux ペイン内で実行してください）。"; return 15 ;;
     # 一時障害(tree取得不能等)は「不在を証明できない」ので生成しない。再試行/人間判断に委ねる。
     *)  _log "reviewer の状態を確認できませんでした（一時障害）。生成せず中止します。"; return 11 ;;
@@ -1540,7 +1810,7 @@ xrev_ensure_reviewer() {
       rm -rf "$lock"; _XREV_LOCK=""; trap - EXIT INT TERM
       case "$rc" in
         0)  printf '%s' "$_XREV_RES_REF"; return 0 ;;
-        16|14|17|15) return "$rc" ;;
+        16|14|17|27|15) return "$rc" ;;
         *)  _log "ロック下で reviewer 状態を確認できませんでした（一時障害）。生成せず中止します。"; return 11 ;;
       esac
     fi
@@ -1643,6 +1913,19 @@ xrev_transport_review() {
     _log "reviewer surface($surface)の前景プロセスが '$REVIEWER_PROCESS' ではありません（reviewer 未稼働/別用途の端末の恐れ）。送信を中止します。"
     _log "復旧: 当該ペインで codex を起動し直すか、タブ名 '$REVIEWER_PANE_TITLE' が別用途の端末に付いていないか確認してください。"
     return 17
+  fi
+
+  # (iii') 安全ポリシー実効検証（指摘3）。既存 reviewer をそのまま「採用」する経路でも、
+  # sandbox=read-only かつ承認=never が実際に有効であることを送信前に確認する。手動起動・旧版の
+  # 書き込み可能なペインへ payload を送り、無承認でワークスペースを変更されてしまう事故を防ぐ。
+  # 既定は検証する（fail closed）。XREV_ALLOW_UNVERIFIED_REVIEWER=1（明示 opt-in）のときだけ省略する
+  # （手動で用意した reviewer を使う運用を壊さないための後方互換）。
+  if [[ "${XREV_ALLOW_UNVERIFIED_REVIEWER:-}" == "1" ]]; then
+    _log "警告: XREV_ALLOW_UNVERIFIED_REVIEWER=1 のため reviewer の安全ポリシー検証を省略します（read-only/承認 never を保証しません）。"
+  elif ! _xrev_verify_reviewer_policy "$surface"; then
+    _log "reviewer surface($surface)が安全ポリシー（read-only + 承認 never）で起動していません。送信を中止します。"
+    _log "復旧: ペインを閉じて ensure-reviewer で作り直すか、start-reviewer.sh で起動し直してください。"
+    return 27
   fi
 
   # round_id（ラウンド識別子）と content_type を決め、payload を1物理行にエンコードする。

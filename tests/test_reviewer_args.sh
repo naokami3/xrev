@@ -59,9 +59,14 @@ assert_rc "launch 引数配列に数値混入は非ゼロ" 1 "$rc"
 rm -f "$tmpcfg_e"
 
 # ── (f) XREV_REVIEWER_LAUNCH_ARGS が config より優先される ────────────────────
-out="$(XREV_REVIEWER_LAUNCH_ARGS='["--x","y"]' _xrev_reviewer_launch_args codex)"; rc=$?
+# 【注意】_xrev_reviewer_launch_args は決定した launch 引数そのものを安全ポリシーの意味検証
+# （_xrev_verify_effective_policy）に通すため、env override も sandbox=read-only と承認=never を
+# 満たす必要がある。ここでは config の既定値に無い要素(--model gpt-5)を付け足し、config より
+# 優先されることは示しつつ安全ポリシーは満たす値にする。
+out="$(XREV_REVIEWER_LAUNCH_ARGS='["--sandbox","read-only","--ask-for-approval","never","--model","gpt-5"]' _xrev_reviewer_launch_args codex)"; rc=$?
 assert_rc "env override は成功" 0 "$rc"
-assert_eq "env override が config より優先される" $'--x\ny' "$out"
+assert_eq "env override が config より優先される" \
+  $'--sandbox\nread-only\n--ask-for-approval\nnever\n--model\ngpt-5' "$out"
 
 # ── (g) XREV_REVIEWER_LAUNCH_ARGS が壊れた JSON → 非ゼロ ──────────────────────
 err="$(XREV_REVIEWER_LAUNCH_ARGS='not-json' _xrev_reviewer_launch_args codex 2>&1 1>/dev/null)"; rc=$?
@@ -82,6 +87,13 @@ assert_rc "--full-auto は拒否" 64 "$rc"
 
 _xrev_reject_unsafe_reviewer_args -a; rc=$?
 assert_rc "-a は拒否" 64 "$rc"
+
+# 指摘2: codex の短縮形 -s（拒否リストに無かったため素通りしていた）を拒否リストへ追加。
+_xrev_reject_unsafe_reviewer_args -s danger-full-access; rc=$?
+assert_rc "-s（短縮形）は拒否" 64 "$rc"
+
+_xrev_reject_unsafe_reviewer_args -sdanger-full-access; rc=$?
+assert_rc "-s の結合形式(-sdanger-full-access)は拒否" 64 "$rc"
 
 _xrev_reject_unsafe_reviewer_args --ask-for-approval never; rc=$?
 assert_rc "--ask-for-approval は拒否" 64 "$rc"
@@ -114,3 +126,104 @@ python3 -c 'import json;d=json.load(open("'"$DEFAULT_CONFIG"'"));d["reviewer_lau
 err="$(XREV_CONFIG="$tmpcfg_i3" _xrev_reviewer_launch_args codex 2>&1 1>/dev/null)"; rc=$?
 assert_rc "空文字列の要素は非ゼロ" 1 "$rc"
 rm -f "$tmpcfg_i3"
+
+# ── (j) 指摘1: config/env の意味検証 ────────────────────────────────────────
+# launch 引数の型検証を通っても、安全なポリシー（sandbox=read-only かつ承認=never）を満たさない
+# config/env は _xrev_reviewer_launch_args 自体が拒否する（自動生成経路がそのまま起動しないため）。
+err="$(XREV_REVIEWER_LAUNCH_ARGS='[]' _xrev_reviewer_launch_args codex 2>&1 1>/dev/null)"; rc=$?
+assert_rc "env override が空配列は非ゼロ（意味検証で拒否）" 1 "$rc"
+assert_contains "空配列拒否のエラーに reviewer 名を含む" "$err" "codex"
+
+err="$(XREV_REVIEWER_LAUNCH_ARGS='["--sandbox","danger-full-access"]' _xrev_reviewer_launch_args codex 2>&1 1>/dev/null)"; rc=$?
+assert_rc "env override が danger-full-access は非ゼロ（意味検証で拒否）" 1 "$rc"
+
+tmpcfg_j1="$(mktemp)"
+python3 -c 'import json;d=json.load(open("'"$DEFAULT_CONFIG"'"));d["reviewer_launch_args"]={"codex":[]};json.dump(d,open("'"$tmpcfg_j1"'","w"))'
+err="$(XREV_CONFIG="$tmpcfg_j1" _xrev_reviewer_launch_args codex 2>&1 1>/dev/null)"; rc=$?
+assert_rc "config の codex launch 引数が空配列は非ゼロ（意味検証で拒否）" 1 "$rc"
+rm -f "$tmpcfg_j1"
+
+tmpcfg_j2="$(mktemp)"
+python3 -c 'import json;d=json.load(open("'"$DEFAULT_CONFIG"'"));d["reviewer_launch_args"]={"codex":["--sandbox","workspace-write","--ask-for-approval","never"]};json.dump(d,open("'"$tmpcfg_j2"'","w"))'
+err="$(XREV_CONFIG="$tmpcfg_j2" _xrev_reviewer_launch_args codex 2>&1 1>/dev/null)"; rc=$?
+assert_rc "config の codex launch 引数が workspace-write は非ゼロ（意味検証で拒否）" 1 "$rc"
+rm -f "$tmpcfg_j2"
+
+# ── (k) _xrev_verify_effective_policy（最終 argv の意味検証。正典）の単体テスト ──────
+# 合格: 長形式・=形式・短縮形・結合形式のいずれでも sandbox=read-only かつ承認=never なら合格。
+_xrev_verify_effective_policy codex --sandbox read-only --ask-for-approval never >/dev/null
+assert_rc "policy: 長形式(空白区切り)は合格" 0 "$?"
+
+_xrev_verify_effective_policy codex --sandbox=read-only --ask-for-approval=never >/dev/null
+assert_rc "policy: =形式は合格" 0 "$?"
+
+_xrev_verify_effective_policy codex -s read-only -a never >/dev/null
+assert_rc "policy: 短縮形(空白区切り)は合格" 0 "$?"
+
+_xrev_verify_effective_policy codex -sread-only -anever >/dev/null
+assert_rc "policy: 短縮形の結合形式は合格" 0 "$?"
+
+# 拒否: 空配列・片方のみ指定
+_xrev_verify_effective_policy codex >/dev/null 2>&1
+assert_rc "policy: 空配列は拒否" 1 "$?"
+
+_xrev_verify_effective_policy codex --sandbox read-only >/dev/null 2>&1
+assert_rc "policy: sandbox のみは拒否" 1 "$?"
+
+_xrev_verify_effective_policy codex --ask-for-approval never >/dev/null 2>&1
+assert_rc "policy: approval のみは拒否" 1 "$?"
+
+# 拒否: 安全でない実効値
+_xrev_verify_effective_policy codex --sandbox workspace-write --ask-for-approval never >/dev/null 2>&1
+assert_rc "policy: sandbox=workspace-write は拒否" 1 "$?"
+
+_xrev_verify_effective_policy codex --sandbox danger-full-access --ask-for-approval never >/dev/null 2>&1
+assert_rc "policy: sandbox=danger-full-access は拒否" 1 "$?"
+
+# 拒否（指摘2の攻撃）: 安全な組の後ろに危険な sandbox を後置（短縮形・結合形式いずれも）。
+# 「同じ軸の指定が複数回現れたら、たとえ最後が安全でも拒否」という fail closed 方針を検証する。
+_xrev_verify_effective_policy codex --sandbox read-only --ask-for-approval never -s danger-full-access \
+  >/dev/null 2>&1
+assert_rc "policy: 安全な組の後に -s danger-full-access を後置は拒否" 1 "$?"
+
+_xrev_verify_effective_policy codex --sandbox read-only --ask-for-approval never -sdanger-full-access \
+  >/dev/null 2>&1
+assert_rc "policy: 安全な組の後に結合形式(-sdanger-full-access)を後置は拒否" 1 "$?"
+
+# 拒否: 同じ軸の複数指定（どちらも安全な値であっても曖昧さを許さず拒否）
+_xrev_verify_effective_policy codex --sandbox read-only --sandbox read-only --ask-for-approval never \
+  >/dev/null 2>&1
+assert_rc "policy: sandbox の複数指定は最後が安全でも拒否" 1 "$?"
+
+# 拒否: サンドボックス/承認を丸ごと外すフラグ（完全一致）
+_xrev_verify_effective_policy codex --dangerously-bypass-approvals-and-sandbox >/dev/null 2>&1
+assert_rc "policy: --dangerously-bypass-approvals-and-sandbox は拒否" 1 "$?"
+
+_xrev_verify_effective_policy codex --sandbox read-only --ask-for-approval never --full-auto \
+  >/dev/null 2>&1
+assert_rc "policy: --full-auto の混在は拒否" 1 "$?"
+
+_xrev_verify_effective_policy codex --sandbox read-only --ask-for-approval never --yolo \
+  >/dev/null 2>&1
+assert_rc "policy: --yolo の混在は拒否" 1 "$?"
+
+# 拒否: 値なしの末尾（切れている）
+_xrev_verify_effective_policy codex --ask-for-approval never --sandbox >/dev/null 2>&1
+assert_rc "policy: 値なしの末尾(--sandbox)は拒否" 1 "$?"
+
+# 拒否: 未知の reviewer 種別
+_xrev_verify_effective_policy foobar --sandbox read-only --ask-for-approval never >/dev/null 2>&1
+assert_rc "policy: 未知reviewer(foobar)は拒否" 1 "$?"
+
+# claude: --permission-mode の実効値のみで判定
+_xrev_verify_effective_policy claude --permission-mode plan >/dev/null
+assert_rc "policy(claude): permission-mode=plan は合格" 0 "$?"
+
+_xrev_verify_effective_policy claude --permission-mode acceptEdits >/dev/null 2>&1
+assert_rc "policy(claude): permission-mode=acceptEdits は拒否" 1 "$?"
+
+_xrev_verify_effective_policy claude --permission-mode=plan >/dev/null
+assert_rc "policy(claude): =形式でも合格" 0 "$?"
+
+_xrev_verify_effective_policy claude --permission-mode plan --permission-mode plan >/dev/null 2>&1
+assert_rc "policy(claude): 複数指定は最後が安全でも拒否" 1 "$?"

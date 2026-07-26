@@ -220,8 +220,8 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 `transport_error` の決定 JSON には `transport_exit_code`（transport の生終了コード）と `transport_reason`
 （安定文字列）を含める。外部 exit は 22 のままだが、primary はこの reason で利用者向け修正案を機械的に選べる:
 `cmux_unavailable`/`resolve_failed`/`send_failed`/`timeout`/`truncated`/`non_terminal`/`ws_mismatch`/
-`ambiguous`/`process_mismatch`/`autocreate_failed`/`reviewer_contention`/`encode_failed`/`payload_too_large`/
-`submit_failed`/`cmux_not_found`/`not_in_pane`。
+`ambiguous`/`process_mismatch`/`reviewer_policy_mismatch`/`autocreate_failed`/`reviewer_contention`/
+`encode_failed`/`payload_too_large`/`submit_failed`/`cmux_not_found`/`not_in_pane`。
 
 `transport_exit_code=24`（`invalid_response`。センチネルで完成した応答はあるが妥当な review JSON
 を含まない契約違反。`timeout` と区別され primary は再出力を促す）は `transport_error` ではなく
@@ -263,6 +263,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | 24   | センチネルで完成した応答はあるが妥当な review JSON を含まない（契約違反。invalid_response）。`timeout`(12) と区別され、primary は再出力を促す。 |
 | 25   | Enter 送信(プロンプト確定)に失敗（最大2回まで再試行しても失敗）。本文は入力欄に残存。`timeout`(12) と区別される（submit_failed）。 |
 | 26   | wire（1物理行）の文字数が上限(`wire_max_chars`)を超過（cmux へは未送信。payload_too_large） |
+| 27   | reviewer が安全ポリシー（sandbox=read-only かつ承認=never）で起動していない（最終 argv の意味検証に不合格。reviewer_policy_mismatch）。`XREV_ALLOW_UNVERIFIED_REVIEWER=1` で opt-out 可（下記「reviewer read-only 強制」参照） |
 | 30   | cmux CLI が見つからない |
 | 31   | cmux 接続不可（preflight 失敗・ペイン外実行） |
 
@@ -283,7 +284,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | `adr_dir` | `docs/adr` | ADR の出力ディレクトリ（相対は対象リポジトリ基準 / 絶対パス可） |
 | `transport` | `cmux` | 配管実装の選択（将来の差し替え点） |
 | `reviewer_process` | `codex` | 送信前プロセス証明で対象 surface の直下に在るべきプロセス名 |
-| `reviewer_launch_args` | `{"codex":["--sandbox","read-only","--ask-for-approval","never"],"claude":["--permission-mode","plan"]}` | reviewer バイナリ名をキーに持つ object。起動経路（`start-reviewer.sh` / `ensure-reviewer` の自動生成）で機械的に付与する read-only 相当の起動引数。既存ペインを採用する経路では強制しない |
+| `reviewer_launch_args` | `{"codex":["--sandbox","read-only","--ask-for-approval","never"],"claude":["--permission-mode","plan"]}` | reviewer バイナリ名をキーに持つ object。起動経路（`start-reviewer.sh` / `ensure-reviewer` の自動生成）で機械的に付与する read-only 相当の起動引数。値そのものが安全ポリシー（sandbox=read-only かつ承認=never）を満たすことを意味検証する（満たさなければ fail closed）。既存ペインを採用する経路では launch 引数の付与はしないが、前景プロセスの実効ポリシーは既定で検証する（`XREV_ALLOW_UNVERIFIED_REVIEWER=1` で opt-out 可） |
 | `reviewer_autocreate` | `ask` | reviewer ペインの自動生成方針。`ask`(スキルが一拍確認で確認後生成)/`auto`(無確認で生成)/`off`(生成せず案内) |
 | `reviewer_create_timeout_seconds` | `30` | 自動生成時の codex 起動確認・競合待ちの上限秒。範囲 1..600 |
 | `allow_global_resolve` | `false` | `CMUX_SURFACE_ID` 未注入時のグローバル解決を許すか（危険・opt-in） |
@@ -317,7 +318,12 @@ stderr に1行警告する（可用性優先。stdout は汚さない）。生�
 `XREV_REFERENCE_MODE`, `XREV_EXPECT_DIFF_HASH`, `XREV_EXPECT_HEAD`, `XREV_MAX_REFERENCE_FALLBACKS`,
 `XREV_REVIEWER_AUTOCREATE`, `XREV_REVIEWER_CREATE_TIMEOUT_SECONDS`, `XREV_WIRE_MAX_CHARS`,
 `XREV_REVIEWER_LAUNCH_ARGS`（JSON 配列文字列。`reviewer_launch_args` の該当 reviewer 分を上書きする。
-文字列のみの配列・印字可能ASCIIのみという型検証は config 由来の値と同じ）。
+文字列のみの配列・印字可能ASCIIのみという型検証は config 由来の値と同じ。さらに決定した引数列
+そのものを安全ポリシーの意味検証に通すため、安全ポリシーを満たさない上書きは fail closed で拒否される
+—詳細は「reviewer read-only 強制」参照）、
+`XREV_ALLOW_UNVERIFIED_REVIEWER`（`1` で「既存 reviewer 採用時の安全ポリシー実効検証」を明示 opt-out
+する。手動で用意した reviewer を使う運用を壊さないための後方互換フラグ。既定は検証する
+=fail closed。詳細は「reviewer read-only 強制」参照）。
 `XREV_CONTENT_TYPE`/`XREV_ROUND_ID` は通常自動決定で、テスト・デバッグ時のみ明示する。
 
 ### 送信の堅牢化（実機知見）
@@ -355,24 +361,68 @@ stderr に1行警告する（可用性優先。stdout は汚さない）。生�
   `--workspace <ws_uuid> --surface <surface_uuid>` 指定が要る（短縮 ref/uuid 単独は `Tab not found`）。これにより
   reviewer_pane_title が定着し、次回の title 解決が当たる（create-if-missing の冪等性を保つ）。
 
-### reviewer read-only 強制（launch 引数の機械生成）
+### reviewer read-only 強制（最終 argv の意味検証が正典）
 
 SKILL.md は「reviewer = レビュー専用・read-only」と約束する。これを起動経路（`start-reviewer.sh` の
-手動起動 / `_xrev_create_reviewer` の自動生成）で機械的に強制する。設計はクロスレビューで収束。
+手動起動 / `_xrev_create_reviewer` の自動生成）と、既存ペインを「採用」する経路の**両方**で機械的に
+強制する。設計はクロスレビューで収束。
 
-- **単一の生成関数**: `transport.sh` の `_xrev_reviewer_launch_args <reviewer バイナリ名>` を両起動経路が
-  共有する。優先順位は env `XREV_REVIEWER_LAUNCH_ARGS`（JSON 配列文字列）> config の
+**正典は「拒否リスト」ではなく「最終 argv の意味検証」である。** 拒否リスト（前方一致でフラグを
+弾く方式）は、型として不正な値（空配列・危険値）を持つ config/env や、`-s`（codex の sandbox 短縮形）
+のような未収録の表現・結合形式（`-sdanger-full-access`）による後置上書きを原理的に漏らす。そこで
+`transport.sh` の純粋関数 `_xrev_verify_effective_policy <reviewer 種別> <argv...>` を単一の判定基盤とし、
+「最終的に reviewer へ渡る argv 列」に対して**実効値**を合成してから合否を判定する。
+
+- **認識する引数形式（codex）**: sandbox = `--sandbox <値>` / `--sandbox=<値>` / `-s <値>` /
+  `-s<値>`（結合形式）。承認 = `--ask-for-approval <値>` / `--ask-for-approval=<値>` / `-a <値>` /
+  `-a<値>`（結合形式）。
+- **複数指定は理由を問わず拒否する**: sandbox・承認それぞれの指定は argv 全体を左から走査して集め、
+  **ちょうど1回**だけ現れることを要求する。0回（指定なし）はもちろん、2回以上（例: 安全な組の
+  直後に `-s danger-full-access` を後置する攻撃）も、**たとえ最後の値が安全でも拒否**する。
+  「後勝ちで良しとする」寛容さは意図的に採らない — 同じ軸への複数指定それ自体が「意図が曖昧な
+  argv」であり、fail closed の対象にする。
+- **合格条件**: sandbox の実効値が `read-only`、かつ承認の実効値が `never` であること。加えて
+  `--dangerously-bypass-approvals-and-sandbox` / `--full-auto` / `--yolo`（完全一致。前方一致では
+  なく、リストは関数内の1箇所にまとめる）のいずれも含まれていないこと。claude は
+  `--permission-mode <値>` / `--permission-mode=<値>` の実効値が一意に `plan` であることを要求し、
+  短縮形を持たないため他の形式は「該当なし」として扱われ結果的に拒否される（fail closed）。
+  未知の reviewer 種別も fail closed。
+- **`_xrev_verify_effective_policy` を通す4箇所**:
+  1. **launch 引数の決定直後**（`_xrev_reviewer_launch_args` 内）。config/env の型検証を通っても
+     「安全なポリシーか」は別問題（空配列や `["--sandbox","danger-full-access"]` も型としては正しい）
+     なので、決定した引数列そのものを意味検証にかけ、不合格なら非ゼロ（fail closed）にする。
+  2. **`start-reviewer.sh` の最終 argv**（launch 引数 + ユーザー追加引数を連結した後の列全体）。
+     これにより `-s` の短縮形・結合形式によるあらゆる後置上書きを検出する。
+  3. **起動後、実際に走っているプロセスの argv**（`_verify_reviewer_launch_args`）。`ps -o pid=,args=`
+     で取得したコマンドラインを空白区切りで argv へ分解し（launch 引数は印字可能ASCIIのみ・空文字列
+     不可という型検証を経ており、要素自体に空白を含める運用を想定しないため十分）、意味検証にかける。
+     従来の「launch 引数が部分文字列として含まれるか」という判定は、launch 引数の**後ろ**に
+     危険な引数が付いていても部分一致さえ満たせば通ってしまう欠陥があったため置き換えた。
+  4. **既存ペインを「採用」する経路の実効検証**（`_xrev_verify_reviewer_policy`。下記参照）。
+- **単一の生成関数（型検証）**: `transport.sh` の `_xrev_reviewer_launch_args <reviewer バイナリ名>` を
+  両起動経路が共有する。優先順位は env `XREV_REVIEWER_LAUNCH_ARGS`（JSON 配列文字列）> config の
   `reviewer_launch_args[<basename>]`。型検証（object であること・キー存在・文字列のみの配列・
-  印字可能ASCIIのみ・空文字列不可）は python3 側で行い、違反時・未知 reviewer 時は**空配列へ
-  フォールバックせず非ゼロ**（fail closed）。出力は1行1要素（改行区切り）で、呼び出し側は
-  `while read` で bash 配列へ集める（**eval は使わない**）。
-- **危険引数の拒否**: `_xrev_reject_unsafe_reviewer_args` が sandbox/approval 系フラグ
-  （前方一致: `--sandbox` `--ask-for-approval` `--approval` `--full-auto` `--dangerously`
-  `--permission-mode` `--yolo` `-a`）を検出したら非ゼロで拒否する。`start-reviewer.sh` はユーザー
-  追加引数をこれに通してから launch 引数の**後ろ**に連結する（launch 引数を後置上書きさせない）。
+  印字可能ASCIIのみ・空文字列不可）に加えて上記の意味検証を通り、違反時・未知 reviewer 時は
+  fail closed。出力は1行1要素（改行区切り）で、呼び出し側は `while read` で bash 配列へ集める
+  （**eval は使わない**）。
+- **拒否リストは早期棄却の best-effort（正典ではない）**: `_xrev_reject_unsafe_reviewer_args`
+  （前方一致: `--sandbox` `-s` `--ask-for-approval` `--approval` `--full-auto` `--dangerously`
+  `--permission-mode` `--yolo` `-a`）は分かりやすいエラーメッセージを即座に返すための早期ゲートに
+  すぎない。`start-reviewer.sh` はユーザー追加引数をこれに通してから launch 引数の**後ろ**に連結する
+  が、最終的な合否は必ず上記の意味検証（最終 argv 全体）で決まる。
 - **起動後の実効検証**: 自動生成経路は起動確認（read-screen probe + プロセス証明）に加え、
-  `_verify_reviewer_launch_args` で対象 surface の直下プロセスの実コマンドライン（`ps -o pid=,args=`）に
-  launch 引数がすべて含まれることを確認してから採用する。確認できなければ `exit 19`（採用しない）。
+  `_verify_reviewer_launch_args` で対象 surface の直下プロセスの実効ポリシーを確認してから採用する。
+  確認できなければ `exit 19`（採用しない）。
+- **既存ペインを「採用」する経路の実効検証（指摘3への対処）**: 従来は前景プロセス名が
+  `reviewer_process`（既定 `codex`）と一致することしか見ておらず、手動起動・旧版の書き込み可能な
+  ままの端末がそのまま present（採用）扱いになり得た。`_xrev_classify_reviewer` の present 判定
+  （`_verify_reviewer_process` 成功後）と、送信直前の `xrev_transport_review` の双方で
+  `_xrev_verify_reviewer_policy` を通し、対象 surface の前景プロセスの argv を取得して意味検証に
+  かける。不合格なら `_xrev_classify_reviewer` は `policy_mismatch` を返し `exit 27`、
+  `xrev_ensure_reviewer` / `xrev_transport_review` の呼び出し側はこれを受けて「ペインを閉じて
+  ensure-reviewer で作り直すか、start-reviewer.sh で起動し直してください」と案内して中止する。
+  既定はこの検証を行う（fail closed）。`XREV_ALLOW_UNVERIFIED_REVIEWER=1`（明示 opt-in）のときだけ
+  検証を省略し警告ログを出す — 手動で用意した reviewer を使う運用を完全に壊さないための後方互換。
 - **サンドボックスと承認は別軸である（既定に両方を含める理由）**: codex の `--sandbox read-only` は
   「何ができるか」を縛るが、コマンド実行のたびに人間へ承認を求めるかどうかは `--ask-for-approval` が
   決める別の軸である。承認ポリシーを既定のままにすると、reviewer が `git diff` や `tests/run.sh` を
@@ -384,10 +434,8 @@ SKILL.md は「reviewer = レビュー専用・read-only」と約束する。こ
   外すことは権限の緩和ではなく、権限の強制を sandbox 側へ一本化することである。
   **片方だけを設定してはならない**: `--ask-for-approval never` を sandbox 指定なしで使うと、承認も
   サンドボックスも無い状態になる。この組を崩す変更は安全性の変更として扱うこと。
-- **限界**: 既存ペインを「採用」する経路（classify → present）では launch 引数を検証しない
-  （ユーザーが手動で用意した端末を壊さないための意図的な限界）。同名の別バイナリへの差し替えや、
-  codex/claude 自身の設定ファイル側での上書きまでは検出・保証しない（詳細は
-  [`../docs/security-design.md`](../docs/security-design.md)）。
+- **限界**: 同名の別バイナリへの差し替えや、codex/claude 自身の設定ファイル側での上書きまでは
+  検出・保証しない（詳細は [`../docs/security-design.md`](../docs/security-design.md)）。
 
 ### 参照モード（Phase2: コンテキスト削減・diff 本文を送らない）
 
@@ -462,6 +510,11 @@ cmux に流さず、reviewer に「自分で diff を取得してレビュー」
    (iii-c) **Enter の直前（最終ゲート）**。(iii-c) で前景が変わっていれば Enter を送らずに中止する
    （送信済みの本文が入力行に残る旨を案内する）。限界は
    [`../docs/security-design.md`](../docs/security-design.md) を参照。
+4. **(iii') 安全ポリシー実効検証**。(iii) の直後、payload 構築の前に `_xrev_verify_reviewer_policy` で
+   前景プロセスの argv を取得し、`_xrev_verify_effective_policy` により sandbox=read-only かつ
+   承認=never が実効に有効かを確認する（`exit 27`）。前景プロセス名の一致だけでは、手動起動・旧版の
+   書き込み可能なままの端末が採用されてしまうため（詳細は「reviewer read-only 強制」参照）。既定は
+   検証する（fail closed）。`XREV_ALLOW_UNVERIFIED_REVIEWER=1` で opt-out 可。
 
 `transport.sh resolve --json` は機械可読の診断契約（`{ok, exit_code, surface_ref, surface_uuid, workspace,
 resolve_path}`）を返す。`resolve_path` は `explicit|same_ws|global`。

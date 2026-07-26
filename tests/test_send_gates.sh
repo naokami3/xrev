@@ -118,6 +118,9 @@ _verify_reviewer_process() {
   _SG_VP_I=$(( _SG_VP_I + 1 ))
   return "$r"
 }
+# 指摘3(変更2): 送信前の安全ポリシー実効検証。既定は「安全」（0）を返し、本ファイルの対象である
+# プロセス証明ゲートの順序・回数の検証に影響させない。rc27 のゲート自体は専用の節で検証する。
+_xrev_verify_reviewer_policy() { return 0; }
 _detect_content_type() { printf 'plain'; }
 _build_framed_line() { printf 'FRAMED_LINE_FOR_TEST'; }
 _cmux_read_screen() { printf ''; }
@@ -239,6 +242,21 @@ assert_eq "Enter送信失敗+前景変化 → 再送せず送信は初回の1回
 
 _cmux_submit() { _SG_CALLS="$_SG_CALLS submit"; return 0; }
 unset _SG_SUBMIT_COUNT _SG_SAVED_RESP_TIMEOUT
+
+# 10) 変更2(指摘3): 既存 reviewer が安全ポリシー（read-only+承認never）の実効検証(iii')に
+#     不合格 → プロセス証明(iii)の直後、payload 構築の前に rc27 で中止する（send/submit いずれも
+#     呼ばれない）。XREV_ALLOW_UNVERIFIED_REVIEWER=1（明示 opt-in）のときだけ検証を省略して
+#     通常どおり続行する（手動運用を壊さないための後方互換）。
+_xrev_verify_reviewer_policy() { return 1; }
+_sg_run 0 0 0
+assert_rc "安全ポリシー不合格 → rc27" 27 "$_SG_RC"
+assert_eq "安全ポリシー不合格 → send も submit も呼ばれない" "" "$_SG_CALLS"
+
+XREV_ALLOW_UNVERIFIED_REVIEWER=1 _sg_run 0 0 0
+assert_rc "opt-out env → 安全ポリシー不合格でも続行(rc0)" 0 "$_SG_RC"
+assert_eq "opt-out env → send/submit は通常どおり実行される" " send submit" "$_SG_CALLS"
+
+_xrev_verify_reviewer_policy() { return 0; }
 
 # ── 後片付け: 実体を読み直してスタブを捨てる（後続の test_*.sh へ漏らさない）────────
 # shellcheck source=/dev/null

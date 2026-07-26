@@ -15,12 +15,13 @@ xrev の脅威モデルを正直に記述する。**何を守り、何を守ら�
 | 暴発防止 | `@xrev`（設定の `keyword`）や明示指示が無いときは完全に沈黙（フックは無出力）。既定の到達点は最も安全な `review`。 |
 | 無限ループ防止 | 終端は機械が握る。blocker（`critical`/`high`）0 件で収束、`max_iterations`（既定 5）の安全弁付き。 |
 | payload のコマンド実行**リスクの低減** | プロセス証明（`exit 17`）。reviewer ペインの tty で**前景プロセスグループ**を握るプロセスが `reviewer_process`（既定 `codex`）であることを確認し、**前景が一致しないときは Enter を送らない**。Codex 終了後に shell へ戻った端末へレビュー依頼文を送ってシェルコマンドとして実行される事故を減らす。ただし完全な防止ではない（下記「リスクと限界」参照）。 |
+| 無承認でのワークスペース変更**リスクの低減** | 安全ポリシー実効検証（`exit 27`）。プロセス名の一致だけでなく、前景プロセスの argv が sandbox=read-only かつ承認=never を実効に満たすかを送信前・reviewer 採用時に検証する。手動起動・旧版の書き込み可能なままの端末が採用され、承認を求められないまま変更されてしまう事故を減らす（下記「reviewer の read-only」参照）。 |
 
 ### 守らないもの / 前提
 
 | 項目 | 実態 |
 |------|------|
-| reviewer の read-only | 起動経路（`start-reviewer.sh` の手動起動 / `ensure-reviewer` の自動生成）では `reviewer_launch_args`（既定 codex=`--sandbox read-only`、claude=`--permission-mode plan`）を機械的に付与し、起動後に対象 surface の直下プロセスの実コマンドラインへ実際に含まれているかを検証する（確認できなければ起動を採用せず `exit 19`）。ただし**既存ペインを「採用」する経路（classify → present）ではこの強制を行わない**（ユーザーが手動で用意した端末をそのまま使う運用を壊さないための意図的な限界）。同名の別バイナリへの差し替えや、codex/claude 自身の設定ファイル側での上書きまでは検出・保証しない。 |
+| reviewer の read-only | 起動経路（`start-reviewer.sh` の手動起動 / `ensure-reviewer` の自動生成）では `reviewer_launch_args`（既定 codex=`--sandbox read-only --ask-for-approval never`、claude=`--permission-mode plan`）を機械的に付与し、決定した引数列そのもの・起動後の実プロセス argv の双方を「最終 argv の意味検証」（`_xrev_verify_effective_policy`）にかける（拒否リストではなく実効値の判定が正典。合格できなければ起動を採用せず `exit 19`）。**既存ペインを「採用」する経路（classify → present）でも既定でこの検証を行う**: 前景プロセスの argv を取得し安全ポリシーが実効に有効かを確認し、不合格なら `policy_mismatch`（`exit 27`）として採用しない。`XREV_ALLOW_UNVERIFIED_REVIEWER=1`（明示 opt-in）のときだけ検証を省略できる（手動で用意した reviewer を使う運用を壊さないための後方互換。既定は検証する=fail closed）。ただし同名の別バイナリへの差し替えや、codex/claude 自身の設定ファイル側での上書きまでは検出・保証しない。 |
 | エージェントの外部通信 | 送受信内容は cmux ソケット経由で**ローカルに留まる**（xrev 自身は外部送信しない）。ただし各エージェント（Claude / Codex）自体は各社のサービスに接続する。 |
 | 秘密情報の管理 | xrev 自身は API キー等の秘密情報を**保存・要求しない**。cmux ソケットは認証付き（`CMUX_SOCKET_PASSWORD` 等がペイン内シェルに自動注入）。 |
 

@@ -153,7 +153,7 @@ REASONS = {
     23: "encode_failed", 26: "payload_too_large", 24: "invalid_response",
     13: "truncated", 14: "non_terminal", 15: "ws_mismatch", 16: "ambiguous",
     17: "process_mismatch", 19: "autocreate_failed", 20: "reviewer_contention",
-    25: "submit_failed", 30: "cmux_not_found", 31: "not_in_pane",
+    25: "submit_failed", 27: "reviewer_policy_mismatch", 30: "cmux_not_found", 31: "not_in_pane",
 }
 out = {
     "decision": decision,
