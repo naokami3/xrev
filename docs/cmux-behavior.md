@@ -329,6 +329,28 @@ TUI 起動直後の取りこぼしかは切り分けていない）。
 **改善候補（未実装・実装前に要実測）**: ensure-reviewer の起動確認直後に短い捨て送信を 1 回挟んで
 初回失敗を吸収する / 初回送信のみ settle を延長する。roadmap の将来の検討事項に記載。
 
+## 10. セッション復元は codex を cmux 自前の引数で再起動する（read-only 引数が消える）
+
+2026-07-27 実測（cmux 0.64.20）。ensure-reviewer が `exec codex --sandbox read-only
+--ask-for-approval never` で起動した reviewer ペインが、cmux のセッション復元（ペインの
+ログインシェルごと再生成。surface UUID は維持される）を経ると、**cmux が自前の統合引数で codex を
+再起動し、こちらが与えた launch 引数は引き継がれない**。KERN_PROCARGS2 で採取した再起動後の実 argv:
+
+```
+/Users/naokami/.local/bin/codex --enable hooks --dangerously-bypass-hook-trust
+  -c hooks.SessionStart=[{...cmux-codex-hook-session-start.sh...}] （以下 cmux の hook 注入が続く）
+```
+
+`--sandbox` / `--ask-for-approval` は**一切含まれない** = 復元後の reviewer は read-only の保証を
+失っている。このとき送信ゲートの安全ポリシー実効検証が `exit 27`（sandbox 指定 0 件）で送信を
+中止することを実機で確認した（毎送信ゲートで再検証する TOCTOU 対策が、まさにこの「静かな挿げ替え」を
+捕捉した実例。タイトル・surface UUID・前景プロセス名 codex はすべて一致したまま安全性だけが落ちる）。
+
+**運用**: cmux の再起動・セッション復元後は reviewer ペインをそのまま使わない。exit 27 が出たら
+ペインを閉じて `transport.sh ensure-reviewer` で作り直す（ゲートの診断もこの復旧手順を案内する）。
+CLAUDE.md の「セッション復元が前作業を復元しないよう注意」は、履歴の混入だけでなく
+**安全ポリシーの喪失**も含む実害として裏付けられた。
+
 ## 調査するときの注意
 
 1. **1回の試行で成否を判定しない。** 4 の欠陥は非決定的で、単調性を仮定した二分探索は誤った境界を返す。
