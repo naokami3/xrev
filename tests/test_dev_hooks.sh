@@ -27,10 +27,21 @@ printf '{"tool_input":{}}' | "$PT"; assert_rc "file_path 無しは rc=0" 0 "$?"
 printf 'これはJSONでない'  | "$PT" 2>/dev/null; assert_rc "壊れたイベントJSONは解析失敗として rc=2" 2 "$?"
 
 # python3 が見つからない環境 → 「検証できない」として rc=2（fail-open で黙って通さない）。
-# PATH を /bin のみに絞り python3 を不可視化する（bash/cat は /bin にあるため動作は保つ）。
-out="$(ev "$tmp/tools/ok.sh" | PATH=/bin "$PT" 2>&1)"; rc=$?
+# 【移植性】以前は PATH=/bin で python3 を隠していたが、Ubuntu は usr-merge で /bin が
+# /usr/bin へのシンボリックリンクのため python3 が見えてしまい、この検証が成立しなかった
+# （macOS では通り ubuntu CI だけ落ちた）。OS のディレクトリ構成に依存しないよう、フックの
+# 動作に必要なコマンド（env/bash/cat。python3 は入れない）だけを symlink した一時ディレクトリを
+# PATH にする。
+nopy_bin="$tmp/nopy_bin"; mkdir -p "$nopy_bin"
+for _c in env bash cat; do
+  _p="$(command -v "$_c")" && ln -sf "$_p" "$nopy_bin/$_c"
+done
+out="$(ev "$tmp/tools/ok.sh" | PATH="$nopy_bin" "$PT" 2>&1)"; rc=$?
 assert_rc "python3 が無い環境は rc=2" 2 "$rc"
 assert_contains "python3 不在のメッセージ" "$out" "python3"
+# 前提の担保: このスタブ PATH で python3 が本当に不可視であること（隠せていなければ上の検証は無意味）
+PATH="$nopy_bin" command -v python3 >/dev/null 2>&1; rc=$?
+assert_rc "スタブ PATH では python3 が不可視" 1 "$rc"
 
 # ── claude-stop.sh ──
 # 変更検知は環境(リポジトリの dirty 状態)に依存しないよう、XREV_STOP_ROOT で一時 git リポジトリを
