@@ -4,7 +4,7 @@ description: >-
   依頼文に @xrev が含まれるとき、または「設計段階から Codex クロスレビューを回す」指示が
   コンテキストに注入されたときに発火する。primary(既定 Claude) が設計・実装を担い、
   reviewer(既定 Codex) が cmux 経由でクロスレビューを行う往復を、設計フェーズから自動運用する。
-  critical/high が 0 件になるまでレビュー指摘を反映し、収束後に到達点（review/commit/pr）へ進める。
+  critical/high が 0 件になるまでレビュー指摘を反映し、収束後に完了アクション（review/commit/pr）へ進める。
   キーワードや明示指示が無い些細な変更では発火しない。
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob
 ---
@@ -13,7 +13,7 @@ allowed-tools: Bash, Read, Edit, Write, Grep, Glob
 
 AI コーディングエージェント同士に、**設計段階からクロスレビューの往復**を人間の操作なしで行わせる。
 既定では **primary = Claude（設計・生成・修正反映）**、**reviewer = Codex（レビュー専用・read-only）**。
-レビュー往復は cmux のペイン間通信を介して行い、収束後はオプションで ADR を生成し、到達点を選ぶ。
+レビュー往復は cmux のペイン間通信を介して行い、収束後はオプションで ADR を生成し、完了アクションを選ぶ。
 **最後の確認は必ず人間が行う。**
 
 主従はキーワードではなく設定（`config/xrev.default.json` の `primary`/`reviewer`）が決める。
@@ -30,7 +30,7 @@ AI コーディングエージェント同士に、**設計段階からクロス
 
 発火したら**即座に往復を始めず**、次の 2 点をユーザーに一度だけ確認する。自動化と人間の制御の両立点。
 
-1. **到達点（stop_at）**: `review`（最も安全。コミットしない）/ `commit` / `pr`（ドラフト）。
+1. **完了アクション（stop_at）**: `review`（最も安全。コミットしない）/ `commit` / `pr`（ドラフト）。
    既定値は次の優先順で決まる: ユーザーの明示指定 → 環境変数 `XREV_STOP_AT` → `config` の `stop_at`
    → `review`。確認時は「現在の既定（config/環境変数の値）」を提示し、変えるか尋ねる。
 2. **ADR 生成**: する / しない。既定は ユーザーの明示指定 → 環境変数 `XREV_ADR`（`true`/`false`）
@@ -53,13 +53,13 @@ export XREV_CONFIG="${CLAUDE_PLUGIN_ROOT}/config/xrev.default.json"   # 既定�
 # export XREV_MAX_ITERATIONS=5
 ```
 
-## 2. 配管の前提（cmux）
+## 2. 通信層の前提（cmux）
 
-reviewer との往復は配管抽象 `scripts/transport.sh` が担う。**cmux 依存はそこだけに閉じ込められている**。
+reviewer との往復は通信層抽象 `scripts/transport.sh` が担う。**cmux 依存はそこだけに閉じ込められている**。
 このスキルから cmux コマンドを直接叩かない。往復は必ず `scripts/review-loop.sh` を介す。
 
 **前提: primary（この Claude Code）が cmux ペイン内で動いていること。** cmux ソケットは認証が要り、
-認証情報はペイン内シェルにのみ自動注入される。cmux の外（通常ターミナル）から起動していると配管は
+認証情報はペイン内シェルにのみ自動注入される。cmux の外（通常ターミナル）から起動していると通信層は
 ソケットに接続できない。最初に `"${CLAUDE_PLUGIN_ROOT}/scripts/transport.sh" ping` で接続を確認し、
 失敗したら「cmux ペイン内で Claude Code を起動し直す」ようユーザーに案内する。
 
@@ -106,7 +106,7 @@ loop:
                   ITER += 1 で再実行。
     escalate    → 上限到達。人間にエスカレーションして停止（5章）。
     invalid     → reviewer が契約違反の出力。スキーマ準拠の再出力を促してリトライ（5章）。
-    transport_error → 配管失敗。ペイン/タイトルを確認して再試行（5章）。
+    transport_error → 通信層失敗。ペイン/タイトルを確認して再試行（5章）。
 ```
 
 呼び出し例:
@@ -175,20 +175,30 @@ printf '%s' "$payload" | \
 ```
 
 分岐に `reference_unverified` が増える: reviewer の reference_context（mode/status/head/diff_hash）が期待と不一致＝別対象を
-見た or 同一WS外、とみなし、**同一 ITER を inline（diff 本文を送る通常方式）で再試行**する（`XREV_REFERENCE_MODE` を
-付けずに再呼び出し）。フォールバックが `max_reference_fallbacks` を超えると `escalate` になるので人間へ。**安定窓**:
-参照 payload 送信〜応答まで作業ツリーを編集しないこと。前提（同一WS・同一worktree）が崩れていれば素直に inline に倒す。
+見た or 同一WS外、とみなし、レビューを採用せず**同一 ITER を再試行**する。再試行の方式は reviewer 種別で決まる:
+
+- **reviewer=codex（既定構成）**: inline（diff 本文を送る通常方式）で再試行する（`XREV_REFERENCE_MODE` を付けずに再呼び出し）。
+  前提（同一WS・同一worktree）が崩れていた場合も素直に inline に倒す。
+- **reviewer=claude（主従反転プリセット）**: claude は参照モード専用（inline は無条件 exit 28）のため、
+  **参照モードのまま**再試行する。詳細は [references/codex-primary-playbook.md](../../references/codex-primary-playbook.md) 6章参照。
+
+いずれの方式でも再試行の通算が `max_reference_fallbacks` を超えると `escalate` になるので人間へ。**安定窓**:
+参照 payload 送信〜応答まで作業ツリーを編集しないこと。
 
 ## 5. 例外時の扱い
 
 - `escalate`（最大反復に到達しても blocker が残る）: **強制的に人間へエスカレーション**。
-  残った critical/high と往復経緯を要約して提示し、判断を仰ぐ。勝手に到達点へ進めない。
+  残った critical/high と往復経緯を要約して提示し、判断を仰ぐ。勝手に完了アクションへ進めない。
 - `invalid`（reviewer が自由作文や壊れた JSON を返す）: スキーマ
   （`references/review-schema.json`）への準拠を促して同じ payload を 1 回だけ再送。
   なお改善しなければ人間に報告。transport が `exit 24`（センチネルで完成した応答は画面にあるが
   JSON が不正）を返した場合も、この `invalid` として同様に扱われる。
 - `transport_error`（送受信失敗）: `Review Codex` ペインの存在・タイトル・常駐を確認。
   `XREV_REVIEWER_SURFACE` 明示指定も検討。
+  - **`truncated`(13) / `send_failed`(11) は、生成直後ペインへの初回送信で高頻度に発生する**
+    （実測。[docs/cmux-behavior.md](../../docs/cmux-behavior.md) 9節）。異常ではないので、
+    `round_state` を引き継いで**同一 ITER をそのまま再試行**する（安全弁 `max_transport_attempts` が
+    総量を規制する。2〜3 回の再試行で通るのが実測パターン）。ペインの作り直しや設定変更に走らない。
 
 ## 6. ADR 生成（必要有無の確認で「する」を選んだ場合のみ）
 
@@ -209,7 +219,7 @@ printf '%s' "$adr_material_json" | "${CLAUDE_PLUGIN_ROOT}/scripts/make-adr.sh" d
 ADR は **xrev が許容する唯一のファイル生成物**（「中間ファイル」ではなく「意図して残す成果物」）。
 素材 JSON の形は `scripts/make-adr.sh` 冒頭コメント参照（title/context/decision/consequences/discussion[]）。
 
-## 7. 到達点分岐（収束後）
+## 7. 完了アクション分岐（収束後）
 
 確認した `stop_at` に従って `scripts/finalize.sh` を呼ぶ。引数を渡せばその場指定が最優先。引数を省くと
 finalize.sh が `XREV_STOP_AT` → `config` の `stop_at` → `review` の順で既定を解決する。**最終フォールバックは
@@ -243,4 +253,4 @@ finalize.sh が `XREV_STOP_AT` → `config` の `stop_at` → `review` の順で
 - `@xrev` や明示指示が無いのに発火する。
 - 既定で commit / pr へ進む（既定は review）。
 - 非ドラフト PR を作る / 人間の確認なしにマージ・確定する。
-- 上限到達やエスカレーション時に、人間を飛ばして勝手に到達点へ進める。
+- 上限到達やエスカレーション時に、人間を飛ばして勝手に完了アクションへ進める。
