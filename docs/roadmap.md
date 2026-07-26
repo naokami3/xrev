@@ -67,6 +67,30 @@ xrev のフェーズと進捗。詳細な設計は [architecture.md](architectur
       （XREV_ROOT 不整合を握りつぶさず気づける）
 - [ ] claude reviewer との実機往復 e2e（cmux ペイン内で実際に `Review Claude` へ送受信する）
 
+## フェーズ 6: reviewer の auto 解決・グローバル一度きり導入 ✅ 完了
+
+主従反転の入口を「プリセット config を明示指定する」方式から「入口で primary を自己申告するだけで
+reviewer が自動解決される」方式へ簡素化した。プリセット config は値を明示的に固定したい場合の任意
+選択肢として残る。詳細設計は本ドキュメントと [protocol.md](../references/protocol.md) を参照。
+
+- [x] **D1: reviewer の auto 解決**（`_xrev_resolve_reviewer`。優先順 `XREV_REVIEWER` > config の
+      明示値 > auto=primary の相手方）。**semantic kind**（解決済み reviewer 名）を安全ポリシー
+      検証・送信完全性方式・launch 引数選択・composer クリア方式の唯一の種別判定源にする
+      （旧来の「kind = 前景プロセス名の basename」定義を置き換え）。派生3キー
+      （`reviewer_pane_title`/`reviewer_process`/`reviewer_reads_workspace`）の既定を `auto` 化。
+      明示値との種別矛盾は送信前に `exit 29`（`reviewer_config_conflict`）で fail closed。
+      既定 config での後方互換同値・主従反転プリセットとの等価性をテストで固定。
+- [x] **D2: 入口の自己申告と質問規則**（`XREV_PRIMARY`/`XREV_REVIEWER` を SKILL.md / codex 主
+      プレイブックへ追記。reviewer の明示指定は質問せず正規の上書きとして扱い、意図が一意に
+      読めない場合のみ一拍確認で質問する）。
+- [x] **D3: print-agents-snippet.sh のグローバル導入化**（`--append-global`。対象は
+      `$CODEX_HOME/AGENTS.md`。R7 実測で codex がこれを読み込むことを確認済み。symlink/既存
+      ファイル/初回導入の3経路収束・排他ロック（自己解放・待機なしという ensure-reviewer との
+      契約差）・マーカー `<!-- xrev:snippet:BEGIN/END -->` による冪等な追記/置換・mv 直前の
+      内容再検証。per-project 貼り付け前提の記述は README/playbook から撤去）。
+- [x] R7: codex のグローバル AGENTS.md 読込を実測で確認（一時 `CODEX_HOME` + `codex exec`。
+      マーカー有無での正例・対照例の両方で裏取り）。
+
 ## 将来の検討事項
 
 - `transport` 実装の差し替え（`codex exec` 方式・別エージェント等）

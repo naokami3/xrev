@@ -24,7 +24,9 @@ xrev/
 │   ├── make-adr.sh            # 往復ログ → ADR 整形（ADR 生成 on のときのみ）。出力先は引数/env/config/既定で解決
 │   ├── start-reviewer.sh      # reviewer(Codex)を実ターミナル内で規約タイトル付き起動（目標C。cmux依存はtransport経由）
 │   ├── keyword-match.sh       # keyword 判定の単一の真実源（hook・codex 主プレイブック・スニペットが共有）
-│   ├── print-agents-snippet.sh # 利用者プロジェクトの AGENTS.md へ貼る導入スニペットを stdout に出力（ファイル生成しない）
+│   ├── print-agents-snippet.sh # codex のグローバル AGENTS.md（$CODEX_HOME/AGENTS.md）への導入スニペット。
+│   │                            既定は stdout 出力のみ（ファイル生成しない）。--append-global で
+│   │                            マーカー管理の冪等な追記/更新（対象解決・排他ロック付き）を行う
 │   └── finalize.sh            # 完了アクション分岐 review/commit/pr。PR は --draft 固定
 ├── config/
 │   ├── xrev.default.json      # 既定設定（primary=claude/reviewer=codex。設定キー一覧は protocol.md）
@@ -49,7 +51,13 @@ xrev/
 3. **コアは主従非依存** — 特定エージェント名をコアやリポジトリ名に固定しない。主従は
    `config` の `primary`/`reviewer` プリセットで表現する。**Codex 主・Claude レビュー構成は対応済み**
    （`config/xrev.codex-primary.json`。[references/codex-primary-playbook.md](../references/codex-primary-playbook.md)
-   参照。フェーズ 5、[roadmap.md](roadmap.md)）。
+   参照。フェーズ 5、[roadmap.md](roadmap.md)）。既定 config の `reviewer` は `auto` であり、
+   入口で `XREV_PRIMARY` を自己申告するだけで「primary の相手方」が reviewer に機械的に解決される
+   （D1・フェーズ 6）。プリセットファイルは値を config へ明示的に固定したい場合のみ使う。
+   導入は非対称: **claude 側（primary=claude・既定）はプラグイン導入のみ**で完結するのに対し、
+   **codex 側（primary=codex）は加えてグローバル一度きりの導入**（`print-agents-snippet.sh
+   --append-global` による `$CODEX_HOME/AGENTS.md` への追加。フェーズ 6・R7 実測で codex が
+   これを読み込むことを確認済み）が要る。
 4. **判断の分離** — 終端条件（blocker 0 件）・最大反復・severity 集計といった暴走防止の判断は
    スクリプトが決定論的に握り、設計・実装・修正反映といった創造的な作業は LLM（primary）が握る。
    `review-loop.sh` は 1 ラウンドと終端判定だけを担い、ループの駆動（修正して次へ）は Claude が行う。

@@ -38,6 +38,15 @@ Claude Code プラグイン。
 xrev は **Claude Code のプラグインマーケットプレイス**として配布する（npm 等のパッケージマネージャは
 使わない）。このリポジトリ自体がマーケットプレイスを兼ねており、ユーザーは 2 コマンドで導入できる。
 
+**導入手順は primary 側で非対称**（既定構成 primary=Claude の場合はこの節だけで完結する）:
+
+- **Claude 側（primary=claude・既定構成）**: 下記 A/B/C いずれかで**プラグインを入れるだけ**。
+  追加の設定ファイル配置は不要。
+- **Codex 側（primary=codex・主従反転を使う場合のみ）**: プラグイン導入に加え、
+  `scripts/print-agents-snippet.sh --append-global` による**グローバル一度きりの追加導入**が要る
+  （このマシン上のすべての codex プロジェクトで有効になる。プロジェクトごとの設定は不要）。
+  詳細は後述の「Codex 主プリセット（primary=codex / reviewer=claude）を使う」節を参照。
+
 ### A. 個人で入れる（最短）
 
 Claude Code 上で次を実行する:
@@ -233,17 +242,31 @@ xrev は別ペインで**対話モードのまま常駐している** Claude/Cod
 キャッシュ配下（アップデートで再配置され得るパス）から使うと、後述のスニペットに埋め込む絶対パス
 （`XREV_ROOT`）が無効になるおそれがある。
 
-1. xrev リポジトリで `scripts/print-agents-snippet.sh` を実行し、出力されたスニペットを
-   利用者プロジェクトの `AGENTS.md` に貼り付ける（**このスクリプトはファイルを生成しない**。
-   貼り付けは人間が行う）。
+導入は**このマシン上で一度だけ**でよい（プロジェクトごとに `AGENTS.md` へ貼り付ける必要は無い）。
+codex はグローバル指示ファイル `$CODEX_HOME/AGENTS.md`（`CODEX_HOME` 未設定なら既定
+`~/.codex/AGENTS.md`）を読み込むため、そこにスニペットを一度導入しておけば全プロジェクトで有効になる。
+
+1. xrev リポジトリで `scripts/print-agents-snippet.sh --append-global` を実行し、グローバル
+   `AGENTS.md` へスニペットを追加する（マーカー `<!-- xrev:snippet:BEGIN/END -->` で挟んで管理する
+   ため、再実行しても冪等に更新される＝二重に増殖しない）。
 
    ```bash
-   /path/to/xrev/scripts/print-agents-snippet.sh
+   /path/to/xrev/scripts/print-agents-snippet.sh --append-global
    ```
 
-2. codex がそのプロジェクトで作業を始めると、`AGENTS.md` のスニペット経由で
+   引数無しで実行するとファイルへは書き込まず、スニペット本文を stdout に出すだけになる
+   （**このスクリプトは `--append-global` を付けない限りファイルを生成しない**。手動で
+   `$CODEX_HOME/AGENTS.md` へ貼り付けたい場合はこちらを使う）。対象が symlink・既存ファイル・
+   未作成のいずれであっても正しく解決し、リンク切れや `CODEX_HOME` ディレクトリ不在などの
+   異常時は無変更のまま中止する（fail closed）。詳細な排他制御・対象解決の規則は
+   [`references/protocol.md`](references/protocol.md) を参照。
+
+2. codex がどのプロジェクトで作業を始めても、グローバル `AGENTS.md` のスニペット経由で
+   `export XREV_PRIMARY=codex` を自己申告したうえで
    [`references/codex-primary-playbook.md`](references/codex-primary-playbook.md) に従い、
-   `config/xrev.codex-primary.json` を使ってクロスレビュー往復を回す。
+   既定 config（`reviewer` は `auto`。自己申告から `reviewer=claude` が導出される）でクロスレビュー
+   往復を回す。値を config ファイルへ明示的に固定したい場合のみ `config/xrev.codex-primary.json`
+   を使う（挙動は等価）。
 3. reviewer は Claude Code（`claude --permission-mode plan`。cmux ペインのタイトルは既定
    `Review Claude`）。
 
@@ -252,8 +275,9 @@ xrev は別ペインで**対話モードのまま常駐している** Claude/Cod
 代わりに送信内容の全文一致照合を使うが、実測では空 payload でも実コードが生成する最小 wire は
 約 3,231 文字あり、composer に全文が可視な実測上限（約800文字）を常に超える。**つまり inline
 （本文を wire にそのまま載せる方式）での claude 送信は payload の内容に関わらず必ず送信前に拒否
-される（`exit 28`）。** そのため `config/xrev.codex-primary.json` は `reviewer_reads_workspace=true`
-を既定にしており、**実装フェーズは reviewer に自分で diff を取得させる参照モードを必ず使う**
+される（`exit 28`）。** そのため reviewer=claude のときは `reviewer_reads_workspace` が自動的に
+`true` になり（D1: auto 解決。明示 `false` にはできない）、**実装フェーズは reviewer に自分で
+diff を取得させる参照モードを必ず使う**
 （diff 本文を送らないためこの制約を回避できる）。**設計フェーズのクロスレビューは claude
 reviewer では現状非対応**（設計フェーズは常に inline になるため）で、必要なら人間レビューか
 既定構成（primary=Claude・reviewer=Codex）を使う。詳細・手順は
