@@ -12,7 +12,7 @@ xrev の脅威モデルを正直に記述する。**何を守り、何を守ら�
 |---------|--------|
 | 人間の最終確認 | PR は必ず `--draft`。Ready 化・マージ・確定の最終トリガは人間が引く。`finalize.sh` に非ドラフト PR を作る経路を持たせない。 |
 | リポジトリを汚さない | エージェント間のやり取りに中間ファイルを使わない。ファイル生成は ADR（`docs/adr/`）のみ。 |
-| 暴発防止 | `@xrev`（設定の `keyword`）や明示指示が無いときは完全に沈黙（フックは無出力）。既定の到達点は最も安全な `review`。 |
+| 暴発防止 | `@xrev`（設定の `keyword`）や明示指示が無いときは完全に沈黙（フックは無出力）。既定の完了アクションは最も安全な `review`。 |
 | 無限ループ防止 | 終端は機械が握る。blocker（`critical`/`high`）0 件で収束、`max_iterations`（既定 5）の安全弁付き。 |
 | payload のコマンド実行**リスクの低減** | プロセス証明（`exit 17`）。reviewer ペインの tty で**前景プロセスグループ**を握るプロセスが `reviewer_process`（既定 `codex`）であることを確認し、**前景が一致しないときは Enter を送らない**。Codex 終了後に shell へ戻った端末へレビュー依頼文を送ってシェルコマンドとして実行される事故を減らす。ただし完全な防止ではない（下記「リスクと限界」参照）。 |
 | 無承認でのワークスペース変更**リスクの低減** | 安全ポリシー実効検証（`exit 27`）。プロセス名の一致だけでなく、前景プロセスの argv が sandbox=read-only かつ承認=never を実効に満たすかを reviewer 採用時・送信の全ゲート（プロセス証明と同一ゲートで毎回。下記「リスクと限界」参照）で検証する。手動起動・旧版の書き込み可能なままの端末が採用され、承認を求められないまま変更されてしまう事故を減らす（下記「reviewer の read-only」参照）。 |
@@ -32,7 +32,7 @@ xrev の脅威モデルを正直に記述する。**何を守り、何を守ら�
 - **finalize の commit/pr は Claude のステージング判断に依存する**: 何をステージし、どんなコミット
   メッセージ・PR 本文にするかは LLM の判断であり、`finalize.sh` はそれを機械実行するだけ。
   この層に誤りがあれば不適切なコミット内容になり得る（ただし PR はドラフト止まりで人間が確認する）。
-- **実行コンテキスト依存**: primary が cmux ペイン外で起動されると配管が接続できない。これは
+- **実行コンテキスト依存**: primary が cmux ペイン外で起動されると通信層が接続できない。これは
   preflight（`exit 31`、`scripts/transport.sh ping` で確認可）で検知して停止するが、
   セキュリティ境界ではなく可用性の制約である。
 - **プロセス証明は誤送信防止のヒューリスティックであり、実行バイナリの真正性は保証しない**:
@@ -77,3 +77,36 @@ xrev の脅威モデルを正直に記述する。**何を守り、何を守ら�
 - **プロセス証明は macOS / Linux の標準的な `ps`（`pid,pgid,tpgid,comm`）に依存する**: `ps` が
   無い・出力が想定形式でない環境では常に拒否される。`ps` は「一部の PID が消えていても残りを出して
   exit 0 を返す」ため、要求 PID と結果 PID の一致（欠落・余剰・重複なし）を検証したうえで判定する。
+- **`XREV_ALLOW_UNVERIFIED_REVIEWER` の残余リスクは主従反転（claude reviewer）文脈でも同型**:
+  このフラグは reviewer 採用時の安全ポリシー実効検証（sandbox=read-only かつ承認=never、または
+  claude の場合は `--permission-mode plan`）を明示 opt-out するもので、reviewer 種別によらず
+  同じ経路を通る。claude reviewer で opt-out すると、手動起動・旧版の**plan mode でない**（＝
+  ファイル編集が可能な）Claude Code がそのまま reviewer として採用され得る。既定構成
+  （reviewer=codex）と異なる新しいリスクが増えるわけではないが、**「read-only のはずの
+  reviewer が実は書き込み可能だった」事故の対象が codex から claude に変わるだけ**で、対処
+  （既定で検証する fail closed・opt-out は明示 opt-in のみ）は同一である。
+- **claude reviewer の送信完全性は「参照モードの端到端照合」だけを根拠とする**: claude は
+  ペーストチップに文字数を表示しない（実測。[cmux-behavior.md](cmux-behavior.md) 8-1）ため、Codex
+  向けの「表示文字数と送信長の一致」による切り詰め検出が使えない。もし検証せずに送信してしまうと、
+  本文の一部が入力欄に届かないまま reviewer がその**部分的な payload だけを見て**正常な review
+  JSON（`verdict:"approve"` 等）を返し得る。この場合 primary は「reviewer は全文を読んだ上で
+  approve した」と誤認し、実際には一部しかレビューされていない変更を収束扱いにしてしまう
+  （**誤収束による見逃し**）。composer 上の wire 文字列を空白非依存で全文一致照合する方式を
+  検討・実装したことがあったが、「空白の削除と挿入が相殺すれば比較・frame 検証のどちらもすり抜ける」
+  という2巡目クロスレビューの指摘を受け、完全性の証明にはならない可用性ヒューリスティックにすぎない
+  と判断し撤去した（経緯は [`../references/protocol.md`](../references/protocol.md)
+  「切り詰め検出」節）。**したがって claude・inline は wire 長に関わらず無条件で `exit 28`
+  （送信前拒否）とし、claude reviewer は参照モード（`XREV_REFERENCE_MODE=1`）専用にした。**
+  参照モードでは切り詰め検出自体を行わないが、これは安全性を緩めているのではなく、**別の仕組みで
+  完全性を保証する経路に切り替えている**: レビュー対象の完全性は diff_hash + 基底 HEAD の端到端
+  照合（[`../references/protocol.md`](../references/protocol.md) 「参照モード」節）が機械保証する。
+  wire 切り詰めで補助文（実装要約等）が欠けても、reviewer が実際にハッシュした range と返却
+  hash/head が一致した応答しか採用されないため、見ていない対象への approve は成立しない。
+  指示部が壊れた場合も decode_error / hash 不一致 / timeout のいずれかの失敗系に落ちる
+  （fail closed 維持）。
+- **参照モードの残余リスク（既存前提の再掲）**: `reference_context` は「primary と reviewer が
+  同一 diff を取得した」ことの**同一性検証**であり、reviewer がその diff を実際にレビューした
+  こと・品質を保証するものではない（信頼済み reviewer 前提。詳細は
+  [`../references/protocol.md`](../references/protocol.md) 「参照モード」節）。claude reviewer が
+  参照モード必須になったことで、この既存の前提（同一性検証≠品質保証）に依存する場面が実装フェーズ
+  では常態化する点に注意する。
