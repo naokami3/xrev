@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# transport.sh — 配管抽象レイヤー（依存の局所化）
+# transport.sh — 通信層抽象レイヤー（依存の局所化）
 #
 # このファイルは「reviewer にテキストを渡し、構造化結果（JSON）を受け取る」ことだけを
 # 抽象化する。xrev のコア（review-loop 等）は本ファイルの公開関数しか呼ばない。
@@ -103,7 +103,7 @@ RESP_POLL="$(_xrev_uint "${XREV_RESPONSE_POLL_SECONDS:-$(_cfg response_poll_seco
 SENTINEL_BEGIN='===XREV-JSON-BEGIN==='
 SENTINEL_END='===XREV-JSON-END==='
 
-# ── cmux 配管（ここだけが cmux に依存）─────────────────────────────────────────
+# ── cmux 通信層（ここだけが cmux に依存）─────────────────────────────────────────
 #
 # 【重要・実行コンテキスト】
 #   cmux のソケットは認証が要る。認証情報（CMUX_SOCKET_PASSWORD 等）と CMUX_SOCKET_PATH /
@@ -349,7 +349,7 @@ for line in os.environ.get("XREV_TOP", "").splitlines():
 PY
 }
 
-# ── cmux 配管ラッパ（uuid 付き tree / プロセス付き top）──────────────────────────
+# ── cmux 通信層ラッパ（uuid 付き tree / プロセス付き top）──────────────────────────
 _cmux_tree_uuids() { _cmux tree --all --json --id-format both 2>/dev/null; }
 _cmux_top_processes() { _cmux top --all --processes --format tsv 2>/dev/null; }
 
@@ -2431,7 +2431,7 @@ _xrev_sleep() { sleep "$1" 2>/dev/null || true; }
 # 人間可読な診断を出す。
 #
 # 【不変条件】検査はすべて非変更・再実行可能。ペイン生成・送信・タイトル変更などの副作用を
-# 持つ検査は絶対に追加しないこと（doctor は「壊れているかもしれない配管に触れず調べる」ためのもの）。
+# 持つ検査は絶対に追加しないこと（doctor は「壊れているかもしれない通信層に触れず調べる」ためのもの）。
 #
 # 出力: 1検査1行 "[ok]/[warn]/[fail] 検査名: 詳細"（stdout。機械処理より人間可読を優先するため
 # あえて stderr ではなく stdout に出す）。最後に "ok=N warn=N fail=N" のサマリ行。

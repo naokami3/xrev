@@ -36,30 +36,30 @@ scripts/transport.sh review "<payload>"   # 1 往復の手動テスト（実機�
 1. **中間ファイルをリポジトリに生成しない** — エージェント間のやり取りはファイルを介さない。
    唯一の例外は ADR（`docs/adr/`、意図して残す成果物）。
 2. **cmux 依存を `scripts/transport.sh` の外へ漏らさない** — スキル・他スクリプトから
-   cmux を直接叩かない。配管の差し替え可能性を壊さないため。
+   cmux を直接叩かない。通信層の差し替え可能性を壊さないため。
 3. **`@xrev`（設定の `keyword`）や明示指示が無いのに発火しない** — 暴発防止。
 4. **PR は非ドラフトで作らない／人間の確認なしにマージ・確定しない** — 人間の最終確認を
    物理的に保証するため。`scripts/finalize.sh` の PR は `--draft` 固定。
-5. **既定で commit / pr へ進まない** — 既定の到達点は最も安全な `review`。
+5. **既定で commit / pr へ進まない** — 既定の完了アクションは最も安全な `review`。
 6. **リポジトリ名やコアに特定エージェント名（`cc-` 等）を固定しない** — 主従非依存を保つ。
    主従は `config/xrev.default.json` の `primary`/`reviewer` で切り替える。
-7. **上限到達（escalate）時に人間を飛ばして到達点へ進めない** — 必ずエスカレーションする。
+7. **上限到達（escalate）時に人間を飛ばして完了アクションへ進めない** — 必ずエスカレーションする。
 
 ## 既知の落とし穴
 
 - **primary は cmux ペイン内で起動すること（必須）**: cmux ソケットは認証が要り、認証情報は
   cmux ペイン内シェルにのみ自動注入される。通常ターミナル（Apple Terminal 等）から起動すると
-  配管が接続できず、`transport.sh` が preflight で `exit 31` を返す。`scripts/transport.sh ping` で確認。
+  通信層が接続できず、`transport.sh` が preflight で `exit 31` を返す。`scripts/transport.sh ping` で確認。
 - **reviewer ペインは固定タイトル `Review Codex` で 1 枚、履歴ゼロで開く**: 作業切替時は Codex を
   再起動して履歴を切る。cmux のセッション復元が前作業を復元しないよう注意。
 - **cmux の実挙動は推測しない**: surface の直下プロセス構成、`top` の name 列、ソケットの
   UTF-8 チャンク欠陥、composer の消去可否など、公式ドキュメントに無く実測でしか分からない挙動が
-  設計前提になっている。配管に手を入れる前に [docs/cmux-behavior.md](docs/cmux-behavior.md) を読むこと。
+  設計前提になっている。通信層に手を入れる前に [docs/cmux-behavior.md](docs/cmux-behavior.md) を読むこと。
   過去に「直下プロセスが1件」という未検証の前提で往復が全停止した実績がある。
 - **非決定的な事象を1回の試行で判定しない**: cmux の送信は間欠的に失敗する。単調性を仮定した
   二分探索は誤った境界を返す（実際に2度誤った結論が出ている）。
 
-環境・依存（macOS の cmux、到達点 `pr` の `gh`、cmux のバージョン揺れ）の詳細は
+環境・依存（macOS の cmux、完了アクション `pr` の `gh`、cmux のバージョン揺れ）の詳細は
 [docs/architecture.md](docs/architecture.md)、実測知見は
 [docs/cmux-behavior.md](docs/cmux-behavior.md) を参照。
 

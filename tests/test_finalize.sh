@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# finalize.sh のテスト（到達点 stop_at の解決順と review/commit/pr 経路）。
+# finalize.sh のテスト（完了アクション stop_at の解決順と review/commit/pr 経路）。
 # commit は一時 git リポジトリで実コミットまで検証。pr は gh を呼ぶ前のタイトル必須で経路を判定。
 
 export XREV_CONFIG="$DEFAULT_CONFIG"

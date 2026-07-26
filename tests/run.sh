@@ -6,7 +6,7 @@
 #     tests/run.sh            # 全 test_*.sh を実行
 #     tests/run.sh parse scan # 名前に parse / scan を含むものだけ実行
 #
-#   依存は bash + python3 のみ（cmux 不要。cmux 配管の純粋ロジック部だけを検証する）。
+#   依存は bash + python3 のみ（cmux 不要。cmux 通信層の純粋ロジック部だけを検証する）。
 #   失敗が 1 件でもあれば非ゼロで終了する（CI で使える）。
 #
 set -uo pipefail

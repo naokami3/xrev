@@ -618,9 +618,9 @@ cmux の外（通常ターミナル）からは接続できず `transport.sh` �
 - 出力先: `make-adr.sh` の引数 → `XREV_ADR_DIR` → `config` の `adr_dir` → `docs/adr`
   （相対は対象リポジトリ基準、絶対パスはそのまま）
 
-### 到達点（stop_at）の解決順
+### 完了アクション（stop_at）の解決順
 
-`scripts/finalize.sh` は到達点を次の優先順で決める（高 → 低）:
+`scripts/finalize.sh` は完了アクションを次の優先順で決める（高 → 低）:
 
 1. 引数（その場指定。依頼文 / `/xrev` 引数 / 一拍確認の回答を Claude が渡す）
 2. 環境変数 `XREV_STOP_AT`（シェル / プロジェクト単位の既定上書き）
