@@ -60,12 +60,20 @@ xrev のフェーズと進捗。詳細な設計は [architecture.md](architectur
 - [x] 実測 R1〜R6（claude reviewer の cmux ペイン内挙動: プロセス同定・ペースト畳み・
       composer クリア・タブタイトル・出力契約遵守・de-wrap 互換）
 
-未検証（実機 e2e。今後の実施項目）:
+実機 e2e（2026-07-27 実施）:
 
-- [ ] 別プロジェクトの Codex から `print-agents-snippet.sh` 経由のスニペットで 1 往復が成立する
-- [ ] xrev の checkout を移動した後、スニペットの前提検査が明確な診断で失敗する
-      （XREV_ROOT 不整合を握りつぶさず気づける）
-- [ ] claude reviewer との実機往復 e2e（cmux ペイン内で実際に `Review Claude` へ送受信する）
+- [x] `--append-global` を実 `~/.codex/AGENTS.md` へ導入（未作成の初回導入経路・マーカー 2 個・
+      冪等性・ロック解放を実地確認）
+- [x] 別プロジェクトの codex がグローバル AGENTS.md 経由で xrev を認識する（`codex exec` で
+      発火スクリプト・手順書・XREV_PRIMARY の 3 点を正答。**codex 自身が primary として往復を
+      完走する確認は未実施**（実際の作業セッションが必要））
+- [x] xrev の checkout 消滅時、スニペットの前提検査が明確な診断で失敗する
+- [x] claude reviewer との実機往復 e2e（`XREV_PRIMARY=codex` の auto 解決で `Review Claude` を
+      ensure-reviewer 生成 → 参照モードで 1 往復 converged/approve。reviewer は diff_hash/HEAD を
+      正しく返し、実 diff への適切な指摘も返した）
+- [x] 新コードの実機動作確認（auto 解決の双方向・矛盾ゲート exit 29 の副作用前拒否・
+      送信ゲート一式のスモーク往復。この過程でセッション復元による read-only 喪失を
+      exit 27 が捕捉する実例を確認 → [cmux-behavior.md](cmux-behavior.md) 10節）
 
 ## フェーズ 6: reviewer の auto 解決・グローバル一度きり導入 ✅ 完了
 
