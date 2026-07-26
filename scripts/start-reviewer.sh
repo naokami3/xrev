@@ -17,7 +17,7 @@
 #
 # 【ensure-reviewer との関係】これは「ユーザーが既に開いた端末をその場で reviewer にする」手動経路。
 #   primary が自分のWSにペインを新規生成する自動経路は `transport.sh ensure-reviewer`。タイトル・codex バイナリ
-#   解決は transport.sh の同じ設定（REVIEWER_PANE_TITLE / XREV_CODEX_BIN）を共有し、仕様の乖離を避ける。
+#   解決は transport.sh の同じ設定（REVIEWER_PANE_TITLE / _xrev_reviewer_bin）を共有し、仕様の乖離を避ける。
 #
 set -uo pipefail
 
@@ -37,9 +37,11 @@ _cmux_preflight || {
 
 # codex の実行可能性は「タイトル変更より前」に確認する。
 # そうしないと codex 未導入時に、素の shell に規約タイトルだけが残り、後続の宛先解決を誤らせる。
-codex_bin="${XREV_CODEX_BIN:-codex}"
+# reviewer バイナリの解決は transport.sh の _xrev_reviewer_bin（C1）に一本化する
+# （優先順: XREV_REVIEWER_BIN > XREV_CODEX_BIN(reviewer=codexのみ後方互換) > config の reviewer 値）。
+codex_bin="$(_xrev_reviewer_bin)"
 if ! command -v "$codex_bin" >/dev/null 2>&1; then
-  echo "[start-reviewer] '$codex_bin' が見つかりません（XREV_CODEX_BIN で明示指定できます）。タイトルは変更していません。" >&2
+  echo "[start-reviewer] '$codex_bin' が見つかりません（XREV_REVIEWER_BIN で明示指定できます。reviewer=codex のときは XREV_CODEX_BIN も後方互換で使えます）。タイトルは変更していません。" >&2
   exit 127
 fi
 

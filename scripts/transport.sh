@@ -76,6 +76,9 @@ _xrev_uint() {
 
 # 環境変数で上書きできる設定（テスト・運用都合）
 REVIEWER_PANE_TITLE="${XREV_REVIEWER_PANE_TITLE:-$(_cfg reviewer_pane_title 'Review Codex')}"
+# config の reviewer 値（バイナリ名。既定 codex）。主従反転プリセット（primary=codex/reviewer=claude）
+# でも同じ経路で解決できるよう、_xrev_reviewer_bin の解決基準として使う（C1）。
+REVIEWER="$(_cfg reviewer 'codex')"
 # 送信前の安全ゲートで「宛先サーフェスで動いているべきプロセス名」（既定 codex）。
 # プロセス証明: cmux top でこのプロセスが対象サーフェスの直下で動いていることを確認する。
 REVIEWER_PROCESS="${XREV_REVIEWER_PROCESS:-$(_cfg reviewer_process 'codex')}"
@@ -1431,8 +1434,39 @@ print("ok" if mark in dw else "unknown")
 #   - 生成所有物は new-pane が返した surface UUID に固定（title は一意でないので生成判定に使わない）。
 #   - read/send は workspace+surface UUID 指定（実機修正）。read-screen probe 成功＋直下=codex で起動確認。
 
-# シェルに渡す値を単一引数として安全にクォート（XREV_CODEX_BIN 注入対策）。printf %q は shell-safe。
+# シェルに渡す値を単一引数として安全にクォート（reviewer バイナリ名注入対策）。printf %q は shell-safe。
 _xrev_shquote() { printf '%q' "$1"; }
+
+# ── reviewer バイナリ解決の一般化（C1）─────────────────────────────────────────
+#
+# 【背景】従来は ensure-reviewer 経路(_xrev_create_reviewer)・start-reviewer.sh とも
+# `${XREV_CODEX_BIN:-codex}` を素朴に埋め込んでおり、reviewer=claude のような主従反転
+# プリセット（primary=codex/reviewer=claude）に切り替えても解決先が codex 固定のままだった。
+# ここで両経路が共有する単一の解決関数を設け、config の reviewer 値（既定 codex）を基準にする。
+#
+# 【解決優先順】
+#   1) XREV_REVIEWER_BIN（新設 env・最優先。reviewer 種別を問わず常に有効）
+#   2) XREV_CODEX_BIN（後方互換のエイリアス。config の reviewer が codex のときのみ有効。
+#      reviewer が codex 以外なのに指定されていたら stderr に1行警告して無視する＝
+#      「codex 用のはずの上書きが別 reviewer に紛れ込む」事故を防ぐ）
+#   3) config の reviewer 値（バイナリ名。既定 codex）
+#
+# kind 判定（_xrev_reviewer_launch_args / _xrev_verify_effective_policy の第1引数）は
+# 従来どおり解決済みバイナリの basename を使う（呼び出し側が basename -- で取る）。
+_xrev_reviewer_bin() {
+  if [[ -n "${XREV_REVIEWER_BIN:-}" ]]; then
+    printf '%s' "$XREV_REVIEWER_BIN"
+    return 0
+  fi
+  if [[ -n "${XREV_CODEX_BIN:-}" ]]; then
+    if [[ "$REVIEWER" == "codex" ]]; then
+      printf '%s' "$XREV_CODEX_BIN"
+      return 0
+    fi
+    _log "警告: XREV_CODEX_BIN が指定されていますが reviewer='${REVIEWER}' のため無視します（後方互換エイリアスは reviewer=codex のときのみ有効です。XREV_REVIEWER_BIN を使ってください）。"
+  fi
+  printf '%s' "$REVIEWER"
+}
 
 # ── reviewer read-only 強制（launch 引数の機械生成・危険引数の拒否）─────────────────
 #
@@ -1732,8 +1766,9 @@ _xrev_lock_path() {
 # 生成本体: caller WS に terminal ペインを作り、所有 surface UUID を固定して codex を起動・確認する。
 # 成功で _XREV_RES_* に生成結果を入れて 0、起動確認失敗（read-only 引数の実効確認できず、を含む）で 19。
 _xrev_create_reviewer() {
-  local ws="$1" codex="${XREV_CODEX_BIN:-codex}"
-  command -v "$codex" >/dev/null 2>&1 || { _log "codex バイナリ '$codex' が見つかりません（XREV_CODEX_BIN で指定可）。"; return 19; }
+  local ws="$1" codex
+  codex="$(_xrev_reviewer_bin)"
+  command -v "$codex" >/dev/null 2>&1 || { _log "reviewer バイナリ '$codex' が見つかりません（XREV_REVIEWER_BIN で指定可。reviewer=codex のときは XREV_CODEX_BIN も後方互換で使えます）。"; return 19; }
   # launch 引数（read-only 強制）を先に決定する。cmux にペインを作る前に検証しておくことで、
   # config/env が壊れている場合に無駄なペイン生成をしない。生成できなければ fail closed で中止。
   local -a launch_args=()
@@ -1914,7 +1949,7 @@ xrev_transport_review() {
   _cmux_resolve_surface >/dev/null; local rrc=$?
   if (( rrc != 0 )); then
     _log "reviewer ペイン（タイトル: '$REVIEWER_PANE_TITLE'）を解決できませんでした（code=${rrc}）。"
-    _log "cmux 上に該当タイトルの Codex ペインを 1 枚開いているか、XREV_REVIEWER_SURFACE で明示指定してください。"
+    _log "cmux 上に該当タイトルの reviewer（${REVIEWER_PROCESS}）ペインを 1 枚開いているか、XREV_REVIEWER_SURFACE で明示指定してください。"
     return "$rrc"
   fi
   surface="$_XREV_RES_REF"
@@ -2337,7 +2372,7 @@ xrev_doctor() {
   esac
 
   # 9) reviewer バイナリ（不在は警告）・launch 引数の決定可否（失敗は fail）
-  local codex="${XREV_CODEX_BIN:-codex}"
+  local codex; codex="$(_xrev_reviewer_bin)"
   if command -v "$codex" >/dev/null 2>&1; then
     _doctor_report ok "reviewer バイナリ" "bin=${codex} version=$("$codex" --version 2>&1 | head -1)"
   else
