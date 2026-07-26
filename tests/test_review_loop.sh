@@ -16,6 +16,8 @@ assert_eq "blocker 0 は converged(exit0)" "converged 0" "$(_xrev_decide 0 0 0 3
 assert_eq "上限到達の escalate も exit0（レビューは完了）" "escalate 0" "$(_xrev_decide 0 0 2 5 5)"
 assert_eq "continue も exit0（continue は正常）" "continue 0" "$(_xrev_decide 0 0 1 1 5)"
 assert_eq "transport 失敗は parse より優先" "transport_error 22" "$(_xrev_decide 22 1 0 9 5)"
+# trc=24（センチネルで完成した応答はあるがJSON不正・契約違反）は transport_error ではなく invalid
+assert_eq "trc=24 は invalid（transport_error ではない）" "invalid 21" "$(_xrev_decide 24 0 0 1 5)"
 
 # ── 統合: transport をスタブにして 1 ラウンドを通す ──
 # approve を返すスタブ → converged / rc 0 / blockers 0
@@ -50,15 +52,24 @@ out="$(printf '%s' "ダミー差分" | XREV_REVIEW_FN=_stub_fail _xrev_review_lo
 assert_rc "transport 失敗で rc=22" 22 "$rc"
 assert_eq "decision=transport_error" "transport_error" "$(printf '%s' "$out" | json_get decision)"
 
+# transport が exit24（センチネルで完成した応答はあるが JSON 不正・契約違反）を返すスタブ
+# → transport_error ではなく invalid / rc 21（reviewer の契約違反として再出力依頼に合流させる）
+_stub_broken() { return 24; }
+out="$(printf '%s' "ダミー差分" | XREV_REVIEW_FN=_stub_broken _xrev_review_loop_run 1)"; rc=$?
+assert_rc "transport exit24 で rc=21(invalid)" 21 "$rc"
+assert_eq "trc=24 は decision=invalid" "invalid" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "trc=24 でも transport_exit_code=24 は残る（透明性）" "24" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["transport_exit_code"])')"
+
 # ── _format_decision（純粋）: 異常系で壊れず既定値の決定JSONを出す ──
 # raw も parsed も壊れている（transport_error/invalid 相当）→ 既定値で整形できる
-out="$(_format_decision transport_error 1 5 "" "")"
+out="$(printf '%s' "" | XREV_PARSED="" _format_decision transport_error 1 5)"
 assert_eq "空 raw/parsed でも decision を保持" "transport_error" "$(printf '%s' "$out" | json_get decision)"
 assert_eq "空時 blockers 既定 0" "0" "$(printf '%s' "$out" | json_get blockers)"
 assert_eq "空時 verdict は null" "null" "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["verdict"]))')"
 
 # 壊れた JSON 文字列を渡しても例外で死なず既定にフォールバック
-out="$(_format_decision invalid 2 5 "これはJSONでない" "これも壊れている")"
+out="$(printf '%s' "これはJSONでない" | XREV_PARSED="これも壊れている" _format_decision invalid 2 5)"
 assert_eq "壊れた raw でも decision=invalid" "invalid" "$(printf '%s' "$out" | json_get decision)"
 assert_eq "壊れた parsed でも blockers=0" "0" "$(printf '%s' "$out" | json_get blockers)"
 assert_eq "raw_review は渡した生文字列を保持" "これはJSONでない" "$(printf '%s' "$out" | json_get raw_review)"
@@ -66,10 +77,23 @@ assert_eq "raw_review は渡した生文字列を保持" "これはJSONでない
 # 正常: parsed の counts/blockers と raw の findings を決定JSONに反映
 raw='{"verdict":"request_changes","findings":[{"file":"a","severity":"high","category":"bug","message":"m"}],"summary":"要約"}'
 parsed='{"valid":true,"verdict":"request_changes","counts":{"critical":0,"high":1,"medium":0,"low":0,"nit":0},"blockers":1,"total":1}'
-out="$(_format_decision continue 1 5 "$raw" "$parsed")"
+out="$(printf '%s' "$raw" | XREV_PARSED="$parsed" _format_decision continue 1 5)"
 assert_eq "正常時 blockers を parsed から反映" "1" "$(printf '%s' "$out" | json_get blockers)"
 assert_eq "正常時 summary を raw から反映" "要約" "$(printf '%s' "$out" | json_get summary)"
 assert_eq "正常時 findings を raw から反映" "a" "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["findings"][0]["file"])')"
+
+# trc=26（wire_max_chars 超過）→ transport_reason=payload_too_large に写像される（変更2）
+out="$(printf '%s' "" | XREV_PARSED="" _format_decision transport_error 1 5 26 1)"
+assert_eq "trc=26 は decision=transport_error のまま" "transport_error" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "trc=26 は transport_reason=payload_too_large" "payload_too_large" "$(printf '%s' "$out" | json_get transport_reason)"
+
+# trc=25（Enter 送信=プロンプト確定の失敗。最大2回再試行しても失敗）→ transport_error / submit_failed
+# timeout(12) とは別コードで区別されることを確認する。
+_stub_submit_failed() { return 25; }
+out="$(printf '%s' "ダミー差分" | XREV_REVIEW_FN=_stub_submit_failed _xrev_review_loop_run 1)"; rc=$?
+assert_rc "trc=25 で rc=22(transport_error)" 22 "$rc"
+assert_eq "trc=25 は decision=transport_error" "transport_error" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "trc=25 は transport_reason=submit_failed" "submit_failed" "$(printf '%s' "$out" | json_get transport_reason)"
 
 # ── ループ安全弁: round_state（通算 transport 試行の上限・巻戻し検知）──
 _stub_approve2() { printf '%s' '{"verdict":"approve","findings":[]}'; }
@@ -119,6 +143,20 @@ assert_eq "負値の違反理由 bad_round_state" "bad_round_state" "$(printf '%
 
 out="$(printf '%s' "x" | XREV_ROUND_STATE='これは壊れたJSON' XREV_REVIEW_FN=_stub_approve2 _xrev_review_loop_run 2)"
 assert_eq "破損 round_state → escalate" "escalate" "$(printf '%s' "$out" | json_get decision)"
+
+# 破損 round_state → 通算カウンタは 0 でなく上限へ飽和させる（fail closed。安全弁のリセット防止）
+out="$(printf '%s' "x" | XREV_ROUND_STATE='{{{' XREV_REVIEW_FN=_stub_approve2 _xrev_review_loop_run 2)"
+assert_eq "破損JSON → escalate" "escalate" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "破損JSON → 違反理由 bad_round_state" "bad_round_state" "$(printf '%s' "$out" | json_get state_violation)"
+assert_eq "破損JSON → transport_attempts は既定上限12へ飽和" "12" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["round_state"]["transport_attempts"])')"
+assert_eq "破損JSON → reference_fallbacks は既定上限3へ飽和" "3" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["round_state"]["reference_fallbacks"])')"
+
+# XREV_MAX_TRANSPORT_ATTEMPTS を変えた場合は、その上限値へ飽和する
+out="$(printf '%s' "x" | XREV_MAX_TRANSPORT_ATTEMPTS=7 XREV_ROUND_STATE='{{{' XREV_REVIEW_FN=_stub_approve2 _xrev_review_loop_run 2)"
+assert_eq "上限変更時 → transport_attempts は指定上限7へ飽和" "7" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["round_state"]["transport_attempts"])')"
 
 # 上限・状態が健全なら通常どおり transport 失敗は transport_error（安全弁は誤発火しない）
 _stub_fail2() { return 12; }
@@ -197,3 +235,32 @@ assert_eq "inline(参照OFF)は検証せず converged" "converged" "$(printf '%s
 # reference_fallbacks も round_state 検証の対象（負値は bad_round_state）
 out="$(printf '%s' "x" | XREV_ROUND_STATE='{"transport_attempts":1,"iter":1,"reference_fallbacks":-1}' XREV_REVIEW_FN=_stub_ref_ok _xrev_review_loop_run 1)"
 assert_eq "負の reference_fallbacks → escalate(bad_round_state)" "bad_round_state" "$(printf '%s' "$out" | json_get state_violation)"
+
+# ── 数値設定の検証（bash 算術インジェクション対策・_xrev_uint 経由）──────────────
+# env/config 由来の数値は算術式 (( )) に入る前に _xrev_uint（transport.sh）を通す。ここでは
+# review-loop.sh 側（max_iterations/max_transport_attempts/max_reference_fallbacks）を検証する。
+
+# 1) インジェクション不発: XREV_MAX_ITERATIONS に `x[$(コマンド)]` 形の値を入れても
+#    コマンドは実行されず（マーカーファイル未生成）、既定 5 が使われる。
+rm -f /tmp/xrev-pwned-test
+_stub_approve3() { printf '%s' '{"verdict":"approve","findings":[]}'; }
+out="$(printf '%s' "x" | XREV_MAX_ITERATIONS='x[$(touch /tmp/xrev-pwned-test)]' XREV_REVIEW_FN=_stub_approve3 _xrev_review_loop_run 1)"
+assert_eq "不正な XREV_MAX_ITERATIONS ではコマンドが実行されない" "no" \
+  "$([[ -e /tmp/xrev-pwned-test ]] && echo yes || echo no)"
+assert_eq "不正な XREV_MAX_ITERATIONS は既定 max_iterations=5 にフォールバック" "5" \
+  "$(printf '%s' "$out" | json_get max_iterations)"
+rm -f /tmp/xrev-pwned-test
+
+# 2) 巨大値（20桁）は 64bit 算術オーバーフローを避けるため既定へフォールバックする。
+out="$(printf '%s' "x" | XREV_MAX_ITERATIONS=99999999999999999999 XREV_REVIEW_FN=_stub_approve3 _xrev_review_loop_run 1)"
+assert_eq "20桁の巨大値は既定 max_iterations=5 にフォールバック" "5" \
+  "$(printf '%s' "$out" | json_get max_iterations)"
+
+# 3) max_transport_attempts / max_reference_fallbacks も同様に不正値は既定へフォールバックする。
+out="$(printf '%s' "x" | XREV_MAX_TRANSPORT_ATTEMPTS='x[$(touch /tmp/xrev-pwned-test2)]' XREV_REVIEW_FN=_stub_approve3 _xrev_review_loop_run 1)"
+assert_eq "不正な XREV_MAX_TRANSPORT_ATTEMPTS ではコマンドが実行されない" "no" \
+  "$([[ -e /tmp/xrev-pwned-test2 ]] && echo yes || echo no)"
+rm -f /tmp/xrev-pwned-test2
+
+out="$(printf '%s' "x" | XREV_MAX_REFERENCE_FALLBACKS=999999999999999999999 XREV_REVIEW_FN=_stub_approve3 _xrev_review_loop_run 1)"
+assert_rc "不正な XREV_MAX_REFERENCE_FALLBACKS でも rc=0（フォールバックして続行）" 0 "$?"

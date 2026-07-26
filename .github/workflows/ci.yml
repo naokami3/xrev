@@ -6,9 +6,21 @@ on:
     branches: [main]
   pull_request:
 
+# fork からの PR 実行も含め、必要最小限の権限に絞る。
+permissions:
+  contents: read
+
 jobs:
-  verify:
-    runs-on: ubuntu-latest
+  test:
+    strategy:
+      # 片方が落ちてももう片方の結果を見たい（OS 差の切り分けに要る）。
+      fail-fast: false
+      matrix:
+        # macOS 実機運用が前提のため、ps の tpgid/comm 挙動差を CI でも検出できるよう
+        # ubuntu に加えて macos-latest でも走らせる。
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: バージョン確認
@@ -17,3 +29,32 @@ jobs:
           python3 --version
       - name: 検証（構文 + JSON + ユニットテスト）
         run: bash tools/verify.sh
+
+  # ── 集約ジョブ（このジョブ名 "verify" を変えないこと）─────────────────────────
+  #
+  # 【なぜ必要か】main のブランチ保護は必須ステータスチェックとして **"verify" という名前**を
+  # 要求している。マトリクス化するとチェック名は "test (ubuntu-latest)" のように OS 名付きへ
+  # 変わるため、"verify" は永久に報告されず PR が
+  # 「Expected — Waiting for status to be reported」で止まってマージできなくなる
+  # （実際に macOS ジョブを足した際に発生した）。全マトリクスの結果をこのジョブへ集約し、
+  # 保護設定が期待する名前で1つだけ報告する。OS を増減しても保護設定の変更が要らない。
+  #
+  # 【変更するときの注意】ジョブ名 "verify" の変更・削除、`if: always()` の削除はいずれも
+  # マージのブロックにつながる。always() が無いとマトリクス失敗時にこのジョブが skip され、
+  # やはり "verify" が報告されないまま待ち続ける。
+  verify:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: マトリクス結果の集約
+        env:
+          # マトリクスを持つジョブの result は「全 leg が成功したときだけ success」になる。
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          if [ "$TEST_RESULT" != "success" ]; then
+            echo "マトリクスジョブ(test)が success ではありません: $TEST_RESULT" >&2
+            exit 1
+          fi
+          echo "全マトリクスジョブが成功しました。"

@@ -52,6 +52,28 @@ except Exception:
 PY
 }
 
+_log() { printf '[xrev/transport] %s\n' "$*" >&2; }
+
+# ── 数値設定の共通バリデータ ─────────────────────────────────────────────────
+# env/config 由来の数値は、bash 算術式 (( )) に入れる前に必ずここを通す。
+# 理由:
+#   1) bash 算術は `x[$(コマンド)]` のような値を渡すとコマンド実行が起きる（インジェクション）。
+#      生の値を絶対に算術へ渡さないため、正規表現検証を通過した文字列だけを算術評価する。
+#   2) `^[0-9]+$` だけの検証では 64bit を超える巨大値（20桁など）が算術でオーバーフローしうる。
+#      桁数を {1,10} に制限してから算術へ渡すことでオーバーフローを regex 段階で排除する。
+#   3) 範囲外・非数値は可用性優先で既定値へフォールバックし、stderr に1行警告する（stdout は汚さない）。
+#
+# 使い方: val="$(_xrev_uint "$raw" "$min" "$max" "$def" "設定名")"
+_xrev_uint() {
+  local v="$1" min="$2" max="$3" def="$4" name="$5"
+  if [[ "$v" =~ ^[0-9]{1,10}$ ]] && (( v >= min && v <= max )); then
+    printf '%s' "$v"
+    return 0
+  fi
+  _log "${name} が不正です（値='${v}'）。既定 ${def} を使います。"
+  printf '%s' "$def"
+}
+
 # 環境変数で上書きできる設定（テスト・運用都合）
 REVIEWER_PANE_TITLE="${XREV_REVIEWER_PANE_TITLE:-$(_cfg reviewer_pane_title 'Review Codex')}"
 # 送信前の安全ゲートで「宛先サーフェスで動いているべきプロセス名」（既定 codex）。
@@ -62,19 +84,21 @@ ALLOW_GLOBAL_RESOLVE="${XREV_ALLOW_GLOBAL_RESOLVE:-$(_cfg allow_global_resolve '
 ALLOW_CROSS_WS="${XREV_ALLOW_CROSS_WS:-$(_cfg allow_cross_ws 'false')}"
 # reviewer ペインの自動生成（create-if-missing）。ask(既定)/auto/off。生成の起動確認・競合待ちの上限秒。
 REVIEWER_AUTOCREATE="${XREV_REVIEWER_AUTOCREATE:-$(_cfg reviewer_autocreate 'ask')}"
-CREATE_TIMEOUT="${XREV_REVIEWER_CREATE_TIMEOUT_SECONDS:-$(_cfg reviewer_create_timeout_seconds 30)}"
-[[ "$CREATE_TIMEOUT" =~ ^[0-9]+$ ]] || CREATE_TIMEOUT=30
-READ_LINES="${XREV_READ_SCREEN_LINES:-$(_cfg read_screen_lines 400)}"
-SETTLE_SECS="${XREV_SEND_SETTLE_SECONDS:-$(_cfg send_settle_seconds 2)}"
-RESP_TIMEOUT="${XREV_RESPONSE_TIMEOUT_SECONDS:-$(_cfg response_timeout_seconds 180)}"
-RESP_POLL="${XREV_RESPONSE_POLL_SECONDS:-$(_cfg response_poll_seconds 3)}"
+# 以下は数値設定。_xrev_uint で「正整数 + キー別上限 + 桁数上限」を検証してから使う。
+# 範囲外・非数値は既定へフォールバックし stderr へ警告する（根拠・詳細は references/protocol.md）。
+CREATE_TIMEOUT="$(_xrev_uint "${XREV_REVIEWER_CREATE_TIMEOUT_SECONDS:-$(_cfg reviewer_create_timeout_seconds 30)}" 1 600 30 'reviewer_create_timeout_seconds')"
+# wire（1物理行）の文字数上限（fail closed）。
+WIRE_MAX_CHARS="$(_xrev_uint "${XREV_WIRE_MAX_CHARS:-$(_cfg wire_max_chars 64000)}" 1000 1000000 64000 'wire_max_chars')"
+READ_LINES="$(_xrev_uint "${XREV_READ_SCREEN_LINES:-$(_cfg read_screen_lines 400)}" 10 10000 400 'read_screen_lines')"
+SETTLE_SECS="$(_xrev_uint "${XREV_SEND_SETTLE_SECONDS:-$(_cfg send_settle_seconds 2)}" 0 60 2 'send_settle_seconds')"
+RESP_TIMEOUT="$(_xrev_uint "${XREV_RESPONSE_TIMEOUT_SECONDS:-$(_cfg response_timeout_seconds 180)}" 1 3600 180 'response_timeout_seconds')"
+# 最小 1 秒（0 だと応答待ちが busy-loop 化するため 0 は許可しない）。
+RESP_POLL="$(_xrev_uint "${XREV_RESPONSE_POLL_SECONDS:-$(_cfg response_poll_seconds 3)}" 1 60 3 'response_poll_seconds')"
 
 # reviewer の JSON 応答を画面から確実に切り出すためのセンチネル。
 # Codex には「この 2 行で JSON を挟んで返せ」と指示し、画面ノイズから機械的に抽出する。
 SENTINEL_BEGIN='===XREV-JSON-BEGIN==='
 SENTINEL_END='===XREV-JSON-END==='
-
-_log() { printf '[xrev/transport] %s\n' "$*" >&2; }
 
 # ── cmux 配管（ここだけが cmux に依存）─────────────────────────────────────────
 #
@@ -477,6 +501,20 @@ _ps_snapshot() {
   ps -o pid=,pgid=,tpgid=,comm= "${args[@]}" 2>/dev/null
 }
 
+# ps スナップショット取得（フルコマンドライン込み・cmux 非依存の外部コマンド。テストではスタブする）。
+#   入力(stdin): PID を1行1件 / 出力: "<pid> <args...>" を1行1件（ps の既定区切り＝空白。args 自体に
+#   空白を含みうるため、末尾側は分割せず1本の文字列のまま扱う＝先頭の PID フィールドだけを分離する）。
+# 【用途】起動後の launch 引数の実効検証（_verify_reviewer_launch_args）専用。プロセス証明
+# （_ps_snapshot・pgid/tpgid 判定）とは目的が異なるため別関数にする。
+_ps_args_snapshot() {
+  local args=() p
+  while IFS= read -r p; do
+    [[ -n "$p" ]] && args+=(-p "$p")
+  done
+  (( ${#args[@]} )) || return 1
+  ps -o pid=,args= "${args[@]}" 2>/dev/null
+}
+
 # 純粋関数: 「対象 surface でキー入力を受け取るプロセス」が許可名かを判定する。
 #   入力: $1=許可名, env XREV_DIRECT="PID<TAB>name" 行群, env XREV_PS=_ps_snapshot 出力
 #   出力: 成功時は検出したプロセス名 / 失敗時は拒否理由。exit 0=許可 / 1=拒否（fail closed）
@@ -568,17 +606,208 @@ PY
 # 【重要】この検証は「その瞬間」の観測にすぎない。検査から実際の入力確定(Enter)までの間に codex が
 # 終了すれば payload が shell へ渡りうるため、呼び出し側は **Enter の直前を最終ゲート**として
 # 再検証すること（xrev_transport_review の (iii-c) を参照）。
+# 【観測の取り直し】cmux の surface 直下には周期的に生成・消滅する sleep サイドカーが存在し、top と
+# ps の取得時刻がミリ秒単位でずれるだけで「欠落」判定になりうる（実測で発生。docs/cmux-behavior.md
+# 参照）。これは判定条件を緩めるのではなく、top/ps を最初から取り直して最大3回までやり直す＝壊れた
+# 観測のみを捨てて撮り直す対処であり、検証窓を広げるものではない。_decide_foreground_owner の判定
+# 条件（完全一致・前景1件・許可名一致）はそのまま維持する。
 _verify_reviewer_process() {
-  local surface="$1" top direct ps_out detail
+  local surface="$1" top direct ps_out detail attempt
+  for attempt in 1 2 3; do
+    top="$(_cmux_top_processes)"
+    if [[ -z "$top" ]]; then
+      detail="cmux top を取得できません（プロセス証明不可）。"
+    else
+      direct="$(XREV_TOP="$top" _top_surface_processes "$surface")"
+      if [[ -z "$direct" ]]; then
+        detail="reviewer surface($surface)の直下プロセスを特定できません。"
+      else
+        ps_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_snapshot)"
+        if detail="$(XREV_DIRECT="$direct" XREV_PS="$ps_out" _decide_foreground_owner "$REVIEWER_PROCESS")"; then
+          if (( attempt > 1 )); then
+            _log "プロセス証明を ${attempt} 回目の試行で確認しました（過渡プロセスの消滅による観測不一致の可能性）。"
+          fi
+          return 0
+        fi
+      fi
+    fi
+    (( attempt < 3 )) && _xrev_sleep 1
+  done
+  _log "reviewer surface($surface)のプロセス証明に失敗: ${detail}"
+  return 1
+}
+
+# 純粋関数: 対象 surface の前景プロセス（tty のフォアグラウンドプロセスグループを握る直下
+# プロセス）の argv を取得する。判定原理は `_decide_foreground_owner` と同じ（pgid==tpgid の
+# 直下プロセスが一意に決まること・許可名と一致すること）だが、`_decide_foreground_owner` は
+# 既存のテスト（test_send_gates.sh）が固定する契約（bool 相当の許可/拒否のみを返す）を持つため、
+# それを変えずに argv も欲しい本用途のために別関数として複製する（意図的な重複。判定条件は
+# 一字一句合わせること）。
+#   入力: $1=許可名(basename), env XREV_DIRECT="PID<TAB>name" 行群(_top_surface_processes 出力),
+#         env XREV_PS="pid pgid tpgid comm" 行群(_ps_snapshot 出力),
+#         env XREV_PS_ARGS="pid args" 行群(_ps_args_snapshot 出力)
+#   出力: 前景プロセスの argv[0]（実行ファイルパス）を除いた引数列を1行1要素で stdout。
+#   exit: 0=前景プロセスを一意に特定し許可名と一致 / 1=特定不能・不一致（fail closed）
+_xrev_foreground_argv() {
+  XREV_DIRECT="${XREV_DIRECT:-}" XREV_PS="${XREV_PS:-}" XREV_PS_ARGS="${XREV_PS_ARGS:-}" python3 - "$1" <<'PY'
+import os, sys
+
+def as_int(s):
+    try:
+        return int(s, 10)
+    except ValueError:
+        return None
+
+expected = os.path.basename(sys.argv[1]) if len(sys.argv) > 1 else ""
+if not expected:
+    sys.exit(1)
+
+direct = {}
+for line in os.environ.get("XREV_DIRECT", "").splitlines():
+    if not line.strip():
+        continue
+    parts = line.split("\t")
+    if len(parts) < 2:
+        sys.exit(1)
+    pid = as_int(parts[0].strip())
+    if pid is None or pid <= 0 or pid in direct:
+        sys.exit(1)
+    direct[pid] = parts[1].strip()
+if not direct:
+    sys.exit(1)
+
+rows = {}
+for line in os.environ.get("XREV_PS", "").splitlines():
+    if not line.strip():
+        continue
+    f = line.split(None, 3)
+    if len(f) < 4:
+        sys.exit(1)
+    pid, pgid, tpgid = as_int(f[0]), as_int(f[1]), as_int(f[2])
+    if pid is None or pgid is None or tpgid is None or pid in rows:
+        sys.exit(1)
+    rows[pid] = (pgid, tpgid, f[3].strip())
+if set(rows) != set(direct):
+    sys.exit(1)
+
+tpgids = {v[1] for v in rows.values()}
+if len(tpgids) != 1:
+    sys.exit(1)
+tpgid = tpgids.pop()
+if tpgid <= 0:
+    sys.exit(1)
+fg = [pid for pid, v in rows.items() if v[0] == tpgid]
+if len(fg) != 1:
+    sys.exit(1)
+fg_pid = fg[0]
+actual = os.path.basename(rows[fg_pid][2])
+if actual != expected:
+    sys.exit(1)
+
+args_map = {}
+for line in os.environ.get("XREV_PS_ARGS", "").splitlines():
+    if not line.strip():
+        continue
+    f = line.split(None, 1)
+    pid = as_int(f[0])
+    if pid is None:
+        continue
+    args_map[pid] = f[1] if len(f) > 1 else ""
+argline = args_map.get(fg_pid)
+if argline is None:
+    sys.exit(1)
+for a in argline.split()[1:]:
+    print(a)
+sys.exit(0)
+PY
+}
+
+# 既存 reviewer を「採用」する経路（_xrev_classify_reviewer の present 判定・および送信直前の
+# xrev_transport_review）の実効ポリシー検証（指摘3）。対象 surface の前景プロセスの argv を取得し、
+# `_xrev_verify_effective_policy` で安全ポリシー（sandbox=read-only かつ承認=never）が実効に
+# 有効かを確認する。従来は前景プロセス名が REVIEWER_PROCESS と一致することしか見ておらず、手動起動・
+# 旧版の書き込み可能なペインがそのまま採用され得た。
+#   入力: $1=surface ref
+#   出力: stdout には何も書かない（exit のみ。_xrev_verify_effective_policy の契約をそのまま透過する。
+#     不具合Aの教訓により、この関数は成功時に stdout へ何も書いてはならない — 呼び出し元の
+#     xrev_transport_review は stdout が「reviewer の review JSON だけ」という契約を持つため）。
+#   exit 0=安全ポリシー確認 / 1=確認できない（fail closed）
+_xrev_verify_reviewer_policy() {
+  local surface="$1" top direct ps_out ps_args_out fg_argv
   top="$(_cmux_top_processes)"
-  [[ -n "$top" ]] || { _log "cmux top を取得できません（プロセス証明不可）。"; return 1; }
-  direct="$(XREV_TOP="$top" _top_surface_processes "$surface")"
-  [[ -n "$direct" ]] || { _log "reviewer surface($surface)の直下プロセスを特定できません。"; return 1; }
-  ps_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_snapshot)"
-  detail="$(XREV_DIRECT="$direct" XREV_PS="$ps_out" _decide_foreground_owner "$REVIEWER_PROCESS")" || {
-    _log "reviewer surface($surface)のプロセス証明に失敗: ${detail}"
+  if [[ -z "$top" ]]; then
+    _log "cmux top を取得できません（既存 reviewer の安全ポリシー検証不可）。"
     return 1
-  }
+  fi
+  direct="$(XREV_TOP="$top" _top_surface_processes "$surface")"
+  if [[ -z "$direct" ]]; then
+    _log "reviewer surface($surface)の直下プロセスを特定できません（安全ポリシー検証不可）。"
+    return 1
+  fi
+  ps_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_snapshot)"
+  ps_args_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_args_snapshot)"
+  if ! fg_argv="$(XREV_DIRECT="$direct" XREV_PS="$ps_out" XREV_PS_ARGS="$ps_args_out" _xrev_foreground_argv "$REVIEWER_PROCESS")"; then
+    _log "reviewer surface($surface)の前景プロセスの argv を特定できません（安全ポリシー検証不可）。"
+    return 1
+  fi
+  local -a fg_args=()
+  local _fl
+  while IFS= read -r _fl; do
+    [[ -n "$_fl" ]] && fg_args+=("$_fl")
+  done <<< "$fg_argv"
+  _xrev_verify_effective_policy "$(basename -- "$REVIEWER_PROCESS")" "${fg_args[@]+"${fg_args[@]}"}"
+}
+
+# 起動後の実効検証: reviewer 自動生成（_xrev_create_reviewer）が起動したプロセスの実コマンド
+# ラインが、安全ポリシー（read-only 強制）を一意に満たしていることを確認する。「起動できた」
+# だけでは read-only が実際に効いているかは分からない（引数生成のバグ・cmux send の欠落等でも
+# 起動確認自体は通ってしまうため）ので、ここで実プロセスの args を見て機械的に裏取りする。
+#
+# 【指摘2への対処】従来は「期待する launch 引数が部分文字列として含まれるか」の判定だったため、
+# launch 引数の**後ろ**に危険な引数（例 `-s danger-full-access`）が付いていても、期待した部分
+# 文字列さえ含まれていれば通ってしまっていた。ここでは部分文字列判定をやめ、実コマンドラインを
+# argv へ分解して `_xrev_verify_effective_policy` の意味検証（最終 argv 全体で安全ポリシーが
+# 一意に有効か）に通す。
+#   入力: $1=surface ref, $2=reviewer 種別（basename。codex/claude）
+#   出力: なし（exit のみ）。exit: 0=直下プロセスのいずれかで安全ポリシーの実効を確認できた /
+#   1=確認できない（呼び出し側は起動を採用しない＝fail closed）
+# 【argv 分解を空白区切りで済ませる理由】launch 引数の要素は印字可能ASCIIのみ・空文字列不可という
+# 型検証（_xrev_reviewer_launch_args）を経ており、要素自体に空白を含める運用は想定していない
+# （含めた場合は分解がずれて意味検証が拒否側に倒れるだけで、安全側にしか壊れない）。
+_verify_reviewer_launch_args() {
+  local surface="$1" kind="$2"
+  local top direct ps_out
+  top="$(_cmux_top_processes)"
+  if [[ -z "$top" ]]; then
+    _log "cmux top を取得できません（launch 引数の実効検証不可）。"
+    return 1
+  fi
+  direct="$(XREV_TOP="$top" _top_surface_processes "$surface")"
+  if [[ -z "$direct" ]]; then
+    _log "reviewer surface($surface)の直下プロセスを特定できません（launch 引数の実効検証不可）。"
+    return 1
+  fi
+  ps_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_args_snapshot)"
+  local line rest
+  local -a warr rest_args
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    # 先頭の PID フィールドだけを分離する（args 自体の空白は分割しない。_ps_args_snapshot 参照）。
+    rest="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]*//')"
+    [[ -n "$rest" ]] || continue
+    # shellcheck disable=SC2206  # 空白区切りで argv へ分解する（本関数のコメント参照）
+    warr=($rest)
+    rest_args=()
+    (( ${#warr[@]} > 1 )) && rest_args=("${warr[@]:1}")  # argv[0]（実行ファイルパス）を除く
+    # stderr も含めて捨てる: 直下プロセスは複数あり得て「いずれか1件が合格すればよい」判定なので、
+    # 他の候補（例: sleep サイドカーやログインシェル）が意味検証に落ちるのは正常フローであり、
+    # そのたびに理由を診断ログへ出すと分類のたびにノイズが積み重なる（_xrev_classify_reviewer と
+    # 同じ理由）。
+    if _xrev_verify_effective_policy "$kind" "${rest_args[@]+"${rest_args[@]}"}" >/dev/null 2>&1; then
+      return 0
+    fi
+  done <<< "$ps_out"
+  return 1
 }
 
 # reviewer ペインの最終確定入力（プロンプト送信）。本文（1物理行）を送り終えたあとに呼ぶ。
@@ -586,6 +815,22 @@ _cmux_submit() {
   local surface="$1"
   _xrev_build_addr "$surface"
   _cmux send-key "${_XREV_ADDR[@]}" enter >/dev/null 2>&1 || return 7
+}
+
+# 「Enter を送らない/これ以上再送しない」と決めたときの共通ログ（汚染ペイン警告一式）。
+#   $1=surface, $2=状況説明（呼び出し元ごとに変わるのはこの1行だけ）
+# 呼び出し元: (iii-c) 最終ゲート失敗時、および Enter 再送前の再検証失敗時（変更1）。
+_xrev_log_tainted_pane() {
+  local surface="$1" reason="$2"
+  _log "$reason"
+  # 【重要】Enter を送らないだけでは安全な終端にならない。送信済みの本文は入力行に残り、
+  # 前景が shell に戻っている以上、その後の偶発的な Enter や再送でコマンド実行され得る。
+  # かつ Codex の composer は ctrl+u/ctrl+a/ctrl+k/ctrl+w で消去できないことを実機確認済みで
+  # （反応するのは backspace の1文字ずつのみ）、xrev には残留を自動破棄する確実な手段が無い。
+  # したがってこのペインは**汚染された**ものとして扱い、再利用を禁止する。
+  _log "【重要】送信済みの本文が reviewer ペイン($surface)の入力行に残っています。xrev はこれを自動破棄できません。"
+  _log "このペインは汚染されたものとして扱ってください: Enter を押さずにペインを閉じ、reviewer を開き直してから再実行してください。"
+  _log "（残留したまま再送すると本文が混入します。同じペインを使い回さないでください。）"
 }
 
 # reviewer ペインの画面を読み取る（スクロールバック込み）。
@@ -607,10 +852,19 @@ _cmux_read_screen() {
 # raw_decode で走査 → dict かつ verdict を持ち（round_id 指定時は一致する）ものだけ採用」する。
 # 完成した JSON だけが parse できるため、ストリーミング途中の未完成応答も自然に除外される。
 _scan_review_blocks() {
-  XREV_SCREEN="$1" XREV_EXPECT_ROUND_ID="${2:-}" python3 <<'PY'
-import os, sys, json
-text = os.environ.get("XREV_SCREEN", "")
-expect_rid = os.environ.get("XREV_EXPECT_ROUND_ID", "")
+  # 画面テキスト（$1、巨大になり得る）は stdin から読む。ヒアドキュメントが stdin を占有して
+  # 競合するため、プログラム本文を `read -r -d ''` で変数化し `python3 -c` へ渡して stdin を
+  # 空ける。round_id は小さいので従来どおり argv のまま。
+  # 【注意】ここで `prog="$(cat <<'PY' ... PY)"` を使わないこと: bash 3.2（macOS既定）は
+  # $(...) の対応括弧探索がヒアドキュメント本文の中身（括弧・引用符の個数）まで数えてしまう
+  # バグ/仕様があり、本文中の括弧が不均衡な行（Python の複数行文字列連結等）があると
+  # 「unexpected EOF while looking for matching」で構文エラーになる。`read -d ''` は
+  # command substitution を経由しないため影響を受けない。
+  local prog
+  read -r -d '' prog <<'PY' || true
+import sys, json
+text = sys.stdin.read()
+expect_rid = sys.argv[1] if len(sys.argv) > 1 else ""
 
 # TUI の折り返し＋ガター字下げを除く（各行 strip して連結）。
 dw = "".join(line.strip() for line in text.splitlines())
@@ -646,6 +900,84 @@ print(len(blocks))
 if blocks:
     sys.stdout.write(blocks[-1])
 PY
+  python3 -c "$prog" "${1:-}"
+}
+
+# 純粋関数（cmux 非依存・テスト可能）: 「センチネルで完成しているが JSON として不正な応答」を検出する。
+#   実機で観測した不具合: reviewer が SENTINEL_BEGIN/END の2行マーカーで挟んだ本文を返したが、
+#   JSON 文字列値の中に生の二重引用符が混じっていて JSON として不正だった。_scan_review_blocks は
+#   「parse できたブロックだけ」を採用するためこの応答を永遠に検出できず、本来 invalid（契約違反
+#   →再出力を促す）であるべきものが timeout(12) と誤診断され、応答タイムアウトの全時間を無駄にする。
+#   本関数はそれを区別するため「BEGIN と END が両方揃った完成領域」のうち、期待 round_id を含み
+#   かつ妥当な review JSON（dict かつ verdict を持ち round_id 一致）が1つも取り出せない領域を数える。
+#   END が無い領域（ストリーミング途中の未完成応答）は invalid と誤検出しないよう数えない。
+#   入力: stdin=画面テキスト・$1(任意)=期待 round_id。出力: 壊れた完成応答の件数のみ(1行)。
+_scan_broken_blocks() {
+  # 実装方針は _scan_review_blocks と同じ（read -r -d '' prog + python3 -c 方式・de-wrap・
+  # 走査上限）。SENTINEL 文字列はシェル変数 SENTINEL_BEGIN/SENTINEL_END を argv で渡し、
+  # ハードコードの二重管理をしない。
+  local prog
+  read -r -d '' prog <<'PY' || true
+import sys, json
+text = sys.stdin.read()
+expect_rid = sys.argv[1] if len(sys.argv) > 1 else ""
+sb = sys.argv[2]
+se = sys.argv[3]
+
+# TUI の折り返し＋ガター字下げを除く（各行 strip して連結）。_scan_review_blocks と同じ方式。
+dw = "".join(line.strip() for line in text.splitlines())
+
+# 走査上限（暴走・誤検出の防御）。最新の応答は末尾に出るため末尾側を優先して切り詰める。
+MAX_SCAN = 500000
+MAX_REGIONS = 200
+if len(dw) > MAX_SCAN:
+    dw = dw[-MAX_SCAN:]
+
+dec = json.JSONDecoder()
+
+def has_valid_review(region):
+    # region 内に「dict かつ verdict を持ち（round_id 指定時は一致する）」JSON が
+    # 1つでも raw_decode できれば、その領域は妥当な応答を含むとみなす。
+    i, n = 0, len(region)
+    while i < n:
+        if region[i] != "{":
+            i += 1
+            continue
+        try:
+            obj, end = dec.raw_decode(region, i)
+        except Exception:
+            i += 1
+            continue
+        i = end
+        if isinstance(obj, dict) and "verdict" in obj:
+            if expect_rid and str(obj.get("round_id", "")) != expect_rid:
+                continue
+            return True
+    return False
+
+broken = 0
+regions = 0
+pos, n = 0, len(dw)
+while pos < n and regions < MAX_REGIONS:
+    b = dw.find(sb, pos)
+    if b == -1:
+        break
+    e = dw.find(se, b + len(sb))
+    if e == -1:
+        # END が無い＝ストリーミング途中の未完成応答。数えず、以降も走査を打ち切る
+        # （残りは同じ未完成応答の続きである可能性が高いため）。
+        break
+    region = dw[b + len(sb):e]
+    pos = e + len(se)
+    regions += 1
+    # 期待 round_id 指定時は、それを含まない領域（他ラウンド・無関係な表示）は対象外にする。
+    if expect_rid and expect_rid not in region:
+        continue
+    if not has_valid_review(region):
+        broken += 1
+print(broken)
+PY
+  python3 -c "$prog" "${1:-}" "$SENTINEL_BEGIN" "$SENTINEL_END"
 }
 
 # 純粋関数（cmux 非依存・テスト可能）: payload を「画面上は1物理行・意味上は複数行」に
@@ -683,11 +1015,20 @@ XREV_ASCII_HINT="ASCII-ONLY WIRE. Slice fields by LEN_INSTR/LEN_OUT/LEN_PAYLOAD 
 # 5 の直前に「バックスラッシュ・改行・CR・TAB が残っていない」ことを、直後に「全文字が 0x20-0x7E」を
 # 検証する。前者が成り立つので、wire 上の "\" は必ず xrev が生成した \uXXXX の一部になり復号が一意になる。
 _build_framed_line() {
-  XREV_BUILD_PAYLOAD="$3" XREV_ENC="$XREV_ASCII_ENCODING" XREV_HINT="$XREV_ASCII_HINT" \
-    python3 - "$1" "$2" "$SENTINEL_BEGIN" "$SENTINEL_END" <<'PY'
+  # payload（$3、巨大になり得る）は stdin から読む。ヒアドキュメントが stdin を占有して
+  # 競合するため、プログラム本文を `read -r -d ''` で変数化し `python3 -c` へ渡して
+  # stdin を空ける（Linux の ARG_MAX/MAX_ARG_STRLEN を env/argv 経由で踏み抜かないため）。
+  # ct/round_id/sentinel は小さいので従来どおり argv、ENCODING/HINT は固定小サイズなので env のまま。
+  # 【注意】`prog="$(cat <<'PY' ... PY)"` は使わない: bash 3.2（macOS既定）は $(...) の対応
+  # 括弧探索がヒアドキュメント本文中の括弧・引用符の個数まで数えてしまい、本文中の括弧が
+  # 不均衡な行（Python の複数行文字列連結等、本関数のように多い）があると
+  # 「unexpected EOF while looking for matching」で構文エラーになる。`read -d ''` は
+  # command substitution を経由しないため影響を受けない。
+  local prog
+  read -r -d '' prog <<'PY' || true
 import os, sys
 ct, rid, sb, se = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-body = os.environ.get("XREV_BUILD_PAYLOAD", "")
+body = sys.stdin.read()
 enc_name = os.environ["XREV_ENC"]
 hint = os.environ["XREV_HINT"]
 
@@ -730,6 +1071,9 @@ out = ("出力は必ず %s と %s の2行マーカーで挟み、間には1行�
        "(マーカー外・JSON前後に説明文を書かない)。JSONはトップレベルに round_id(=\"%s\") と "
        "verdict(approve|request_changes) と findings[] を持ち、各 finding は "
        "file/severity(critical|high|medium|low|nit)/category(bug|security|design|perf|style)/message を必須とする。"
+       "JSON文字列値の中に二重引用符を含める場合は必ずJSON仕様どおりエスケープ済みの形にし、"
+       "エスケープしていない生の二重引用符を値の中に含めないこと"
+       "(壊れたJSONは契約違反として扱われ、レビュー全体が無効になる)。"
        "wire の復号に失敗した場合はレビューを行わず、verdict=\"request_changes\" と "
        "findings に category=\"bug\" message=\"decode_error\" を1件だけ入れて返すこと。"
        % (sb, se, rid))
@@ -767,14 +1111,20 @@ for ch in line:
         die("wire に印字可能 ASCII 以外が残っています (U+%04X)" % ord(ch))
 sys.stdout.write(line)
 PY
+  XREV_ENC="$XREV_ASCII_ENCODING" XREV_HINT="$XREV_ASCII_HINT" \
+    python3 -c "$prog" "$1" "$2" "$SENTINEL_BEGIN" "$SENTINEL_END"
 }
 
 # 純粋関数: wire 1行を元の payload へ復号する（プロトコルの正典実装。テストの往復検証に使う）。
-#   入力: env XREV_DECODE_LINE / 出力: 復号した payload。不正な wire は exit 1（fail closed）。
+#   入力: stdin=wire（巨大になり得る） / 出力: 復号した payload。不正な wire は exit 1（fail closed）。
 _xrev_decode_line() {
-  XREV_DECODE_LINE="${XREV_DECODE_LINE:-}" XREV_ENC="$XREV_ASCII_ENCODING" python3 - <<'PY'
+  # wire は stdin から読む。ENCODING 名は固定小サイズなので env のまま。
+  # `prog="$(cat <<'PY' ... PY)"` は使わない（bash 3.2 の $(...) 対応括弧探索がヒアドキュメント
+  # 本文中の不均衡な括弧・引用符で誤爆するため。詳細は _build_framed_line のコメント参照）。
+  local prog
+  read -r -d '' prog <<'PY' || true
 import os, re, sys
-line = os.environ.get("XREV_DECODE_LINE", "")
+line = sys.stdin.read()
 enc_name = os.environ["XREV_ENC"]
 
 def die(msg):
@@ -883,6 +1233,7 @@ def detok(s):
 
 sys.stdout.write("\n".join(detok(ln) for ln in lines))
 PY
+  XREV_ENC="$XREV_ASCII_ENCODING" python3 -c "$prog"
 }
 
 # payload の content_type を推定する（純粋）。
@@ -902,8 +1253,7 @@ _detect_content_type() {
 # submit 前の描画待ち秒を本文長から決める（純粋）。長いほど長く待つ（上限8s）。
 _compute_submit_settle() {
   local len="$1" base extra settle
-  base="${XREV_SUBMIT_SETTLE_SECONDS:-$(_cfg submit_settle_seconds 1)}"
-  [[ "$base" =~ ^[0-9]+$ ]] || base=1
+  base="$(_xrev_uint "${XREV_SUBMIT_SETTLE_SECONDS:-$(_cfg submit_settle_seconds 1)}" 0 8 1 'submit_settle_seconds')"
   extra=$(( len / 2000 ))
   settle=$(( base + extra ))
   (( settle > 8 )) && settle=8
@@ -936,10 +1286,17 @@ _cmux_clear_input() {
 # 新しいエラー種別を診断で読めるようにしたいときは allowlist に形式を追加する＝人間のレビューを経る。
 # 推測で allowlist を広げないこと（接頭辞・接尾辞・引用構造が少しでも違えば未知扱いにする）。
 _xrev_redact_diag() {
-  XREV_DIAG_ERR="${XREV_DIAG_ERR:-}" XREV_DIAG_LINE="${XREV_DIAG_LINE:-}" python3 - <<'PY'
-import os, re
+  # 送信本文(XREV_DIAG_LINE。巨大になり得る)は stdin から読む。stderr(XREV_DIAG_ERR)は
+  # 呼び出し側で常に 4096 文字に打ち切られる契約（下の MAX_INPUT 参照）で ENV 1本の上限には
+  # 遠く及ばず、stdin 化すると呼び出し側が2本のパイプ/リダイレクトを使い分ける必要が出て
+  # 複雑になるだけなので、単純さを優先して env のままにする。
+  # `prog="$(cat <<'PY' ... PY)"` は使わない（bash 3.2 の $(...) 対応括弧探索がヒアドキュメント
+  # 本文中の不均衡な括弧・引用符で誤爆するため。詳細は _build_framed_line のコメント参照）。
+  local prog
+  read -r -d '' prog <<'PY' || true
+import os, re, sys
 err = os.environ.get("XREV_DIAG_ERR", "")
-line = os.environ.get("XREV_DIAG_LINE", "")
+line = sys.stdin.read()
 
 # 巨大な stderr は**正規化する前に**打ち切る（正規表現や走査のコストを抑える DoS 抑制。
 # 正規化後に判定すると、畳み込みのコストを先に払ってしまい抑制にならない）。
@@ -1001,6 +1358,7 @@ if re.fullmatch(r"Error: Command timed out", s):
 # 2) 既知形式に当たらないものは未知形式として全体を伏せる。
 unknown("未知形式の stderr", s)
 PY
+  XREV_DIAG_ERR="${XREV_DIAG_ERR:-}" python3 -c "$prog"
 }
 
 # 1物理行を reviewer 入力欄へ送る（確定はしない）。cmux 依存。
@@ -1018,7 +1376,8 @@ PY
 #   確定するまで分割送信などの恒久修正を決め打ちしない。各試行の rc と stderr を捕捉して
 #   最終失敗時に診断ログへ出す（本文は伏せる）。
 _cmux_send_line() {
-  local surface="$1" line="$2" tries=0 max="${XREV_SEND_RETRIES:-5}"
+  local surface="$1" line="$2" tries=0
+  local max; max="$(_xrev_uint "${XREV_SEND_RETRIES:-5}" 1 20 5 'XREV_SEND_RETRIES')"
   local err rc rcs="" last_err=""
   # stderr はコマンド置換で受ける。**production に一時ファイルを持ち込まない**のが要点で、
   # 予測可能な名前による symlink 追従・権限・シグナル時の残留という問題群を構造的に排除する。
@@ -1038,7 +1397,7 @@ _cmux_send_line() {
   # 全滅時のみ診断を出す（成功時に無用なログを増やさない）。バイト長は仮説検証の主要な手掛かり。
   local nbytes; nbytes="$(printf '%s' "$line" | wc -c | tr -d ' ')"
   _log "送信に ${max} 回失敗しました（rc=[${rcs}] 文字数=${#line} バイト数=${nbytes}）。"
-  _log "cmux stderr: $(XREV_DIAG_ERR="$last_err" XREV_DIAG_LINE="$line" _xrev_redact_diag)"
+  _log "cmux stderr: $(printf '%s' "$line" | XREV_DIAG_ERR="$last_err" _xrev_redact_diag)"
   return 6
 }
 
@@ -1075,6 +1434,239 @@ print("ok" if mark in dw else "unknown")
 # シェルに渡す値を単一引数として安全にクォート（XREV_CODEX_BIN 注入対策）。printf %q は shell-safe。
 _xrev_shquote() { printf '%q' "$1"; }
 
+# ── reviewer read-only 強制（launch 引数の機械生成・危険引数の拒否）─────────────────
+#
+# 【設計】SKILL.md は「reviewer = レビュー専用・read-only」と約束するが、これまでは素の
+# `exec codex` とユーザー引数の素通しで、read-only は codex 側の既定設定に完全依存していた。
+# ここで起動経路（start-reviewer.sh の手動経路 / _xrev_create_reviewer の自動生成経路）が
+# 共有する単一の引数生成関数を設け、read-only 相当の引数を機械的に強制する。
+#   - eval は使わない（1行1要素で stdout に出し、呼び出し側は while read で配列へ集める）。
+#   - 型検証（object であること・キー存在・文字列のみの配列・印字可能ASCIIのみ）は python 側で行い、
+#     違反時は空配列へフォールバックせず fail closed（非ゼロ）にする。
+#   - 未知の reviewer（config に launch 引数が無い）も fail closed（暴発防止の設計原則7とは別に、
+#     「read-only を強制できないなら起動しない」という安全側の既定）。
+#
+# 【最終 argv の意味検証が正典】launch 引数の型検証（文字列のみ・印字可能ASCIIのみ）は「壊れた値を
+# 通さない」ためのものにすぎず、「安全なポリシーか」（sandbox=read-only かつ承認=never が一意に
+# 有効か）は別に検証しなければならない。空配列や ["--sandbox","danger-full-access"] のような config も
+# 型検証だけは通ってしまうし、launch 引数の後ろにユーザー引数で `-s danger-full-access` のような
+# 短縮形・結合形式を後置されると拒否リスト方式（前方一致）ではすり抜ける。そこで
+# `_xrev_verify_effective_policy` を「最終的に reviewer へ渡る argv 列」に対して通し、拒否リストでは
+# なく実効値の意味検証で合否を決める。この関数を (a) launch 引数決定直後
+# （`_xrev_reviewer_launch_args` 内）, (b) start-reviewer.sh の最終 argv（launch 引数＋ユーザー追加引数）,
+# (c) 起動後に実際に走っているプロセスの argv（`_verify_reviewer_launch_args`）, (d) 既存ペイン採用時の
+# 実効検証（`_xrev_verify_reviewer_policy`）の4箇所で共有する。
+
+# 純粋関数: 「最終的に reviewer へ渡る argv 列」が安全ポリシーを一意に満たすかを検証する（正典）。
+#   入力: $1 = reviewer 種別（basename。codex / claude）, $2.. = 最終 argv 列（0件可）
+#   認識する引数形式（codex）:
+#     sandbox   = `--sandbox <値>` / `--sandbox=<値>` / `-s <値>` / `-s<値>`（結合形式）
+#     approval  = `--ask-for-approval <値>` / `--ask-for-approval=<値>` / `-a <値>` / `-a<値>`（結合形式）
+#   判定（codex）:
+#     - sandbox・approval それぞれの指定を左から集め、**ちょうど1回だけ**現れることを要求する
+#       （0回=指定なし・2回以上=同じ軸の複数指定は、たとえ最後の値が安全でも fail closed で拒否。
+#       「後勝ちで良しとする」寛容さは意図的に採らない＝意図の曖昧さを許さない）。
+#     - sandbox の実効値が `read-only`、かつ approval の実効値が `never` であることを要求する。
+#     - `--dangerously-bypass-approvals-and-sandbox` / `--full-auto` / `--yolo`（完全一致。前方一致では
+#       ない）のいずれかが argv に含まれていたら、他条件を満たしていても拒否する。危険フラグの
+#       リストはこの関数の中の1箇所にまとめる（拒否リストの多重管理をしない）。
+#     - 値を要求する形式で値が無い（末尾で切れている）場合も拒否する。
+#   判定（claude）: `--permission-mode <値>` / `--permission-mode=<値>` の実効値が一意に `plan` である
+#     ことを要求する（claude は短縮形を持たないため、それ以外の形式は単に「該当なし」として扱われ、
+#     結果的に「指定なし」で fail closed になる）。
+#   未知の reviewer 種別: fail closed（拒否）。
+#   出力: 合格時は stdout に何も書かない（exit 0。終了コードのみで成否を表現する）/ 不合格時は
+#     stderr に理由（exit 非ゼロ）。
+#   【重要・不具合A（実機で発生した回帰）への対処】この関数は「stdout が結果チャネルである経路」
+#   （例: xrev_transport_review は stdout に reviewer の review JSON だけを返す契約）から直接・間接に
+#   呼ばれる。以前は合格時に stdout へ "ok" を書いており、呼び出し側の1箇所（xrev_transport_review の
+#   (iii) 送信ゲート内、`_xrev_verify_reviewer_policy` 経由）でリダイレクトが漏れていたため、"ok" が
+#   review JSON の手前に混入して JSON パース失敗（decision=invalid）を起こした。原因は「呼び出し側の
+#   リダイレクト漏れ」ではなく「この関数が stdout を結果チャネルとして使っていたこと」自体なので、
+#   合格時に何も出力しないことで、この種の事故を構造的に起こり得なくする。
+_xrev_verify_effective_policy() {
+  local prog
+  read -r -d '' prog <<'PY' || true
+import sys
+
+def die(msg):
+    sys.stderr.write("[xrev/transport] 安全ポリシー検証失敗: %s\n" % msg)
+    sys.exit(1)
+
+if len(sys.argv) < 2:
+    die("reviewer 種別が指定されていません")
+kind = sys.argv[1]
+argv = sys.argv[2:]
+
+def collect(args, long_flag, short_flag=None):
+    # long_flag（空白区切り/=形式）と short_flag（空白区切り/結合形式）の実効値を左から集める。
+    # 呼び出し側で len(values) を検証する（0=指定なし、2以上=複数指定として fail closed）。
+    values = []
+    long_eq = long_flag + "="
+    i, n = 0, len(args)
+    while i < n:
+        a = args[i]
+        if a == long_flag:
+            if i + 1 >= n:
+                die("%s の値がありません" % long_flag)
+            values.append(args[i + 1]); i += 2; continue
+        if a.startswith(long_eq):
+            values.append(a[len(long_eq):]); i += 1; continue
+        if short_flag is not None:
+            if a == short_flag:
+                if i + 1 >= n:
+                    die("%s の値がありません" % short_flag)
+                values.append(args[i + 1]); i += 2; continue
+            if a.startswith(short_flag) and len(a) > len(short_flag):
+                values.append(a[len(short_flag):]); i += 1; continue
+        i += 1
+    return values
+
+if kind == "codex":
+    # サンドボックス/承認を丸ごと外す既知フラグ（完全一致。1箇所にまとめる）。
+    DANGEROUS_EXACT = (
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--full-auto",
+        "--yolo",
+    )
+    for a in argv:
+        if a in DANGEROUS_EXACT:
+            die("サンドボックス/承認を丸ごと外すフラグが含まれています: %s" % a)
+    sandbox_vals = collect(argv, "--sandbox", "-s")
+    approval_vals = collect(argv, "--ask-for-approval", "-a")
+    if len(sandbox_vals) != 1:
+        die("sandbox 指定が一意ではありません（%d 件）" % len(sandbox_vals))
+    if len(approval_vals) != 1:
+        die("承認ポリシー指定が一意ではありません（%d 件）" % len(approval_vals))
+    if sandbox_vals[0] != "read-only":
+        die("sandbox の実効値が read-only ではありません: %s" % sandbox_vals[0])
+    if approval_vals[0] != "never":
+        die("承認ポリシーの実効値が never ではありません: %s" % approval_vals[0])
+    # 合格。何も出力しない（成否は終了コードのみで表現する。関数コメント「不具合Aへの対処」参照）。
+elif kind == "claude":
+    perm_vals = collect(argv, "--permission-mode", None)
+    if len(perm_vals) != 1:
+        die("--permission-mode 指定が一意ではありません（%d 件）" % len(perm_vals))
+    if perm_vals[0] != "plan":
+        die("--permission-mode の実効値が plan ではありません: %s" % perm_vals[0])
+    # 合格。何も出力しない（同上）。
+else:
+    die("未知の reviewer 種別です: %s" % kind)
+PY
+  python3 -c "$prog" "$@"
+}
+
+# reviewer の launch 引数を決定する（config/env → 型検証 → 1行1要素で stdout）。
+#   入力: $1 = reviewer バイナリ名（basename を取ってから照合する）
+#   優先順位: env XREV_REVIEWER_LAUNCH_ARGS（JSON 配列文字列。文字列のみの配列を要求） >
+#             config の reviewer_launch_args[<basename>]
+#   出力(stdout): 引数を1行1要素（改行区切り）。引数自体に改行を含むことは型検証で拒否するため
+#     区切りとして安全。exit: 0=決定 / 1=型不正・未知reviewer・JSON不正・安全ポリシー不合格（fail closed）
+#
+# 【指摘1への対処】型検証（object/文字列配列/印字可能ASCII）を通っただけでは「安全なポリシーか」は
+# 分からない。空配列や `["--sandbox","danger-full-access"]` も型としては正しいため、決定した
+# launch 引数列そのものを `_xrev_verify_effective_policy` に通し、config/env が壊れている（＝read-only
+# 強制を回避する値になっている）場合は fail closed で拒否する。
+_xrev_reviewer_launch_args() {
+  local name; name="$(basename -- "$1")"
+  local prog
+  read -r -d '' prog <<'PY' || true
+import json, os, sys
+
+def die(msg):
+    sys.stderr.write("[xrev/transport] %s\n" % msg)
+    sys.exit(1)
+
+def validate_list(val, label):
+    # object の値（launch 引数列）が「文字列のみの配列・印字可能ASCIIのみ・空文字列不可」であることを
+    # 検証する。1つでも違反があれば fail closed（部分的に有効な要素だけを使うことはしない）。
+    if not isinstance(val, list):
+        die("%s が不正です（配列ではありません）" % label)
+    out = []
+    for item in val:
+        if not isinstance(item, str):
+            die("%s に文字列以外の要素が含まれています" % label)
+        if item == "":
+            die("%s に空文字列の要素が含まれています" % label)
+        for ch in item:
+            code = ord(ch)
+            if code < 0x20 or code > 0x7E:
+                die("%s の要素に印字可能ASCII以外の文字が含まれています（該当要素は伏せます）" % label)
+        out.append(item)
+    return out
+
+name = sys.argv[1]
+override = os.environ.get("XREV_LAUNCH_OVERRIDE", "")
+
+if override:
+    try:
+        parsed = json.loads(override)
+    except Exception:
+        die("XREV_REVIEWER_LAUNCH_ARGS が不正な JSON です")
+    launch_args = validate_list(parsed, "XREV_REVIEWER_LAUNCH_ARGS")
+else:
+    cfg_path = os.environ.get("XREV_CONFIG_PATH", "")
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+    except Exception:
+        die("config を読み込めません（%s）" % cfg_path)
+    launch_map = cfg.get("reviewer_launch_args")
+    if not isinstance(launch_map, dict):
+        die("reviewer_launch_args が不正です（object ではありません）")
+    if name not in launch_map:
+        die("未知の reviewer '%s'（launch 引数が未定義）。"
+            "config の reviewer_launch_args に追加するか "
+            "XREV_REVIEWER_LAUNCH_ARGS を指定してください" % name)
+    launch_args = validate_list(launch_map[name], "reviewer_launch_args['%s']" % name)
+
+for a in launch_args:
+    print(a)
+PY
+  local out
+  out="$(XREV_LAUNCH_OVERRIDE="${XREV_REVIEWER_LAUNCH_ARGS:-}" XREV_CONFIG_PATH="$XREV_CONFIG" \
+    python3 -c "$prog" "$name")" || return $?
+  local -a args=()
+  local _la_out_line
+  while IFS= read -r _la_out_line; do
+    [[ -n "$_la_out_line" ]] && args+=("$_la_out_line")
+  done <<< "$out"
+  # stdout のみ捨てる（合格時は不具合Aの対処により何も出さないが念のための防御）。stderr は
+  # 捨てない: ここは「決定した launch 引数が壊れている」という実害のある失敗であり、
+  # _xrev_verify_effective_policy が返す具体的な理由（どの軸が・どんな値で不合格か）は
+  # 診断に必要なので、以降の _log による総括メッセージに加えて表示させる。
+  if ! _xrev_verify_effective_policy "$name" "${args[@]+"${args[@]}"}" >/dev/null; then
+    _log "reviewer(${name}) の launch 引数が安全ポリシー（read-only 強制）を満たしません（config/env の reviewer_launch_args を確認してください）。"
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+# 危険な launch 引数上書きの拒否。sandbox/approval 系フラグの前方一致で判定する。
+# 【判定リストはここ1箇所にまとめる】codex/claude の sandbox・承認モード系フラグ。
+#   launch 引数（read-only 強制）の後置上書きを防ぐ（start-reviewer.sh のユーザー追加引数向け）。
+#
+# 【位置づけ（指摘2への対処後）】この拒否リストは前方一致にすぎず、`-s`（codex の sandbox 短縮形）や
+# 未知の危険フラグを漏らしうる。正典の最終判定は `_xrev_verify_effective_policy` による「最終 argv の
+# 意味検証」であり、本関数はそれより前段で分かりやすいエラーメッセージを即座に返すための
+# best-effort な早期棄却にすぎない（本関数を通過しても、後段の意味検証が改めて拒否しうる）。
+_xrev_reject_unsafe_reviewer_args() {
+  local -a unsafe_prefixes=(
+    "--sandbox" "-s" "--ask-for-approval" "--approval" "--full-auto"
+    "--dangerously" "--permission-mode" "--yolo" "-a"
+  )
+  local arg prefix
+  for arg in "$@"; do
+    for prefix in "${unsafe_prefixes[@]}"; do
+      if [[ "$arg" == "$prefix"* ]]; then
+        _log "危険な引数 '${arg}' は許可されません（sandbox/approval 系フラグの上書きは拒否します）。"
+        return 64
+      fi
+    done
+  done
+  return 0
+}
+
 # 呼び出し元(CMUX_SURFACE_ID)の所属ワークスペース UUID を返す。
 _xrev_caller_ws() {
   [[ -n "${CMUX_SURFACE_ID:-}" ]] || return 1
@@ -1085,9 +1677,16 @@ _xrev_caller_ws() {
 }
 
 # 同一WSの reviewer の状態を分類する（_cmux_resolve_surface ＋ probe）。
-#   stdout: present|absent|ambiguous|non_terminal|process_mismatch|ws_error|transient
-#   exit:   0(present) / 10(absent) / 16(ambiguous) / 14(non_terminal) / 17(process_mismatch) / 15(ws_error) / 1(transient)
+#   stdout: present|absent|ambiguous|non_terminal|process_mismatch|policy_mismatch|ws_error|transient
+#   exit:   0(present) / 10(absent) / 16(ambiguous) / 14(non_terminal) / 17(process_mismatch) /
+#           27(policy_mismatch) / 15(ws_error) / 1(transient)
 # present のときグローバル _XREV_RES_* に解決結果が入る。
+#
+# 【指摘3への対処】従来は「前景プロセス名が REVIEWER_PROCESS か」しか見ておらず、手動起動・旧版の
+# 書き込み可能なままの端末がそのまま present（採用）扱いになり得た。ここで前景プロセスの argv を
+# 取得し、安全ポリシー（sandbox=read-only かつ承認=never）が実効に有効かを検証してから present と
+# 判定する。既定は検証する（fail closed）。XREV_ALLOW_UNVERIFIED_REVIEWER=1（明示 opt-in）のときだけ
+# 検証を省略する（手動で用意した reviewer を使う運用を壊さないための後方互換。警告ログを出す）。
 _xrev_classify_reviewer() {
   _XREV_RES_REF=""
   _cmux_resolve_surface >/dev/null; local rc=$?
@@ -1106,10 +1705,20 @@ _xrev_classify_reviewer() {
     non_terminal) printf 'non_terminal'; return 14 ;;
     *) printf 'transient'; return 1 ;;   # gone/transient は過渡。待機側で再評価
   esac
-  if _verify_reviewer_process "$_XREV_RES_REF"; then
+  if ! _verify_reviewer_process "$_XREV_RES_REF"; then
+    printf 'process_mismatch'; return 17
+  fi
+  if [[ "${XREV_ALLOW_UNVERIFIED_REVIEWER:-}" == "1" ]]; then
+    _log "警告: XREV_ALLOW_UNVERIFIED_REVIEWER=1 のため既存 reviewer の安全ポリシー検証を省略します（read-only/承認 never を保証しません）。"
     printf 'present'; return 0
   fi
-  printf 'process_mismatch'; return 17
+  # stderr も含めて捨てる: ここは「分類」であり policy_mismatch は失敗ではなく正常な分類結果の
+  # 1つ（呼び出し元の xrev_ensure_reviewer が rc=27 を受けて既に案内メッセージを出す）。
+  # _xrev_verify_effective_policy の理由文言を二重に出す必要はない。
+  if _xrev_verify_reviewer_policy "$_XREV_RES_REF" >/dev/null 2>&1; then
+    printf 'present'; return 0
+  fi
+  printf 'policy_mismatch'; return 27
 }
 
 # ロックパス（TMPDIR 配下・WS UUID 鍵。リポジトリには絶対に作らない）。
@@ -1121,10 +1730,22 @@ _xrev_lock_path() {
 }
 
 # 生成本体: caller WS に terminal ペインを作り、所有 surface UUID を固定して codex を起動・確認する。
-# 成功で _XREV_RES_* に生成結果を入れて 0、起動確認失敗で 19。
+# 成功で _XREV_RES_* に生成結果を入れて 0、起動確認失敗（read-only 引数の実効確認できず、を含む）で 19。
 _xrev_create_reviewer() {
   local ws="$1" codex="${XREV_CODEX_BIN:-codex}"
   command -v "$codex" >/dev/null 2>&1 || { _log "codex バイナリ '$codex' が見つかりません（XREV_CODEX_BIN で指定可）。"; return 19; }
+  # launch 引数（read-only 強制）を先に決定する。cmux にペインを作る前に検証しておくことで、
+  # config/env が壊れている場合に無駄なペイン生成をしない。生成できなければ fail closed で中止。
+  local -a launch_args=()
+  local launch_out
+  if ! launch_out="$(_xrev_reviewer_launch_args "$codex")"; then
+    _log "reviewer(${codex}) の launch 引数を決定できませんでした（生成を中止します）。"
+    return 19
+  fi
+  local _la_line
+  while IFS= read -r _la_line; do
+    [[ -n "$_la_line" ]] && launch_args+=("$_la_line")
+  done <<< "$launch_out"
   local out nrc ref
   # new-pane の rc を確認し、成功時の stdout のみから surface を抽出する（失敗メッセージの誤抽出を防ぐ）。
   out="$(_cmux new-pane --type terminal --workspace "$ws" --focus false 2>/dev/null)"; nrc=$?
@@ -1137,12 +1758,18 @@ _xrev_create_reviewer() {
   loc="$(XREV_LISTING="$tree" _locate_surface "$ref")" || { _log "生成した surface($ref)を特定できません。"; return 19; }
   sf="$(printf '%s' "$loc" | cut -f2)"
   _XREV_RES_REF="$ref"; _XREV_RES_UUID="$sf"; _XREV_RES_WS="$ws"; _XREV_RES_PATH="created"; _XREV_RES_SAMEWS=1
-  # codex を exec で起動（shell-safe にクォート）。
+  # codex を launch 引数付きで exec 起動（各要素を個別に shell-safe クォートし、eval は使わない）。
   # 【実機知見】タブのリネームは「codex 起動の前」に行うと、codex が起動時に cwd 由来の名前(例 "xrev")で
   #   タブ名を上書きしてしまい、reviewer_pane_title が定着しない（→ 次回の title 解決が当たらず冪等性が崩れる）。
   #   そのため rename は**起動確認の後**に行う（post-startup rename は上書きされず定着することを実機確認）。
   #   また rename-tab も read/send 同様 workspace+surface UUID 指定が必要（短縮 ref/uuid 単独は "Tab not found"）。
-  _cmux send --workspace "$ws" --surface "$sf" "exec $(_xrev_shquote "$codex")" >/dev/null 2>&1
+  local cmd_str; cmd_str="exec $(_xrev_shquote "$codex")"
+  # bash 3.2（macOS既定）は set -u 下で「宣言済みだが要素0件」の配列展開が unbound variable に
+  # なるバグがある（bash 4.4 で修正）。"${arr[@]+...}" イディオムで 0 件配列でも安全に展開する。
+  for _la_line in "${launch_args[@]+"${launch_args[@]}"}"; do
+    cmd_str+=" $(_xrev_shquote "$_la_line")"
+  done
+  _cmux send --workspace "$ws" --surface "$sf" "$cmd_str" >/dev/null 2>&1
   _cmux send-key --workspace "$ws" --surface "$sf" enter >/dev/null 2>&1
   # 起動確認（同一試行内で read+top）。所有 UUID にだけ作用。
   local deadline=$(( SECONDS + CREATE_TIMEOUT )) term
@@ -1150,6 +1777,13 @@ _xrev_create_reviewer() {
     _xrev_sleep 1
     term="$(_probe_terminal_usable "$_XREV_RES_REF")"
     if [[ "$term" == "usable" ]] && _verify_reviewer_process "$_XREV_RES_REF"; then
+      # read-only 引数の実効検証。ここまでは「起動できた」だけで、launch 引数が実際に効いて
+      # いる保証にはならない（引数生成のバグ・cmux send の欠落等でも起動確認は通り得る）ため、
+      # 実プロセスのコマンドラインで裏取りしてから採用する。確認できなければ採用しない(fail closed)。
+      if ! _verify_reviewer_launch_args "$_XREV_RES_REF" "$(basename -- "$codex")"; then
+        _log "reviewer は起動しましたが read-only 引数の実効を確認できませんでした（surface=${ref}）。"
+        return 19
+      fi
       # 起動確認後にリネーム（codex のタブ名上書きを上書きし返して定着させる）。失敗は致命でない
       # （当該セッションは UUID で操作できる）が、冪等性のため診断ログは残す。
       _cmux rename-tab --workspace "$ws" --surface "$sf" "$REVIEWER_PANE_TITLE" >/dev/null 2>&1 \
@@ -1163,8 +1797,8 @@ _xrev_create_reviewer() {
 }
 
 # 公開: 同一WSの reviewer を保証する（あれば採用・無ければ生成）。stdout に採用 surface ref。
-# exit: 0 / 10(absent かつ autocreate=off) / 14/16/17(既存が壊れ/曖昧/別物→人間) / 15(ws不明) /
-#       19(生成したが起動確認失敗) / 20(競合で期限切れ→人間)。
+# exit: 0 / 10(absent かつ autocreate=off) / 14/16/17(既存が壊れ/曖昧/別物→人間) /
+#       27(既存が安全ポリシー不合格→人間) / 15(ws不明) / 19(生成したが起動確認失敗) / 20(競合で期限切れ→人間)。
 xrev_ensure_reviewer() {
   _cmux_preflight || return $?
   # 注意: classify は _XREV_RES_* グローバルをセットするため $() で捕捉しない（サブシェルで失われる）。
@@ -1176,6 +1810,7 @@ xrev_ensure_reviewer() {
     16) _log "同一WSに reviewer が複数あり曖昧です。作成せず確認してください。"; return 16 ;;
     14) _log "同一WSの reviewer が実ターミナルでありません（壊れ）。作成せず確認してください。"; return 14 ;;
     17) _log "同一WSの reviewer の前景プロセスが '$REVIEWER_PROCESS' ではありません。作成せず確認してください。"; return 17 ;;
+    27) _log "reviewer ペインが安全ポリシー（read-only + 承認 never）で起動していません。ペインを閉じて ensure-reviewer で作り直すか、start-reviewer.sh で起動し直してください。"; return 27 ;;
     15) _log "呼び出し元のワークスペースを特定できません（cmux ペイン内で実行してください）。"; return 15 ;;
     # 一時障害(tree取得不能等)は「不在を証明できない」ので生成しない。再試行/人間判断に委ねる。
     *)  _log "reviewer の状態を確認できませんでした（一時障害）。生成せず中止します。"; return 11 ;;
@@ -1197,7 +1832,7 @@ xrev_ensure_reviewer() {
       rm -rf "$lock"; _XREV_LOCK=""; trap - EXIT INT TERM
       case "$rc" in
         0)  printf '%s' "$_XREV_RES_REF"; return 0 ;;
-        16|14|17|15) return "$rc" ;;
+        16|14|17|27|15) return "$rc" ;;
         *)  _log "ロック下で reviewer 状態を確認できませんでした（一時障害）。生成せず中止します。"; return 11 ;;
       esac
     fi
@@ -1220,6 +1855,47 @@ xrev_ensure_reviewer() {
   return 20
 }
 
+# 送信ゲート統合ヘルパ（不具合B対応: 安全ポリシー検証の TOCTOU）。
+# 【背景】従来は安全ポリシー実効検証を送信処理の序盤（旧(iii)直後の(iii')）で1回だけ行い、
+# その後の「本文送信直前(iii-b)」「Enter直前の最終ゲート(iii-c)」「Enter再送前」の各ゲートは
+# _verify_reviewer_process（プロセス名のみ）しか再検証していなかった。初回のポリシー検証後に
+# reviewer プロセスが終了し、同名だが書き込み可能な reviewer（例 --sandbox workspace-write の
+# codex）が起動し直した場合、本文送信〜Enter確定までの描画待ち（最大約10秒）の窓で「プロセス名は
+# 一致するがポリシーは既に崩れている」状態を名前検証だけが通過し、無承認のまま payload を確定できて
+# しまう。既存の「shell 誤送信対策(プロセス証明の3点検査)」と同じ形の TOCTOU が安全ポリシー側に
+# 残っていた。
+# 【対処】プロセス証明と安全ポリシー検証を「常に同じゲート」でまとめて行う。送信経路の全ゲート
+# （早期棄却・本文送信直前・Enter直前・Enter再送前）をこのヘルパの呼び出しに置き換え、片方だけを
+# 再検証して他方が古いまま残る構造的な穴を塞ぐ。
+#   入力: $1=surface
+#   出力: なし（理由に応じたログは呼び出し側が出す。ゲートごとに文言が異なるため）。
+#   exit: 0=プロセス証明・安全ポリシーとも確認 / 17=プロセス不一致 / 27=安全ポリシー不一致
+# 【キャッシュしない】安全ポリシー検証は ps を追加で叩くため、ゲートのたびに実行コストが増える。
+# それでもキャッシュしない: キャッシュした結果を後続ゲートで使い回すことは「検査した時点」と
+# 「実際に Enter を送る時点」を再び分離することになり、まさにこの関数が塞ごうとしている TOCTOU を
+# 再導入してしまう。可用性よりも安全側を優先し、毎回取り直す。
+# 【XREV_ALLOW_UNVERIFIED_REVIEWER=1】既存の opt-out 挙動を維持し、ポリシー検証部分だけを省略する
+# （プロセス証明は省略しない）。警告ログは1往復（xrev_transport_review 1回の呼び出し）につき1回だけ
+# 出す。ゲートは1往復で最大5回（(iii)/(iii-b)/(iii-c)/Enter再送最大2回）呼ばれ得るため、素朴に毎回
+# 警告すると同じ内容が繰り返しログに積まれる。xrev_transport_review の先頭で _XREV_UNVERIFIED_WARNED
+# をリセットし、このヘルパは「まだ警告していなければ出す」だけにする。
+_xrev_gate_reviewer() {
+  local surface="$1"
+  _verify_reviewer_process "$surface" || return 17
+  if [[ "${XREV_ALLOW_UNVERIFIED_REVIEWER:-}" == "1" ]]; then
+    if [[ "${_XREV_UNVERIFIED_WARNED:-}" != "1" ]]; then
+      _log "警告: XREV_ALLOW_UNVERIFIED_REVIEWER=1 のため reviewer の安全ポリシー検証を省略します（read-only/承認 never を保証しません）。"
+      _XREV_UNVERIFIED_WARNED=1
+    fi
+    return 0
+  fi
+  # stdout のみ捨てる（不具合Aの対処により合格時は何も出さない契約だが、念のための防御）。
+  # stderr は捨てない: 呼び出し側は理由文言をゲートごとに出し分けるため直接は使わないが、
+  # 診断の手がかりとして残す。
+  _xrev_verify_reviewer_policy "$surface" >/dev/null || return 27
+  return 0
+}
+
 # ── 公開 API ─────────────────────────────────────────────────────────────────
 
 # xrev_transport_review <payload_text>
@@ -1227,6 +1903,9 @@ xrev_ensure_reviewer() {
 #   成功: 0 / JSON を stdout。失敗: 非ゼロ / stderr にログ。
 xrev_transport_review() {
   local payload="$1"
+  # 不具合B対応: XREV_ALLOW_UNVERIFIED_REVIEWER=1 の警告は1往復につき1回に抑える
+  # （_xrev_gate_reviewer が複数回呼ばれるため。往復ごとに毎回リセットする）。
+  _XREV_UNVERIFIED_WARNED=""
   _cmux_preflight || return $?
   # 宛先解決（同一WSスコープ）。グローバル(_XREV_RES_*)を使うためサブシェルにしない。
   # 失敗コード（10/15/16/3）はそのまま返す（review-loop 側で transport_reason に写像）。
@@ -1294,13 +1973,22 @@ xrev_transport_review() {
     *) _log "reviewer surface($surface)の画面取得に繰り返し失敗しました（中止）。"; return 11 ;;
   esac
 
-  # (iii) プロセス証明（前景プロセスが許可名=$REVIEWER_PROCESS か。Codex 終了後に shell へ戻った端末への誤送信を防ぐ）
-  # ここは早期棄却のゲート。payload 構築や画面読み取りの前に壊れた宛先を弾く。
-  if ! _verify_reviewer_process "$surface"; then
-    _log "reviewer surface($surface)の前景プロセスが '$REVIEWER_PROCESS' ではありません（reviewer 未稼働/別用途の端末の恐れ）。送信を中止します。"
-    _log "復旧: 当該ペインで codex を起動し直すか、タブ名 '$REVIEWER_PANE_TITLE' が別用途の端末に付いていないか確認してください。"
-    return 17
-  fi
+  # (iii) 早期ゲート: プロセス証明＋安全ポリシー実効検証を同じゲートでまとめて行う（不具合B対応。
+  # 詳細は _xrev_gate_reviewer のコメント参照）。ここは早期棄却のゲート。payload 構築や画面読み取りの
+  # 前に壊れた宛先を弾く。
+  local gate_rc
+  _xrev_gate_reviewer "$surface"; gate_rc=$?
+  case "$gate_rc" in
+    0) ;;
+    17)
+      _log "reviewer surface($surface)の前景プロセスが '$REVIEWER_PROCESS' ではありません（reviewer 未稼働/別用途の端末の恐れ）。送信を中止します。"
+      _log "復旧: 当該ペインで codex を起動し直すか、タブ名 '$REVIEWER_PANE_TITLE' が別用途の端末に付いていないか確認してください。"
+      return 17 ;;
+    27)
+      _log "reviewer surface($surface)が安全ポリシー（read-only + 承認 never）で起動していません。送信を中止します。"
+      _log "復旧: ペインを閉じて ensure-reviewer で作り直すか、start-reviewer.sh で起動し直してください。"
+      return 27 ;;
+  esac
 
   # round_id（ラウンド識別子）と content_type を決め、payload を1物理行にエンコードする。
   # round_id は高エントロピー（衝突でスクロールバックの過去応答と混同しないため）。
@@ -1312,23 +2000,38 @@ xrev_transport_review() {
   # 本スクリプトは set -e ではないため、rc を見ないと壊れた/空の wire をそのまま送ってしまう。
   # 専用コード(23)にするのは、cmux へ一度も送っていない失敗を「送信失敗(11)」として報告すると
   # 利用者向け診断や将来の再試行判断が不正確になるため。
-  if ! line="$(_build_framed_line "$ct" "$round_id" "$payload")" || [[ -z "$line" ]]; then
+  if ! line="$(printf '%s' "$payload" | _build_framed_line "$ct" "$round_id")" || [[ -z "$line" ]]; then
     _log "payload のエンコードに失敗しました（cmux へは送信していません）。"
     return 23
   fi
   _log "round_id=${round_id} content_type=${ct} len=${#line}"
 
+  # wire 長の上限（fail closed）。実測（docs/cmux-behavior.md）で ASCII 100KB の送信が成功して
+  # いるが、想定外に巨大な payload を安全側に倒して早期に弾くため保守的な既定値を設けている。
+  if (( ${#line} > WIRE_MAX_CHARS )); then
+    _log "wire が上限を超えました（実長=${#line} 上限=${WIRE_MAX_CHARS}）。payload を前回からの差分に縮めるか、XREV_WIRE_MAX_CHARS を明示して拡大してください。"
+    return 26
+  fi
+
   # 送信前ベースライン：この round_id に一致する妥当ブロック数（通常0、防御的に数える）。
-  local before_count
-  before_count="$(_scan_review_blocks "$(_cmux_read_screen "$surface")" "$round_id" | head -1)"
+  # broken（完成しているが不正なブロック）も同様にベースラインを取り、送信前から既に画面に
+  # 残っている壊れた表示を「新着の契約違反」と誤検出しないようにする。
+  local before_count before_broken screen_snapshot
+  screen_snapshot="$(_cmux_read_screen "$surface")"
+  before_count="$(printf '%s' "$screen_snapshot" | _scan_review_blocks "$round_id" | head -1)"
   [[ "$before_count" =~ ^[0-9]+$ ]] || before_count=0
+  before_broken="$(printf '%s' "$screen_snapshot" | _scan_broken_blocks "$round_id")"
+  [[ "$before_broken" =~ ^[0-9]+$ ]] || before_broken=0
 
   # (iii-b) 本文送信の直前に再検証。(iii) からベースライン取得（read-screen）を挟むため、
-  # その間に codex が終了していれば本文がシェルの入力バッファへ流れ込む。窓を最小化する。
-  if ! _verify_reviewer_process "$surface"; then
-    _log "本文送信の直前に reviewer の前景プロセスが変化しました（誤送信防止のため中止）。"
-    return 17
-  fi
+  # その間に reviewer が終了/入れ替わっていれば本文がシェルの入力バッファへ流れ込む、または
+  # 無承認で確定されうる。プロセス証明と安全ポリシーを同じゲートで再検証する（不具合B対応）。
+  _xrev_gate_reviewer "$surface"; gate_rc=$?
+  case "$gate_rc" in
+    0) ;;
+    17) _log "本文送信の直前に reviewer の前景プロセスが変化しました（誤送信防止のため中止）。"; return 17 ;;
+    27) _log "本文送信の直前に reviewer の安全ポリシーが不成立になりました（誤送信防止のため中止）。"; return 27 ;;
+  esac
 
   # 1物理行を送信 → 描画待ち → 切り詰め検出 → Enter 1回で確定。
   _cmux_send_line "$surface" "$line" || { _log "送信に失敗しました。"; return 11; }
@@ -1346,39 +2049,96 @@ xrev_transport_review() {
     _log "ペースト文字数が送信長(${#line})と一致しません。切り詰めの恐れがあるため中止します。"
     return 13
   fi
-  [[ "$intact" == "ok" ]] || _log "ペースト到達を確認できませんでした（確認不能）。続行します。"
+  # 【縮退の可視化・変更2】ここに到達するのは "ok" か "unknown" のみ（"truncated" は上で return 済み）。
+  # unknown は fail closed にすると正常運用まで壊すため続行はするが、この経路が恒常化するのは
+  # 切り詰め検出そのものが実質無効化されている（＝防護の縮退）ことを意味するため、利用者が
+  # 見逃さないよう理由候補と保守手順まで含めた警告にする（挙動自体は従来どおり「続行」のまま）。
+  if [[ "$intact" != "ok" ]]; then
+    _log "警告: ペースト到達を確認できませんでした（確認不能=unknown）。続行しますが切り詰め検出は機能していません。"
+    _log "確認不能の理由候補: (a) Codex TUI の「Pasted Content N chars」表示文言がバージョンアップで変わった"
+    _log "                     (b) 本文が短くインライン表示された（END マーカー不可視）"
+    _log "この警告が毎回出る場合は Codex TUI の文言変更が疑われます。切り詰め検出が実質無効化されているため、"
+    _log "docs/cmux-behavior.md の該当節を確認のうえ _check_paste_intact の正規表現を実機の表示に合わせて更新してください。"
+  fi
 
   # (iii-c) 最終ゲート: Enter の直前に再検証する。ここが安全目標の要。
-  # 本文送信から描画待ち・切り詰め検出まで最大10秒前後あり、その間に codex が終了すると本文は
-  # シェルの入力行に残る。しかも _check_paste_intact はシェルがエコーした行でも END マーカーを
-  # 見つけて "ok" を返すため、切り詰め検出は誤送信の防波堤にならない。Enter を送るか否かを
-  # 決める直前の観測だけが、payload がコマンド実行される事故を防げる。
-  if ! _verify_reviewer_process "$surface"; then
-    _log "Enter 送信の直前に reviewer の前景プロセスが変化しました。コマンド実行を避けるため Enter を送りません。"
-    # 【重要】Enter を送らないだけでは安全な終端にならない。送信済みの本文は入力行に残り、
-    # 前景が shell に戻っている以上、その後の偶発的な Enter や再送でコマンド実行され得る。
-    # かつ Codex の composer は ctrl+u/ctrl+a/ctrl+k/ctrl+w で消去できないことを実機確認済みで
-    # （反応するのは backspace の1文字ずつのみ）、xrev には残留を自動破棄する確実な手段が無い。
-    # したがってこのペインは**汚染された**ものとして扱い、再利用を禁止する。
-    _log "【重要】送信済みの本文が reviewer ペイン($surface)の入力行に残っています。xrev はこれを自動破棄できません。"
-    _log "このペインは汚染されたものとして扱ってください: Enter を押さずにペインを閉じ、reviewer を開き直してから再実行してください。"
-    _log "（残留したまま再送すると本文が混入します。同じペインを使い回さないでください。）"
-    return 17
+  # 本文送信から描画待ち・切り詰め検出まで最大10秒前後あり、その間に reviewer が終了する/
+  # 同名だが書き込み可能なプロセスへ挿げ替わる窓がある。しかも _check_paste_intact はシェルが
+  # エコーした行でも END マーカーを見つけて "ok" を返すため、切り詰め検出は誤送信の防波堤にならない。
+  # Enter を送るか否かを決める直前に、プロセス証明と安全ポリシーを同じゲートで再検証する
+  # （不具合B対応）ことだけが、payload がコマンド実行される/無承認で確定される事故を防げる。
+  _xrev_gate_reviewer "$surface"; gate_rc=$?
+  if (( gate_rc != 0 )); then
+    local taint_reason
+    if (( gate_rc == 17 )); then
+      taint_reason="Enter 送信の直前に reviewer の前景プロセスが変化しました。コマンド実行を避けるため Enter を送りません。"
+    else
+      taint_reason="Enter 送信の直前に reviewer の安全ポリシーが不成立になりました。コマンド実行を避けるため Enter を送りません。"
+    fi
+    _xrev_log_tainted_pane "$surface" "$taint_reason"
+    return "$gate_rc"
   fi
-  _cmux_submit "$surface" || true
+
+  # (変更1) Enter 送信（プロンプト確定）の失敗を検知・限定リトライする。
+  # 【なぜ無視してはいけないか】従来は `_cmux_submit || true` で失敗を握りつぶしていた。送信できて
+  # いなければ Codex には何も届いておらず応答が来ないのは当然なのに、RESP_TIMEOUT(既定180秒)を
+  # 丸ごと待って timeout(12) と誤診断してしまい、「送れなかった」と「Codex が返さない」を区別できない。
+  # 【再試行の安全条件】Enter の再送は「前景が codex のまま、かつ安全ポリシーが崩れていない」ときだけ
+  # 安全である。codex が死んで shell に落ちていれば Enter はコマンド実行になってしまうし、書き込み
+  # 可能な同名プロセスへ挿げ替わっていれば無承認で確定してしまう。そのため各再試行の直前に必ず
+  # _xrev_gate_reviewer（プロセス証明＋安全ポリシー、不具合B対応）を再実行し、いずれかが崩れていたら
+  # 再試行せず (iii-c) と同じ汚染ペイン扱いにする。この安全条件は絶対に外さないこと。
+  local submit_tries=0 submit_max_retries=2 submit_ok=0
+  while :; do
+    if _cmux_submit "$surface"; then
+      submit_ok=1
+      break
+    fi
+    (( submit_tries >= submit_max_retries )) && break
+    submit_tries=$(( submit_tries + 1 ))
+    _xrev_sleep 1
+    _xrev_gate_reviewer "$surface"; gate_rc=$?
+    if (( gate_rc != 0 )); then
+      local taint_reason
+      if (( gate_rc == 17 )); then
+        taint_reason="Enter 再送の直前に reviewer の前景プロセスが変化しました。コマンド実行を避けるため再送しません。"
+      else
+        taint_reason="Enter 再送の直前に reviewer の安全ポリシーが不成立になりました。コマンド実行を避けるため再送しません。"
+      fi
+      _xrev_log_tainted_pane "$surface" "$taint_reason"
+      return "$gate_rc"
+    fi
+  done
+  if (( submit_ok == 0 )); then
+    _log "Enter 送信(プロンプト確定)に失敗しました。本文は入力欄に残っています。"
+    _log "reviewer ペインで手動で Enter を押すか、ペインを開き直してから再実行してください。"
+    _log "注: 前景は codex のまま（直前に検証済み）なので shell への流入ではありませんが、"
+    _log "残留本文があるため再送時に混入するおそれがあります。同じペインを使い回さないでください。"
+    return 25
+  fi
 
   # 応答待ち：round_id 一致の新着妥当ブロックが出るまで待つ。
-  local waited=0 screen scan count block
+  local waited=0 screen scan count block broken
   _xrev_sleep "$SETTLE_SECS"
   while (( waited < RESP_TIMEOUT )); do
     screen="$(_cmux_read_screen "$surface")"
-    scan="$(_scan_review_blocks "$screen" "$round_id")"
+    scan="$(printf '%s' "$screen" | _scan_review_blocks "$round_id")"
     count="$(printf '%s' "$scan" | head -1)"
     [[ "$count" =~ ^[0-9]+$ ]] || count=0
     if (( count > before_count )); then
       block="$(printf '%s' "$scan" | tail -n +2)"
       printf '%s\n' "$block"
       return 0
+    fi
+    # 妥当ブロックが増えていない場合、「完成しているが JSON として不正」な応答が新規に
+    # 現れていないかを確認する。実機で観測: reviewer がセンチネルで挟んだ本文を返したが
+    # JSON が壊れていて _scan_review_blocks では永遠に検出できず、タイムアウト(12)まで
+    # 全時間を無駄に待った。ここで先に検出し、タイムアウトを待たず即座に契約違反として返す。
+    broken="$(printf '%s' "$screen" | _scan_broken_blocks "$round_id")"
+    [[ "$broken" =~ ^[0-9]+$ ]] || broken=0
+    if (( broken > before_broken )); then
+      _log "reviewer の応答はセンチネルで完成していますが JSON として不正です（契約違反, round_id=${round_id}）。内容は画面に出ているためログには件数のみ記録します（broken=${broken}）。"
+      return 24
     fi
     _xrev_sleep "$RESP_POLL"
     waited=$(( waited + RESP_POLL ))
@@ -1390,6 +2150,229 @@ xrev_transport_review() {
 
 # sleep ラッパ（フォアグラウンド sleep が制限される環境向けの薄い抽象）。
 _xrev_sleep() { sleep "$1" 2>/dev/null || true; }
+
+# ── doctor: 外部ツール契約の一括診断（非破壊・再実行可能）───────────────────────
+#
+# 【背景】xrev は cmux / Codex / Claude Code のバージョンアップのたびに壊れるが、壊れ方が
+# 「全拒否」「タイムアウト」「無言沈黙」に化けて原因が読めない。ここで外部ツールへの契約仮定
+# （tree/top の JSON・TSV 形状、ps の出力形式、フックの入出力契約 等）を一括検査し、
+# 人間可読な診断を出す。
+#
+# 【不変条件】検査はすべて非変更・再実行可能。ペイン生成・送信・タイトル変更などの副作用を
+# 持つ検査は絶対に追加しないこと（doctor は「壊れているかもしれない配管に触れず調べる」ためのもの）。
+#
+# 出力: 1検査1行 "[ok]/[warn]/[fail] 検査名: 詳細"（stdout。機械処理より人間可読を優先するため
+# あえて stderr ではなく stdout に出す）。最後に "ok=N warn=N fail=N" のサマリ行。
+# exit: fail>0 → 1 / fail=0 → 0（warn は exit に影響しない）。詳細は references/protocol.md。
+
+# 純粋関数（cmux 非依存・単体テスト可能）: cmux tree の JSON が想定形状か検査する（doctor 検査5）。
+#   入力: stdin=tree(--all --json --id-format both 相当)の JSON 文字列
+#   出力: 1行診断（成功・失敗いずれも1行）
+#   exit: 0=形状OK（ref="surface:*" title(str) uuid/id/uidいずれか、を持つ要素が1件以上）/ 非0=崩れ
+_doctor_check_tree_shape() {
+  local prog
+  read -r -d '' prog <<'PY' || true
+import json, sys
+raw = sys.stdin.read()
+if not raw.strip():
+    print("tree の出力が空です")
+    sys.exit(1)
+try:
+    data = json.loads(raw)
+except Exception as e:
+    print("JSON として parse できません: %s" % e)
+    sys.exit(1)
+
+count = 0
+def walk(o):
+    global count
+    if isinstance(o, dict):
+        ref = o.get("ref")
+        title = o.get("title")
+        if isinstance(ref, str) and ref.startswith("surface:") and isinstance(title, str):
+            if any(k in o for k in ("uuid", "id", "uid")):
+                count += 1
+        for v in o.values():
+            if isinstance(v, (list, dict)):
+                walk(v)
+    elif isinstance(o, list):
+        for x in o:
+            walk(x)
+walk(data)
+if count == 0:
+    print('ref="surface:*" title(str) かつ uuid/id/uid のいずれかを持つ要素が見つかりません')
+    sys.exit(1)
+print("surface 要素を %d 件確認しました" % count)
+PY
+  python3 -c "$prog"
+}
+
+# 純粋関数（cmux 非依存・単体テスト可能）: cmux top の TSV が想定形状か検査する（doctor 検査6）。
+#   入力: stdin=top(--all --processes --format tsv 相当)の TSV 文字列
+#   出力: 1行診断
+#   exit: 0=形状OK（7列以上・kind列(4列目)にprocessが存在・process行の5列目が数値PID）/ 非0=崩れ
+_doctor_check_top_shape() {
+  local prog
+  read -r -d '' prog <<'PY' || true
+import sys
+raw = sys.stdin.read()
+if not raw.strip():
+    print("top の出力が空です")
+    sys.exit(1)
+lines = [l for l in raw.splitlines() if l.strip() != ""]
+has_process = False
+for l in lines:
+    cols = l.split("\t")
+    if len(cols) < 7:
+        print("TSV の列数が7列未満の行があります: %r" % l)
+        sys.exit(1)
+    if cols[3] == "process":
+        has_process = True
+        pid = cols[4]
+        if not pid.isdigit():
+            print("process 行の PID(5列目)が数値ではありません: %r" % pid)
+            sys.exit(1)
+if not has_process:
+    print("kind(4列目)=process の行が見つかりません")
+    sys.exit(1)
+print("top TSV を確認しました（%d 行・process 行あり）" % len(lines))
+PY
+  python3 -c "$prog"
+}
+
+# doctor: 1検査1行の報告と ok/warn/fail 集計。
+_DOCTOR_OK=0; _DOCTOR_WARN=0; _DOCTOR_FAIL=0
+_doctor_report() {
+  local level="$1" name="$2" detail="$3"
+  case "$level" in
+    ok)   _DOCTOR_OK=$(( _DOCTOR_OK + 1 )) ;;
+    warn) _DOCTOR_WARN=$(( _DOCTOR_WARN + 1 )) ;;
+    fail) _DOCTOR_FAIL=$(( _DOCTOR_FAIL + 1 )) ;;
+  esac
+  printf '[%s] %s: %s\n' "$level" "$name" "$detail"
+}
+
+# 公開: 外部ツール契約の一括診断本体。検査は独立に実行し、1つの失敗で後続を止めない。
+xrev_doctor() {
+  _DOCTOR_OK=0; _DOCTOR_WARN=0; _DOCTOR_FAIL=0
+
+  # 1) python3: 存在とバージョン
+  if command -v python3 >/dev/null 2>&1; then
+    _doctor_report ok "python3" "$(python3 --version 2>&1)"
+  else
+    _doctor_report fail "python3" "python3 が見つかりません（以降 python3 が要る検査は実行できません）"
+  fi
+
+  # 2) cmux バイナリ: 解決結果とバージョン。実測検証済み(0.64.20)と異なれば warn（fail にはしない）。
+  local known_ver="0.64.20" cmux_ver
+  if command -v "$CMUX_BIN" >/dev/null 2>&1 || [[ -x "$CMUX_BIN" ]]; then
+    cmux_ver="$(_cmux --version 2>&1 | head -1)"
+    if [[ -z "$cmux_ver" ]]; then
+      _doctor_report warn "cmux バイナリ" "bin=${CMUX_BIN} バージョンを取得できません"
+    elif printf '%s' "$cmux_ver" | grep -qF "$known_ver"; then
+      _doctor_report ok "cmux バイナリ" "bin=${CMUX_BIN} version=${cmux_ver}"
+    else
+      _doctor_report warn "cmux バイナリ" "bin=${CMUX_BIN} version=${cmux_ver}（実測検証済みは ${known_ver}。docs/cmux-behavior.md の実測知見が当てはまらない可能性。挙動が変わっていないか注意してください）"
+    fi
+  else
+    _doctor_report fail "cmux バイナリ" "見つかりません（bin=${CMUX_BIN}）。cmux ペイン内で実行するか XREV_CMUX_BIN で絶対パスを指定してください"
+  fi
+
+  # 3) cmux 接続: _cmux_preflight 相当（ping）。
+  if _cmux_preflight >/dev/null 2>&1; then
+    _doctor_report ok "cmux 接続" "ping 成功（bin=${CMUX_BIN}）"
+  else
+    _doctor_report fail "cmux 接続" "ping に失敗しました。xrev は cmux ペイン内で実行してください（外部から動かす場合は CMUX_SOCKET_PASSWORD を設定）"
+  fi
+
+  # 4) env 注入: CMUX_SURFACE_ID(無しはfail) / CMUX_WORKSPACE_ID(無しはwarn)
+  if [[ -n "${CMUX_SURFACE_ID:-}" ]]; then
+    _doctor_report ok "env 注入(CMUX_SURFACE_ID)" "CMUX_SURFACE_ID=${CMUX_SURFACE_ID}"
+  else
+    _doctor_report fail "env 注入(CMUX_SURFACE_ID)" "未注入です（同一ワークスペースの宛先解決ができません。cmux ペイン内で実行してください）"
+  fi
+  if [[ -n "${CMUX_WORKSPACE_ID:-}" ]]; then
+    _doctor_report ok "env 注入(CMUX_WORKSPACE_ID)" "CMUX_WORKSPACE_ID=${CMUX_WORKSPACE_ID}"
+  else
+    _doctor_report warn "env 注入(CMUX_WORKSPACE_ID)" "未注入です"
+  fi
+
+  # 5) tree 形状（_doctor_check_tree_shape に委譲）
+  local tree tree_msg tree_rc
+  tree="$(_cmux_tree_uuids)"
+  tree_msg="$(printf '%s' "$tree" | _doctor_check_tree_shape)"; tree_rc=$?
+  if (( tree_rc == 0 )); then
+    _doctor_report ok "tree 形状" "$tree_msg"
+  else
+    _doctor_report fail "tree 形状" "cmux tree の JSON 形状が想定と異なります（バージョンアップで宛先解決が壊れている可能性）: ${tree_msg}"
+  fi
+
+  # 6) top 形状（_doctor_check_top_shape に委譲）
+  local top top_msg top_rc
+  top="$(_cmux_top_processes)"
+  top_msg="$(printf '%s' "$top" | _doctor_check_top_shape)"; top_rc=$?
+  if (( top_rc == 0 )); then
+    _doctor_report ok "top 形状" "$top_msg"
+  else
+    _doctor_report fail "top 形状" "cmux top の TSV 形状が想定と異なります（プロセス証明が全拒否になっている可能性）: ${top_msg}"
+  fi
+
+  # 7) ps 契約: 「pid pgid tpgid comm」の4フィールドを返すこと
+  local ps_out
+  ps_out="$(printf '%s\n' "$$" | _ps_snapshot)"
+  if [[ -n "$ps_out" ]] && printf '%s\n' "$ps_out" | awk 'NF != 4 { exit 1 }'; then
+    _doctor_report ok "ps 契約" "pid pgid tpgid comm の4フィールドを確認しました（$(printf '%s' "$ps_out" | head -1)）"
+  else
+    _doctor_report fail "ps 契約" "ps が「pid pgid tpgid comm」の4フィールドを返しません（出力=${ps_out}）"
+  fi
+
+  # 8) reviewer 解決: 環境状態の情報表示（present以外もfailにはしない）
+  _XREV_RES_REF=""
+  _cmux_resolve_surface >/dev/null 2>&1
+  local resolve_rc=$?
+  case "$resolve_rc" in
+    0)  _doctor_report ok "reviewer 解決" "present（surface=${_XREV_RES_REF} path=${_XREV_RES_PATH}）" ;;
+    10) _doctor_report warn "reviewer 解決" "absent（ensure-reviewer で生成可能です）" ;;
+    *)  _doctor_report warn "reviewer 解決" "code=${resolve_rc}（環境状態の情報であり契約違反ではないため fail にはしません）" ;;
+  esac
+
+  # 9) reviewer バイナリ（不在は警告）・launch 引数の決定可否（失敗は fail）
+  local codex="${XREV_CODEX_BIN:-codex}"
+  if command -v "$codex" >/dev/null 2>&1; then
+    _doctor_report ok "reviewer バイナリ" "bin=${codex} version=$("$codex" --version 2>&1 | head -1)"
+  else
+    _doctor_report warn "reviewer バイナリ" "見つかりません（bin=${codex}）。送信検証は前景プロセス名しか見ないため致命ではありませんが、ensure-reviewer は失敗します"
+  fi
+  local largs_out
+  if largs_out="$(_xrev_reviewer_launch_args "$codex" 2>&1)"; then
+    _doctor_report ok "reviewer launch 引数" "$(printf '%s' "$largs_out" | tr '\n' ' ')"
+  else
+    _doctor_report fail "reviewer launch 引数" "決定できません（自動生成が全滅します）: ${largs_out}"
+  fi
+
+  # 10) フック契約セルフテスト
+  # 【限界】これは「xrev 側の実装が契約どおりか」の検証にすぎない。Claude Code 本体が
+  # UserPromptSubmit のフィールド名やイベント仕様そのものを変えた場合は検出できない。
+  local hook_path out_a out_b
+  hook_path="$(_xrev_script_dir)/../hooks/user-prompt-submit.sh"
+  if [[ -f "$hook_path" ]]; then
+    out_a="$(printf '%s' '{"prompt":"@xrev テスト"}' | XREV_CONFIG="$XREV_CONFIG" bash "$hook_path" 2>/dev/null)"
+    out_b="$(printf '%s' '{"prompt":"関係ない話"}' | XREV_CONFIG="$XREV_CONFIG" bash "$hook_path" 2>/dev/null)"
+    if [[ "$out_a" == *additionalContext* && -z "$out_b" ]]; then
+      _doctor_report ok "フック契約セルフテスト" "@xrev 検知時に additionalContext を出力し、非検知時は無出力でした"
+    else
+      _doctor_report fail "フック契約セルフテスト" "フックの入出力契約が壊れています（Claude Code の仕様変更または plugin 破損）"
+    fi
+  else
+    _doctor_report fail "フック契約セルフテスト" "フック本体が見つかりません（path=${hook_path}）"
+  fi
+
+  # 11) 検出不能な既知の縮退（検査ではなく固定の info 行）
+  printf '[info] 既知の検出不能な縮退: Codex TUI の "Pasted Content N chars" 文言と cmux エラー文言（"not a terminal" 等）の変更は doctor では検出できません。切り詰め検出の unknown 警告が毎回出る場合は文言変更を疑ってください。\n'
+
+  printf 'ok=%d warn=%d fail=%d\n' "$_DOCTOR_OK" "$_DOCTOR_WARN" "$_DOCTOR_FAIL"
+  (( _DOCTOR_FAIL == 0 ))
+}
 
 # 直接実行されたら簡易セルフテスト（実機用）。source されたときは何もしない。
 if [[ "${BASH_SOURCE[0]:-}" == "${0}" ]]; then
@@ -1437,6 +2420,9 @@ print(json.dumps({
     review)
       shift
       xrev_transport_review "${1:-テスト payload}" ;;
+    doctor)
+      # 外部ツール契約の一括診断（バージョンアップ後はまず実行）。非破壊・再実行可能。
+      xrev_doctor; exit $? ;;
     *)
       cat >&2 <<USAGE
 usage:
@@ -1447,6 +2433,7 @@ usage:
   transport.sh diff-hash [<range>]  # 参照モードの決定論 diff ハッシュ（既定 HEAD）
   transport.sh ensure-reviewer      # 同一WSの reviewer を保証（あれば採用・無ければ生成）
   transport.sh review "<payload>"   # 1往復だけ送って JSON を受ける
+  transport.sh doctor               # 外部ツール契約の一括診断（非破壊・再実行可能）
 USAGE
       exit 64 ;;
   esac

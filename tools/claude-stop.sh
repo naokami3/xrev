@@ -20,10 +20,27 @@ try: print(str(json.load(sys.stdin).get("stop_hook_active",False)).lower())
 except Exception: print("false")' 2>/dev/null)"
 
 # 監視対象パスに変更があるか（修正・ステージ・新規 untracked をすべて含む）
-cd "$ROOT"
+if ! cd "$ROOT" 2>/dev/null; then
+  # cd 失敗 = XREV_STOP_ROOT（または算出した ROOT）が不正で検証できない
+  if [ "$stop_active" = "true" ]; then
+    printf '[xrev] XREV_STOP_ROOT が不正で検証できません（%s）。ループ防止のため続行します。\n' "$ROOT" >&2
+    exit 0
+  fi
+  printf '[xrev] XREV_STOP_ROOT が不正で検証できません（%s）。終了前に修正してください。\n' "$ROOT" >&2
+  exit 2
+fi
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  changes="$(git status --porcelain -- scripts hooks tests tools config 2>/dev/null)"
-  [ -z "$changes" ] && exit 0   # コード変更なし → 何もしない
+  changes="$(git status --porcelain -- scripts hooks tests tools config 2>/dev/null)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # git status 自体が失敗 = 変更の有無を確認できない（「変更なし」とは区別する）
+    if [ "$stop_active" = "true" ]; then
+      printf '[xrev] git status に失敗し変更有無を確認できませんでした。ループ防止のため続行します。\n' >&2
+      exit 0
+    fi
+    printf '[xrev] git status に失敗し変更有無を確認できませんでした。手動で bash tools/verify.sh を実行してください。\n' >&2
+    exit 2
+  fi
+  [ -z "$changes" ] && exit 0   # コード変更なし（git status 成功で出力空） → 何もしない
 fi
 
 # 検証コマンドは XREV_VERIFY_CMD で差し替え可能（テストでスタブを注入するため）。

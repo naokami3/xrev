@@ -72,3 +72,31 @@ tmpcfg="$(mktemp)"; python3 -c 'import json;d=json.load(open("'"$DEFAULT_CONFIG"
 out="$(printf '%s' "$payload" | XREV_CONFIG="$tmpcfg" "$PR")"
 assert_eq "severity_blockers=[medium] なら blockers=1" "1" "$(printf '%s' "$out" | json_get blockers)"
 rm -f "$tmpcfg"
+
+# severity_blockers が文字列（例 "critical,high"）→ 文字の集合になってしまうため fail closed で拒否
+tmpcfg="$(mktemp)"; python3 -c 'import json;d=json.load(open("'"$DEFAULT_CONFIG"'"));d["severity_blockers"]="critical,high";json.dump(d,open("'"$tmpcfg"'","w"))'
+out="$(printf '%s' "$payload" | XREV_CONFIG="$tmpcfg" "$PR")"; rc=$?
+assert_rc "severity_blockers が文字列なら rc=1" 1 "$rc"
+assert_eq "severity_blockers が文字列なら valid=false" "False" "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["valid"])')"
+rm -f "$tmpcfg"
+
+# severity_blockers に未知の severity が混入 → 拒否
+tmpcfg="$(mktemp)"; python3 -c 'import json;d=json.load(open("'"$DEFAULT_CONFIG"'"));d["severity_blockers"]=["critical","unknown"];json.dump(d,open("'"$tmpcfg"'","w"))'
+out="$(printf '%s' "$payload" | XREV_CONFIG="$tmpcfg" "$PR")"; rc=$?
+assert_rc "severity_blockers に未知 severity 混入は rc=1" 1 "$rc"
+assert_eq "severity_blockers に未知 severity 混入は valid=false" "False" "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["valid"])')"
+rm -f "$tmpcfg"
+
+# decode_error は severity が blocker 集合外（low）でも常に blocker として集計される
+decode_payload='{"verdict":"request_changes","findings":[
+  {"file":"wire","severity":"low","category":"bug","message":"decode_error"}]}'
+out="$(printf '%s' "$decode_payload" | "$PR")"; rc=$?
+assert_rc "decode_error(low) は rc=0（=パース成功）" 0 "$rc"
+assert_eq "decode_error(low) でも blockers>=1" "1" "$(printf '%s' "$out" | json_get blockers)"
+
+# decode_error と severity_blockers 該当が重複しても二重カウントしない
+decode_critical_payload='{"verdict":"request_changes","findings":[
+  {"file":"wire","severity":"critical","category":"bug","message":"decode_error"}]}'
+out="$(printf '%s' "$decode_critical_payload" | "$PR")"; rc=$?
+assert_rc "decode_error(critical) は rc=0" 0 "$rc"
+assert_eq "decode_error と blocker 重複時は blockers=1（二重カウントしない）" "1" "$(printf '%s' "$out" | json_get blockers)"

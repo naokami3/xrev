@@ -6,7 +6,7 @@ description: >-
   reviewer(既定 Codex) が cmux 経由でクロスレビューを行う往復を、設計フェーズから自動運用する。
   critical/high が 0 件になるまでレビュー指摘を反映し、収束後に到達点（review/commit/pr）へ進める。
   キーワードや明示指示が無い些細な変更では発火しない。
-allowed-tools: Bash Read Edit Write Grep Glob
+allowed-tools: Bash, Read, Edit, Write, Grep, Glob
 ---
 
 # xrev — 設計段階からのクロスレビュー往復
@@ -185,7 +185,8 @@ printf '%s' "$payload" | \
   残った critical/high と往復経緯を要約して提示し、判断を仰ぐ。勝手に到達点へ進めない。
 - `invalid`（reviewer が自由作文や壊れた JSON を返す）: スキーマ
   （`references/review-schema.json`）への準拠を促して同じ payload を 1 回だけ再送。
-  なお改善しなければ人間に報告。
+  なお改善しなければ人間に報告。transport が `exit 24`（センチネルで完成した応答は画面にあるが
+  JSON が不正）を返した場合も、この `invalid` として同様に扱われる。
 - `transport_error`（送受信失敗）: `Review Codex` ペインの存在・タイトル・常駐を確認。
   `XREV_REVIEWER_SURFACE` 明示指定も検討。
 

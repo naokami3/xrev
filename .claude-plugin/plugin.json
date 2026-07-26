@@ -15,8 +15,5 @@
     "agent-orchestration",
     "codex",
     "cmux"
-  ],
-  "skills": "./skills/",
-  "commands": "./commands/",
-  "hooks": "./hooks/hooks.json"
+  ]
 }

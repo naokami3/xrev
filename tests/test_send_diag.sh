@@ -18,7 +18,7 @@ source "$SCRIPTS/transport.sh"
 # 【固定する仕様】「本文と一致しないから安全」という推定を使わない。実測済みの既知形式に**完全一致**
 # したときだけ構造化した安全表現を出し、外れたものは既定で全体を伏せる（fail closed）。
 # 推測で allowlist を広げないため、接頭辞・接尾辞・引用構造が少しでも違えば未知扱いになることも固定する。
-_rd() { XREV_DIAG_ERR="$1" XREV_DIAG_LINE="$2" _xrev_redact_diag; }
+_rd() { printf '%s' "$2" | XREV_DIAG_ERR="$1" _xrev_redact_diag; }
 _KNOWN="Error: ERROR: Unknown command ':'. Use 'help' for available commands."
 
 assert_eq "stderr が空なら明示する" "(stderr は空)" "$(_rd "" "本文")"

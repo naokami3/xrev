@@ -80,6 +80,10 @@ xrev/
   reviewer 取得 diff の**内容ハッシュ一致**を採用前に検証する（不一致は `reference_unverified`→inline 再試行）。
   別WS/別worktreeの誤レビューはハッシュ不一致で自動的に弾く。詳細は [`../references/protocol.md`](../references/protocol.md)。
 - 接続不可は preflight（ping）で検知し `transport.sh` が `exit 31` を返して明示停止する。
+- **診断(doctor)**: `transport.sh doctor` が cmux/Codex/フックへの契約仮定（tree/top の形状、ps の
+  出力形式、フックの入出力契約 等）を一括検査し、`[ok]/[warn]/[fail]` の1行診断＋サマリを人間可読で
+  返す。検査はすべて非変更・再実行可能。バージョンアップ後の切り分けに使う。詳細は
+  [`../references/protocol.md`](../references/protocol.md)。
 - `review-loop.sh` の分岐は stdout の JSON の `decision` で行う。exit code は「レビュー完了か」だけ:
   完了系（`converged`/`continue`/`escalate`）=0 / `invalid`=21 / `transport_error`=22
   （`continue` 等の正常系を非ゼロにしないことで、Bash 呼び出し等での誤エラー判定を避ける）。

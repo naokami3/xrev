@@ -24,12 +24,14 @@ set -uo pipefail
 _xrev_script_dir() { cd "$(dirname "${BASH_SOURCE[0]}")" && pwd; }
 : "${XREV_CONFIG:=${CLAUDE_PLUGIN_ROOT:-$(_xrev_script_dir)/..}/config/xrev.default.json}"
 
-input="$(cat)"
-
-# 注意: `python3 - <<'PY'` はヒアドキュメントが stdin を占有するため、レビュー本文は
-# パイプではなく環境変数 XREV_REVIEW_INPUT で渡す（stdin 競合の回避）。
-XREV_REVIEW_INPUT="$input" python3 - "$XREV_CONFIG" <<'PY'
-import json, os, sys
+# reviewer JSON（巨大になり得る）は stdin から直接 python3 へ流し込む。中継の bash 変数を
+# 経由させない（Linux の env/argv 1本あたり上限 MAX_ARG_STRLEN を踏み抜かないため）。
+# 【注意】`prog="$(cat <<'PY' ... PY)"` は使わない: bash 3.2（macOS既定）は $(...) の対応
+# 括弧探索がヒアドキュメント本文中の括弧・引用符の個数まで数えてしまうバグ/仕様があり、
+# 本文中の括弧が不均衡な行があると「unexpected EOF while looking for matching」で構文
+# エラーになる。`read -d ''` は command substitution を経由しないため影響を受けない。
+read -r -d '' prog <<'PY' || true
+import json, sys
 
 cfg_path = sys.argv[1]
 try:
@@ -37,15 +39,29 @@ try:
         cfg = json.load(f)
 except Exception:
     cfg = {}
-blockers_set = set(cfg.get("severity_blockers", ["critical", "high"]))
 
-raw = os.environ.get("XREV_REVIEW_INPUT", "")
+raw = sys.stdin.read()
 
 def fail(reason):
     print(json.dumps({"valid": False, "reason": reason,
                       "verdict": None, "counts": {}, "blockers": 0, "total": 0},
                      ensure_ascii=False))
     sys.exit(1)
+
+ALLOWED_SEVERITIES = {"critical", "high", "medium", "low", "nit"}
+
+# severity_blockers の型検証（fail closed）。
+# config が読めない場合（cfg={}）は従来どおり既定値で続行するが、
+# キーが存在するのに型・要素が壊れている場合は誤収束防止のため拒否する。
+if "severity_blockers" in cfg:
+    sb = cfg["severity_blockers"]
+    if not isinstance(sb, list) or not all(
+        isinstance(s, str) and s in ALLOWED_SEVERITIES for s in sb
+    ):
+        fail("severity_blockers が不正です（許可 severity の配列のみ）")
+    blockers_set = set(sb)
+else:
+    blockers_set = set(["critical", "high"])
 
 try:
     data = json.loads(raw)
@@ -66,6 +82,7 @@ if not isinstance(findings, list):
 levels = ["critical", "high", "medium", "low", "nit"]
 categories = ["bug", "security", "design", "perf", "style"]
 counts = {lv: 0 for lv in levels}
+blockers = 0
 for i, f in enumerate(findings):
     if not isinstance(f, dict):
         fail("findings[%d] が object でない" % i)
@@ -88,8 +105,11 @@ for i, f in enumerate(findings):
     if "suggested_fix" in f and not isinstance(f.get("suggested_fix"), str):
         fail("findings[%d].suggested_fix が文字列でない" % i)
     counts[sev] += 1
+    # blocker 集計: severity_blockers に該当する、または decode_error（wire 復号失敗の契約）。
+    # 同一 finding が両方に該当しても二重カウントしない。
+    if sev in blockers_set or f.get("message") == "decode_error":
+        blockers += 1
 
-blockers = sum(counts[s] for s in counts if s in blockers_set)
 total = sum(counts.values())
 
 print(json.dumps({
@@ -100,3 +120,4 @@ print(json.dumps({
     "total": total,
 }, ensure_ascii=False))
 PY
+python3 -c "$prog" "$XREV_CONFIG"

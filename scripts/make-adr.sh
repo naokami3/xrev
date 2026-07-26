@@ -23,7 +23,12 @@
 #         {"actor": "claude", "act": "decide",  "text": "..."}
 #       ]
 #     }
+#   素材 JSON の parse に失敗する／dict でない／title が空、のいずれかであれば
+#   ファイルを一切生成せず exit 1 で失敗する（fail-open にしない）。
+#
 #   出力: docs/adr/ADR-NNN.md を新規作成し、そのパスを stdout に出力。
+#   採番は open(...,"x")（O_EXCL）で行い、既存ファイルを無警告で上書きする経路は無い。
+#   衝突時は番号をインクリメントして再試行する（上限 1000）。
 #
 #   出力ディレクトリの解決順（高 → 低）:
 #     1) 引数 $1（その場指定。相対なら下記 ROOT 基準、絶対パスはそのまま）
@@ -32,7 +37,14 @@
 #     4) docs/adr（既定）
 #   出力先ルート(相対パスの基準)は CLAUDE_PROJECT_DIR（無ければ git トップ、無ければ CWD）。
 #
+#   出力先ディレクトリはリポジトリ（git rev-parse --show-toplevel。取得できなければ
+#   カレントディレクトリ）配下であることを要求する。配下でない場合は既定で拒否し、
+#   環境変数 XREV_ADR_ALLOW_OUTSIDE=1 を明示した場合のみ許可する
+#   （テスト・特殊運用向けの opt-in）。
+#
 set -uo pipefail
+
+_die() { printf '[xrev/make-adr] %s\n' "$*" >&2; exit 1; }
 
 _dir() { cd "$(dirname "${BASH_SOURCE[0]}")" && pwd; }
 : "${XREV_CONFIG:=${CLAUDE_PLUGIN_ROOT:-$(_dir)/..}/config/xrev.default.json}"
@@ -47,6 +59,11 @@ try:
 except Exception:
     print("docs/adr")
 PY
+}
+
+# パスを realpath 相当に正規化する（存在しないパスでも '..' 等は正しく畳む）。
+_realpath() {
+  python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
 }
 
 # 相対パスの基準となるリポジトリルートを決定
@@ -66,37 +83,64 @@ case "$ADR_DIR_SPEC" in
   /*) ADR_DIR="$ADR_DIR_SPEC" ;;
   *)  ADR_DIR="$ROOT/$ADR_DIR_SPEC" ;;
 esac
+
+# 出力先ディレクトリの検証: リポジトリ外への出力は既定で拒否する。
+if [[ "${XREV_ADR_ALLOW_OUTSIDE:-}" != "1" ]]; then
+  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  REPO_ROOT_REAL="$(_realpath "$REPO_ROOT")"
+  ADR_DIR_REAL="$(_realpath "$ADR_DIR")"
+  case "$ADR_DIR_REAL" in
+    "$REPO_ROOT_REAL"|"$REPO_ROOT_REAL"/*) : ;;
+    *)
+      _die "出力先($ADR_DIR_REAL)がリポジトリ($REPO_ROOT_REAL)外です。リポジトリ外への ADR 出力は環境変数 XREV_ADR_ALLOW_OUTSIDE=1 を明示した場合のみ許可します。"
+      ;;
+  esac
+fi
+
 mkdir -p "$ADR_DIR"
 
-# 次の ADR 番号を決定（ADR-001 形式。既存の最大値 +1）。
+# 次の ADR 番号（の開始候補）を決定（ADR-001 形式。既存の最大値 +1）。
+# nullglob はこの関数の中だけで有効にし、抜けるときに元の設定へ復元する
+# （以前は関数外へ shopt 設定が漏れていた）。
 next_num() {
-  local max=0 n
+  local max=0 n f saved
+  saved="$(shopt -p nullglob)"
   shopt -s nullglob
   for f in "$ADR_DIR"/ADR-*.md; do
     n="$(basename "$f")"
     n="${n#ADR-}"; n="${n%%-*}"; n="${n%.md}"
     if [[ "$n" =~ ^[0-9]+$ ]] && (( 10#$n > max )); then max=$((10#$n)); fi
   done
+  eval "$saved"
   printf '%03d' $(( max + 1 ))
 }
 
-NUM="$(next_num)"
+START_NUM="$(next_num)"
 INPUT="$(cat)"
 
-OUT_PATH="$ADR_DIR/ADR-$NUM.md"
-
 # 素材 JSON はヒアドキュメント stdin と競合するため環境変数 XREV_ADR_INPUT で渡す。
-XREV_ADR_INPUT="$INPUT" python3 - "$NUM" "$OUT_PATH" <<'PY'
+XREV_ADR_INPUT="$INPUT" python3 - "$START_NUM" "$ADR_DIR" <<'PY'
 import json, os, sys
 
-num, out_path = sys.argv[1], sys.argv[2]
+start_str, adr_dir = sys.argv[1], sys.argv[2]
 raw = os.environ.get("XREV_ADR_INPUT", "")
+
+# 素材 JSON の検証。壊れている場合は理由を出して失敗する（fail-open にしない）。
 try:
     d = json.loads(raw)
-except Exception:
-    d = {}
+except Exception as e:
+    print(f"[xrev/make-adr] 素材 JSON の parse に失敗しました: {e}", file=sys.stderr)
+    sys.exit(1)
 
-title = d.get("title") or "（タイトル未設定）"
+if not isinstance(d, dict):
+    print("[xrev/make-adr] 素材 JSON はオブジェクト(dict)である必要があります。", file=sys.stderr)
+    sys.exit(1)
+
+title = (d.get("title") or "").strip()
+if not title:
+    print("[xrev/make-adr] 素材 JSON に title がありません（空です）。", file=sys.stderr)
+    sys.exit(1)
+
 context = d.get("context") or "（背景未記入）"
 decision = d.get("decision") or "（決定未記入）"
 consequences = d.get("consequences") or "（影響未記入）"
@@ -115,7 +159,14 @@ def fmt_log(items):
         lines.append(f"- {tag} {text}")
     return "\n".join(lines)
 
-md = f"""# ADR-{num}: {title}
+LIMIT = 1000
+start = int(start_str)
+for i in range(LIMIT):
+    num = start + i
+    num_str = f"{num:03d}"
+    out_path = os.path.join(adr_dir, f"ADR-{num_str}.md")
+
+    md = f"""# ADR-{num_str}: {title}
 
 ## Status: Accepted
 
@@ -131,8 +182,16 @@ md = f"""# ADR-{num}: {title}
 ## Discussion log
 {fmt_log(discussion)}
 """
+    # O_EXCL 相当（"x" モード）で新規作成のみ許可。既存ファイルの上書きはしない。
+    try:
+        f = open(out_path, "x")
+    except FileExistsError:
+        continue
+    with f:
+        f.write(md)
+    print(out_path)
+    sys.exit(0)
 
-with open(out_path, "w") as f:
-    f.write(md)
-print(out_path)
+print(f"[xrev/make-adr] ADR 採番の上限({LIMIT})に達しました。既存ファイルを整理してください。", file=sys.stderr)
+sys.exit(1)
 PY

@@ -67,7 +67,32 @@ _cmux_send_line "surfaceX" "line" >/dev/null 2>&1
 _after="$(ls "${TMPDIR:-/tmp}" 2>/dev/null | grep -c '^xrev-send-err\.')"
 assert_eq "production は一時ファイルを作らない" "$_before" "$_after"
 
-# 後始末: 一時カウンタを消し、trap を元に戻し、実関数を復元（後続テストへの影響回避）
+# 6) XREV_SEND_RETRIES=0（範囲外・最小1未満）は _xrev_uint で拒否され既定5回にフォールバックする。
+printf '0' > "$_TS_COUNTER"
+_cmux() { [[ "$1" == "send" ]] && { _ts_bump >/dev/null; return 1; }; return 0; }
+XREV_SEND_RETRIES=0 _cmux_send_line "surfaceX" "line" >/dev/null 2>&1
+assert_rc "XREV_SEND_RETRIES=0 は既定5回失敗後に rc=6" 6 "$?"
+assert_eq "XREV_SEND_RETRIES=0 は既定5回リトライされる" "5" "$(cat "$_TS_COUNTER")"
+
+# ── 数値設定の検証（_xrev_uint 経由・busy-loop 対策とオーバーフロー対策）──────────
+# transport.sh をソースし直し、env 由来の不正値が算術式へ入る前にフォールバックすることを確認する。
+
+# 7) response_poll_seconds=0 は busy-loop 化するため許可せず、既定3にフォールバックする。
+export XREV_RESPONSE_POLL_SECONDS=0
+# shellcheck source=/dev/null
+source "$SCRIPTS/transport.sh"
+assert_eq "response_poll_seconds=0 は既定3にフォールバック（busy-loop 防止）" "3" "$RESP_POLL"
+unset XREV_RESPONSE_POLL_SECONDS
+
+# 8) 20桁の巨大値（64bit 算術オーバーフロー域）も桁数上限で弾かれ既定へフォールバックする。
+export XREV_WIRE_MAX_CHARS=99999999999999999999
+# shellcheck source=/dev/null
+source "$SCRIPTS/transport.sh"
+assert_eq "20桁の巨大値は既定 wire_max_chars=64000 にフォールバック" "64000" "$WIRE_MAX_CHARS"
+unset XREV_WIRE_MAX_CHARS
+
+# 後始末: 一時カウンタを消し、trap を元に戻し、実関数を復元（後続テストへの影響回避。
+# 末尾で transport.sh を再ソースするため RESP_POLL/WIRE_MAX_CHARS も既定へ戻る）
 rm -f "$_TS_COUNTER"
 trap - EXIT INT TERM
 [[ -n "$_TS_TRAP_SAVE" ]] && eval "$_TS_TRAP_SAVE"

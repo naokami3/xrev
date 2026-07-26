@@ -73,6 +73,24 @@ surface の直下プロセスは同一 tty を共有する。`pgid == tpgid`（`
 - ログインシェルの `comm` は `-/bin/zsh`。shell の `basename` は先頭ハイフンを
   `illegal option -- /` で拒否するので、python3 の `os.path.basename` を使う。
 
+### 過渡プロセス（sleep サイドカー）の消滅による観測不一致（別環境で実測）
+
+surface 直下の `sleep` サイドカーは周期的に生成・消滅する（1. 参照）。`cmux top` で直下 PID
+集合を取得したあとに `ps` を取るまでの間（ミリ秒オーダー）に、その時点で存在していた `sleep`
+が消滅すると、`ps` は残りの PID だけを返して exit 0 になる。上記の「`ps` は残りを出して exit 0」
+特性と組み合わさり、`_decide_foreground_owner` は「ps の観測が直下プロセスと一致しません
+（欠落=[PID]）」で拒否する。判定自体は誤っていない（欠落したスナップショットを完全な観測と
+誤認しない、という設計どおりの fail closed）が、犯人はプロセスの異常ではなく top/ps 間の
+時間差そのものなので、そのまま拒否し続けると可用性を大きく損なう。
+
+別環境の実測では 20 回中 2 回（約10%）この不一致で失敗し、送信経路は1往復あたり3箇所で
+検証するため約27%/ラウンドが `transport_error` になった。対処は `_verify_reviewer_process`
+内で **top と ps を最初から取り直して最大3回まで再試行**すること（判定条件自体は一切緩めない。
+部分一致や欠落の許容は採らない）。
+
+検証環境（cmux 0.64.20 / macOS 25.5.0）では同条件を50回試行しても未再現だった。環境・
+タイミングに強く依存する事象であり、「自分の環境で起きないから存在しない」と判断しないこと。
+
 ## 4. ソケット受信の UTF-8 チャンク欠陥（**未修正の cmux バグ**）
 
 受信側 `ControlClientLineReader` は最大 4095 バイト（`buffer.count - 1`、既定バッファ 4096）ずつ
@@ -93,7 +111,27 @@ Unix domain socket の `read(2)` は write 境界を保存しないため、多�
 分断されると最大 4095 バイトが消える。先頭チャンクが消えると残った断片が行頭になり、
 V1 コマンドとして解釈されて `ERROR: Unknown command '<断片>'` になる。
 
-### 再現手順
+### xrev を介さない最小再現（cmux 標準機能で再現する）
+
+`cmux notify --body` は**文書化された標準機能**で、長さ制限も文字集合の制限も記載されていない。
+これが同じエラーで失敗する。**xrev 固有の使い方の問題ではない。**
+
+```bash
+WS=<任意の workspace UUID>
+cmux notify --workspace "$WS" --title t \
+  --body "$(python3 -c 'import sys;sys.stdout.write("あ"*12000)')"   # 36000 バイト
+```
+
+実測: 日本語 12000文字（36000バイト）で 5回中3回失敗、
+同じ 36000 バイトの ASCII では 2回中0回失敗。エラーは
+`ERROR: Unknown command 'あああ…'` で `cmux send` のときと同一。
+
+cmux 側で同じ経路を通る機能は他にもある（`browser eval` / `browser fill` /
+`browser addscript` / `notify_target` / `hooks feed` など。いずれも任意長の本文を
+同じ制御ソケットへ載せる）。一方 `cmux diff` はパッチ本文をローカルの
+サイドカーファイルへ保存し、ソケットには viewer URL とメタデータしか送らないため該当しない。
+
+### 再現手順（xrev の送信経路で再現する場合）
 
 **宛先は使い捨てペインにすること。** 成功すると composer に残骸が残り、インライン表示だと
 実質消せない（項目6）。`scripts/transport.sh resolve` は運用中の reviewer を返すので**使わない**。

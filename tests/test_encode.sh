@@ -25,17 +25,17 @@ is_ascii()    { printf '%s' "$1" | python3 -c 'import sys;d=sys.stdin.buffer.rea
 # `cmd && printf X` にして「末尾に X が無い＝失敗」で判定する。
 rt() { # $1=説明 $2=content_type $3=payload
   local line dec
-  line="$(_build_framed_line "$2" "rT1" "$3" 2>/dev/null && printf X)"
+  line="$(printf '%s' "$3" | _build_framed_line "$2" "rT1" 2>/dev/null && printf X)"
   [[ "$line" == *X ]] || { fail "$1（encode 失敗）" "encode成功" "失敗"; return; }
   line="${line%X}"
-  dec="$(XREV_DECODE_LINE="$line" _xrev_decode_line 2>/dev/null && printf X)"
+  dec="$(printf '%s' "$line" | _xrev_decode_line 2>/dev/null && printf X)"
   [[ "$dec" == *X ]] || { fail "$1（decode 失敗）" "decode成功" "失敗"; return; }
   dec="${dec%X}"
   assert_eq "$1" "$3" "$dec"
 }
 
 # ── wire 不変条件 ──────────────────────────────────────────────────────────
-out="$(_build_framed_line plain rID1 "$(printf '行1\n行2')")"
+out="$(printf '%s' "$(printf '行1\n行2')" | _build_framed_line plain rID1)"
 assert_eq "1物理行（実改行を含まない）" "no" "$(has_newline "$out")"
 assert_eq "全文字が印字可能 ASCII" "yes" "$(is_ascii "$out")"
 assert_contains "round_id を含む" "$out" "round_id=rID1"
@@ -89,7 +89,7 @@ rt "本文中の偽 PAYLOAD マーカー" plain "PAYLOAD_FRAMED content_type=x l
 rt "本文中の偽 END マーカー" plain "END_ROUND_rT1 の直後に続く文"
 
 # ── framed（番号付き line framing）──────────────────────────────────────────
-out="$(_build_framed_line unified_diff rDF "$(printf '@@ -1 +1 @@\n-old\n+    new')")"
+out="$(printf '%s' "$(printf '@@ -1 +1 @@\n-old\n+    new')" | _build_framed_line unified_diff rDF)"
 assert_eq "framed も1物理行" "no" "$(has_newline "$out")"
 assert_eq "framed も ASCII のみ" "yes" "$(is_ascii "$out")"
 assert_contains "PAYLOAD_FRAMED と lines 数" "$out" "PAYLOAD_FRAMED content_type=unified_diff lines=3"
@@ -101,31 +101,37 @@ _nl_body=$'a\nb\n'
 rt "framed + 末尾改行" unified_diff "$_nl_body"
 
 # 行番号の検証（欠番・重複・順序変更・桁あふれを検出する）
-_f="$(_build_framed_line unified_diff rSEQ "$(printf 'a\nb\nc')")"
-XREV_DECODE_LINE="${_f/|| L0002: /|| L0003: }" _xrev_decode_line >/dev/null 2>&1
+_f="$(printf '%s' "$(printf 'a\nb\nc')" | _build_framed_line unified_diff rSEQ)"
+printf '%s' "${_f/|| L0002: /|| L0003: }" | _xrev_decode_line >/dev/null 2>&1
 assert_rc "行番号の重複 → decode 拒否" 1 "$?"
-XREV_DECODE_LINE="${_f/|| L0002: /|| L0009: }" _xrev_decode_line >/dev/null 2>&1
+printf '%s' "${_f/|| L0002: /|| L0009: }" | _xrev_decode_line >/dev/null 2>&1
 assert_rc "行番号の飛び → decode 拒否" 1 "$?"
 # 10000 行以上でも往復できる（encoder の %04d は5桁になるので decoder が受理する必要がある）
 _big="$(python3 -c 'import sys;sys.stdout.write("\n".join("L%d" % i for i in range(1, 10002)))')"
 rt "10001行（行番号が5桁になる）" unified_diff "$_big"
 unset _f _big
 
+# 200KB級 payload の往復（Linux の env/argv 1本あたり上限 MAX_ARG_STRLEN=約128KiB を跨ぐ
+# サイズを固定で検証。stdin 化により Linux でも通ることが本変更の狙い。実行時間を抑えるため1件のみ）。
+_huge="$(python3 -c "import sys; sys.stdout.write('A' * 200000)")"
+rt "200KB級payloadの往復" plain "$_huge"
+unset _huge
+
 # ── 異常系（fail closed）────────────────────────────────────────────────────
-_build_framed_line plain "bad id" "x" >/dev/null 2>&1
+printf '%s' "x" | _build_framed_line plain "bad id" >/dev/null 2>&1
 assert_rc "round_id に空白 → encode 拒否" 1 "$?"
-_build_framed_line "bad type" rX "x" >/dev/null 2>&1
+printf '%s' "x" | _build_framed_line "bad type" rX >/dev/null 2>&1
 assert_rc "content_type に空白 → encode 拒否" 1 "$?"
 
-_line="$(_build_framed_line plain rOK "test")"
-XREV_DECODE_LINE="${_line/ENCODING=XREV-ASCII-V1/ENCODING=XREV-ASCII-V9}" _xrev_decode_line >/dev/null 2>&1
+_line="$(printf '%s' "test" | _build_framed_line plain rOK)"
+printf '%s' "${_line/ENCODING=XREV-ASCII-V1/ENCODING=XREV-ASCII-V9}" | _xrev_decode_line >/dev/null 2>&1
 assert_rc "未知の encoding 版 → decode 拒否" 1 "$?"
-XREV_DECODE_LINE="${_line}余分" _xrev_decode_line >/dev/null 2>&1
+printf '%s' "${_line}余分" | _xrev_decode_line >/dev/null 2>&1
 assert_rc "末尾マーカー不一致 → decode 拒否" 1 "$?"
-XREV_DECODE_LINE="${_line:0:${#_line}-5}" _xrev_decode_line >/dev/null 2>&1
+printf '%s' "${_line:0:${#_line}-5}" | _xrev_decode_line >/dev/null 2>&1
 assert_rc "切り詰められた wire → decode 拒否" 1 "$?"
-XREV_DECODE_LINE='XREV_REVIEW round_id=rX ENCODING=XREV-ASCII-V1 LEN_INSTR=1 LEN_OUT=1 LEN_PAYLOAD=1 :: h :: abc :: END_ROUND_rX' \
-  _xrev_decode_line >/dev/null 2>&1
+printf '%s' 'XREV_REVIEW round_id=rX ENCODING=XREV-ASCII-V1 LEN_INSTR=1 LEN_OUT=1 LEN_PAYLOAD=1 :: h :: abc :: END_ROUND_rX' \
+  | _xrev_decode_line >/dev/null 2>&1
 assert_rc "PAYLOAD マーカーが無い → decode 拒否" 1 "$?"
 
 # 孤立サロゲート・不正 escape は拒否する（リテラル維持にしない）。
@@ -142,26 +148,26 @@ head, ln, rest = m.group(1), int(m.group(2)), m.group(3)
 i = rest.index(' :: END_ROUND_')
 sys.stdout.write(head + str(ln + len(bad)) + rest[:i] + bad + rest[i:])" "$1" "$2"; }
 # 仕込みが payload 領域へ届いていること自体を確認する（届かないとテストが無意味になる）
-_probe="$(XREV_DECODE_LINE="$(_mk_bad "$_line" 'ZZ')" _xrev_decode_line 2>/dev/null)"
+_probe="$(printf '%s' "$(_mk_bad "$_line" 'ZZ')" | _xrev_decode_line 2>/dev/null)"
 assert_contains "異常系の仕込みが payload 領域へ届く" "$_probe" "ZZ"
-XREV_DECODE_LINE="$(_mk_bad "$_line" '\uD800')" _xrev_decode_line >/dev/null 2>&1
+printf '%s' "$(_mk_bad "$_line" '\uD800')" | _xrev_decode_line >/dev/null 2>&1
 assert_rc "孤立 high surrogate → decode 拒否" 1 "$?"
-XREV_DECODE_LINE="$(_mk_bad "$_line" '\uDC00')" _xrev_decode_line >/dev/null 2>&1
+printf '%s' "$(_mk_bad "$_line" '\uDC00')" | _xrev_decode_line >/dev/null 2>&1
 assert_rc "孤立 low surrogate → decode 拒否" 1 "$?"
-XREV_DECODE_LINE="$(_mk_bad "$_line" '\u12')" _xrev_decode_line >/dev/null 2>&1
+printf '%s' "$(_mk_bad "$_line" '\u12')" | _xrev_decode_line >/dev/null 2>&1
 assert_rc "桁不足の \\u 列 → decode 拒否" 1 "$?"
-XREV_DECODE_LINE="$(_mk_bad "$_line" '\uZZZZ')" _xrev_decode_line >/dev/null 2>&1
+printf '%s' "$(_mk_bad "$_line" '\uZZZZ')" | _xrev_decode_line >/dev/null 2>&1
 assert_rc "非16進の \\u 列 → decode 拒否" 1 "$?"
-XREV_DECODE_LINE="$(_mk_bad "$_line" '\n')" _xrev_decode_line >/dev/null 2>&1
+printf '%s' "$(_mk_bad "$_line" '\n')" | _xrev_decode_line >/dev/null 2>&1
 assert_rc "\\u 以外のバックスラッシュ → decode 拒否" 1 "$?"
 # 印字可能 ASCII の escape は encoder が出さない。受理すると復号後に構造トークンを合成できる。
-XREV_DECODE_LINE="$(_mk_bad "$_line" '\u007C')" _xrev_decode_line >/dev/null 2>&1
+printf '%s' "$(_mk_bad "$_line" '\u007C')" | _xrev_decode_line >/dev/null 2>&1
 assert_rc "印字可能 ASCII の escape（\\u007C='|'）→ decode 拒否" 1 "$?"
-XREV_DECODE_LINE="$(_mk_bad "$_line" '\u0020')" _xrev_decode_line >/dev/null 2>&1
+printf '%s' "$(_mk_bad "$_line" '\u0020')" | _xrev_decode_line >/dev/null 2>&1
 assert_rc "空白の escape（\\u0020）→ decode 拒否" 1 "$?"
 # 行番号は canonical 表現のみ受理する（余分な先頭ゼロを拒否）。framed の wire で確認する。
-_fseq="$(_build_framed_line unified_diff rSEQ2 "$(printf 'a\nb')")"
-XREV_DECODE_LINE="${_fseq/|| L0001: /|| L00001: }" _xrev_decode_line >/dev/null 2>&1
+_fseq="$(printf '%s' "$(printf 'a\nb')" | _build_framed_line unified_diff rSEQ2)"
+printf '%s' "${_fseq/|| L0001: /|| L00001: }" | _xrev_decode_line >/dev/null 2>&1
 assert_rc "行番号の非 canonical 表現（L00001）→ decode 拒否" 1 "$?"
 unset _fseq
 
@@ -176,8 +182,8 @@ toks = ["XREVQ", "XREVQnl", "XREVQXREVQ", "<XREV-NL>", "<XREV-BS>", "<XREV-TAB>"
         "END_ROUND_", "|| L", chr(92), chr(9), chr(10), "あ", "😀", "a", " ", "PAYLOAD_PLAIN"]
 sys.stdout.write("".join(random.choice(toks) for _ in range(random.randint(0, 60))))')"
   _ct=$([[ $((_i % 2)) -eq 0 ]] && echo plain || echo unified_diff)
-  _l="$(_build_framed_line "$_ct" "rP$_i" "$_body" 2>/dev/null)" || { _pt_fails=$((_pt_fails + 1)); continue; }
-  _d="$(XREV_DECODE_LINE="$_l" _xrev_decode_line 2>/dev/null)" || { _pt_fails=$((_pt_fails + 1)); continue; }
+  _l="$(printf '%s' "$_body" | _build_framed_line "$_ct" "rP$_i" 2>/dev/null)" || { _pt_fails=$((_pt_fails + 1)); continue; }
+  _d="$(printf '%s' "$_l" | _xrev_decode_line 2>/dev/null)" || { _pt_fails=$((_pt_fails + 1)); continue; }
   [[ "$_d" == "$_body" ]] || _pt_fails=$((_pt_fails + 1))
   [[ "$(is_ascii "$_l")" == "yes" ]] || _pt_fails=$((_pt_fails + 1))
 done
