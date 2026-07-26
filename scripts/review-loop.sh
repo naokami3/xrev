@@ -153,7 +153,8 @@ REASONS = {
     23: "encode_failed", 26: "payload_too_large", 24: "invalid_response",
     13: "truncated", 14: "non_terminal", 15: "ws_mismatch", 16: "ambiguous",
     17: "process_mismatch", 19: "autocreate_failed", 20: "reviewer_contention",
-    25: "submit_failed", 27: "reviewer_policy_mismatch", 30: "cmux_not_found", 31: "not_in_pane",
+    25: "submit_failed", 27: "reviewer_policy_mismatch", 28: "integrity_unverifiable",
+    30: "cmux_not_found", 31: "not_in_pane",
 }
 out = {
     "decision": decision,
@@ -229,8 +230,10 @@ _xrev_review_loop_run() {
   #   mode=reference / status=verified / head==XREV_EXPECT_HEAD(基底OID) / diff_hash==XREV_EXPECT_DIFF_HASH。
   # diff だけ一致しても基底コードが違えば誤レビューになるため、HEAD(基底)OID も必須照合する。
   # 同一WS外への参照依頼は transport が exit18 で拒否済み（fail-open を作らない）。
-  #   - 不一致/未取得/期待値未設定/同一WS外 → reference_unverified（exit0・正常系。primary が inline で同一 iter 再試行）。
-  #   - フォールバック通算が上限超 → escalate（無限の参照→inline 往復を防ぐ）。
+  #   - 不一致/未取得/期待値未設定/同一WS外 → reference_unverified（exit0・正常系）。回復手段は
+  #     reviewer 種別依存: codex は同一 iter を inline で、claude（参照モード専用）は同一 iter を
+  #     参照モードのまま再試行する。本状態機械は種別非依存で、分岐は primary 側プレイブックの責務。
+  #   - 上限は「参照検証失敗の再試行・フォールバック総量」の規制。通算が上限超 → escalate（無限往復を防ぐ）。
   if [[ "${XREV_REFERENCE_MODE:-}" == "1" ]]; then
     local ref_fail=""
     if (( trc == 18 )); then

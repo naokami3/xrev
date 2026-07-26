@@ -56,9 +56,33 @@
 - **トークン衝突回避**: 本文に制御トークンが元から含まれても区切りと誤解されないよう、導入子
   `XREVQ` で始まるリテラル表記へ可逆エスケープする（例: 本文の `<XREV-NL>`→`XREVQnl`）。
 - **round_id** は高エントロピー（`secrets` 由来）。スクロールバックの過去応答との衝突を避ける。
-- **切り詰め検出**: Codex の TUI は長いペーストを `[Pasted Content N chars]` に畳むため、その
-  文字数 N が送信長と一致するかで欠落を検出する（不一致=中止、確認不能=警告して続行）。
-  スクロールバックには過去ラウンドの表示も残るため、**最後の一致**を今回の分とみなす。
+- **切り詰め検出（reviewer 種別対応・C2）**: 照合手段は `reviewer_process` の basename で分岐する。
+  - `codex`: TUI が長いペーストを `[Pasted Content N chars]` に畳むため、その文字数 N が送信長と
+    一致するかで欠落を検出する（不一致=`exit 13`、確認不能=警告して続行という縮退は codex に限定）。
+    スクロールバックには過去ラウンドの表示も残るため、**最後の一致**を今回の分とみなす。
+  - `claude`（**参照モード専用**）: ペーストチップに文字数が表示されないため（実測。
+    docs/cmux-behavior.md 参照）codex と同じ照合は成立しない。inline（本文を wire に直接載せる
+    方式）向けに、composer 上で wire 文字列と de-wrap 後の画面テキストを空白非依存で全文一致
+    照合する方式を実装したことがあったが、空白の位置がずれる改変を比較・decoder のどちらも
+    検出できず完全性証明にならないと 2 巡目のクロスレビューで指摘され、不採用として撤去した
+    （経緯は下記コラム参照）。現在は **inline は wire 長に関わらず無条件で `exit 28`
+    （`integrity_unverifiable`）で送信前拒否になる**。**このため claude reviewer は参照モード
+    （`XREV_REFERENCE_MODE=1`）が必須**であり、参照モードは本節の切り詰め検出自体を行わない。
+    根拠: レビュー対象の完全性は diff_hash + 基底 HEAD の端到端照合（「参照モード」節参照）が
+    機械保証する。reviewer が実際にハッシュした range と返却 hash/head が一致した応答しか
+    採用されないため、見ていない対象への approve は成立しない。指示部が壊れた場合も
+    decode_error / hash 不一致 / timeout のいずれかの失敗系に落ちる（fail closed 維持）。
+  - それ以外の未知種別: 検証手段が確立していないため、送信前に `exit 28` で拒否する（fail closed）。
+
+> **経緯（不採用になった全文一致照合方式）**: claude inline 向けに、wire と de-wrap 後の画面
+> テキストの両辺から ASCII スペースと改行を**すべて**除去してから部分文字列一致を見る比較
+> （`_xrev_check_full_match`。行単位 strip では TUI の折り返し位置が wire 内の意味のある空白と
+> 重なると誤判定する問題への対処として空白非依存化していた）を、wire 長が一定の上限
+> （`integrity_full_match_max_chars`）以下のときだけ試みる設計を採用していた。しかし
+> 「LEN_\* はフィールド全体長であり、空白の削除と挿入が相殺すれば比較・canonical frame
+> 構文の検証のどちらもすり抜ける」という指摘（2巡目クロスレビュー・medium）を受け、完全性の
+> 証明にはならない可用性ヒューリスティックにすぎないと判断し撤去した。claude reviewer は
+> 参照モードの diff_hash + 基底 HEAD 端到端照合のみを完全性の根拠とする。
 
 ### wire encoding `XREV-ASCII-V1`（ASCII-only・暫定措置）
 
@@ -212,7 +236,7 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 |-------------------|------|------|
 | `converged`       | 0    | blocker 0 件。収束。 |
 | `continue`        | 0    | blocker 残・上限未満。primary が修正して `ITER+1` で再実行（正常系）。 |
-| `reference_unverified` | 0 | 参照モードで reviewer の diff_hash が期待値と不一致/未取得。レビューを採用せず、primary が**同一 ITER を inline で再試行**（正常系）。通算が `max_reference_fallbacks` 超で `escalate`。 |
+| `reference_unverified` | 0 | 参照モードで reviewer の diff_hash が期待値と不一致/未取得。レビューを採用せず、primary が同一 ITER で再試行（正常系）。**回復手段は reviewer 種別依存**（codex=inline へ切替 / claude=参照モードのまま再試行。状態機械自体は種別非依存。詳細は「参照モード」節）。通算が `max_reference_fallbacks` 超で `escalate`。 |
 | `escalate`        | 0    | 上限到達でも blocker 残。人間へエスカレーション（レビューは完了）。 |
 | `invalid`         | 21   | reviewer 出力が契約違反（スキーマ不一致 / 壊れた JSON / transport `exit 24`）→ レビュー取得できず。 |
 | `transport_error` | 22   | 送受信失敗（ペイン解決不可・タイムアウト等）→ レビュー取得できず。 |
@@ -221,7 +245,7 @@ xrev では severity/verdict による機械判定を主とするが、運用上
 （安定文字列）を含める。外部 exit は 22 のままだが、primary はこの reason で利用者向け修正案を機械的に選べる:
 `cmux_unavailable`/`resolve_failed`/`send_failed`/`timeout`/`truncated`/`non_terminal`/`ws_mismatch`/
 `ambiguous`/`process_mismatch`/`reviewer_policy_mismatch`/`autocreate_failed`/`reviewer_contention`/
-`encode_failed`/`payload_too_large`/`submit_failed`/`cmux_not_found`/`not_in_pane`。
+`encode_failed`/`payload_too_large`/`submit_failed`/`cmux_not_found`/`not_in_pane`/`integrity_unverifiable`。
 
 `transport_exit_code=24`（`invalid_response`。センチネルで完成した応答はあるが妥当な review JSON
 を含まない契約違反。`timeout` と区別され primary は再出力を促す）は `transport_error` ではなく
@@ -264,6 +288,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | 25   | Enter 送信(プロンプト確定)に失敗（最大2回まで再試行しても失敗）。本文は入力欄に残存。`timeout`(12) と区別される（submit_failed）。 |
 | 26   | wire（1物理行）の文字数が上限(`wire_max_chars`)を超過（cmux へは未送信。payload_too_large） |
 | 27   | reviewer が安全ポリシー（sandbox=read-only かつ承認=never）で起動していない（最終 argv の意味検証に不合格。reviewer_policy_mismatch）。`xrev_transport_review` では各送信ゲート（早期棄却・本文送信直前・Enter直前・Enter再送前）でプロセス証明と同じゲートで毎回再検証される（不具合Bへの対処。TOCTOU防止）。`XREV_ALLOW_UNVERIFIED_REVIEWER=1` で opt-out 可（下記「reviewer read-only 強制」参照） |
+| 28   | reviewer 種別（`reviewer_process` の basename）に応じた送信完全性の検証手段が確立できない（integrity_unverifiable）。codex/claude 以外の未知種別、または claude・inline（claude は参照モード専用のため inline は wire 長に関わらず無条件）。claude は参照モード（`XREV_REFERENCE_MODE=1`）を使うこと（参照モードはこの検査自体をスキップする）。いずれも cmux へは一切送信していない |
 | 30   | cmux CLI が見つからない |
 | 31   | cmux 接続不可（preflight 失敗・ペイン外実行） |
 
@@ -278,11 +303,11 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | `max_iterations` | `5` | 往復の安全弁（論理ラウンドの上限）。範囲 1..50 |
 | `max_transport_attempts` | `12` | 通算 transport 試行の上限（論理ラウンドとは別の総量安全弁。超過で escalate）。範囲 1..100 |
 | `reviewer_reads_workspace` | `false` | 参照モード(Phase2)を許可するか。`true` かつ同一WS解決時のみ、diff 本文の代わりにファイル参照を送る |
-| `max_reference_fallbacks` | `3` | 参照→inline フォールバックの通算上限（超過で escalate。無限往復を防ぐ）。範囲 0..10 |
-| `stop_at` | `review` | 到達点（review / commit / pr） |
+| `max_reference_fallbacks` | `3` | 参照モード検証失敗時の再試行・フォールバック通算上限（超過で escalate。無限往復を防ぐ）。名称は「参照→inline フォールバック」由来だが、意味は reviewer 種別非依存に一般化されている（codex=inline へのフォールバック回数 / claude=参照モードのままの再試行回数）。範囲 0..10 |
+| `stop_at` | `review` | 完了アクション（review / commit / pr） |
 | `adr` | `false` | ADR 生成の既定（必要有無） |
 | `adr_dir` | `docs/adr` | ADR の出力ディレクトリ（相対は対象リポジトリ基準 / 絶対パス可） |
-| `transport` | `cmux` | 配管実装の選択（将来の差し替え点） |
+| `transport` | `cmux` | 通信層実装の選択（将来の差し替え点） |
 | `reviewer_process` | `codex` | 送信前プロセス証明で対象 surface の直下に在るべきプロセス名 |
 | `reviewer_launch_args` | `{"codex":["--sandbox","read-only","--ask-for-approval","never"],"claude":["--permission-mode","plan"]}` | reviewer バイナリ名をキーに持つ object。起動経路（`start-reviewer.sh` / `ensure-reviewer` の自動生成）で機械的に付与する read-only 相当の起動引数。値そのものが安全ポリシー（sandbox=read-only かつ承認=never）を満たすことを意味検証する（満たさなければ fail closed）。既存ペインを採用する経路では launch 引数の付与はしないが、前景プロセスの実効ポリシーは既定で検証する（`XREV_ALLOW_UNVERIFIED_REVIEWER=1` で opt-out 可） |
 | `reviewer_autocreate` | `ask` | reviewer ペインの自動生成方針。`ask`(スキルが一拍確認で確認後生成)/`auto`(無確認で生成)/`off`(生成せず案内) |
@@ -314,7 +339,10 @@ stderr に1行警告する（可用性優先。stdout は汚さない）。生�
 `XREV_CHUNK_SIZE`, `XREV_CONTENT_TYPE`, `XREV_ROUND_ID`, `XREV_SEND_RETRIES`,
 `XREV_RESPONSE_TIMEOUT_SECONDS`, `XREV_RESPONSE_POLL_SECONDS`,
 `XREV_REVIEWER_PROCESS`, `XREV_ALLOW_GLOBAL_RESOLVE`, `XREV_ALLOW_CROSS_WS`,
-`XREV_MAX_TRANSPORT_ATTEMPTS`, `XREV_ROUND_STATE`, `XREV_CODEX_BIN`,
+`XREV_MAX_TRANSPORT_ATTEMPTS`, `XREV_ROUND_STATE`,
+`XREV_REVIEWER_BIN`（reviewer バイナリ名の明示指定。最優先。C1）,
+`XREV_CODEX_BIN`（reviewer バイナリ名の後方互換エイリアス。config の `reviewer` が `codex` の
+ときのみ有効。それ以外の reviewer で指定されていたら警告のうえ無視する）,
 `XREV_REFERENCE_MODE`, `XREV_EXPECT_DIFF_HASH`, `XREV_EXPECT_HEAD`, `XREV_MAX_REFERENCE_FALLBACKS`,
 `XREV_REVIEWER_AUTOCREATE`, `XREV_REVIEWER_CREATE_TIMEOUT_SECONDS`, `XREV_WIRE_MAX_CHARS`,
 `XREV_REVIEWER_LAUNCH_ARGS`（JSON 配列文字列。`reviewer_launch_args` の該当 reviewer 分を上書きする。
@@ -330,9 +358,13 @@ stderr に1行警告する（可用性優先。stdout は汚さない）。生�
 
 送信先が Codex のとき、**ビジー（前応答の処理中）や入力欄の残留（テキスト/ペーストチップ）**が
 あると `cmux send` が非ゼロで失敗する（`cmux send` 自体の長さ上限ではない。プレーンシェルへは
-長文も成功する）。そのため `_cmux_send_line` は **送信前に入力欄をクリア（ctrl-u/backspace）し、
-失敗時は待って再試行**する（既定 5 回・`XREV_SEND_RETRIES`）。残留が混入したまま送ると prompt が
-壊れるため、クリアと、応答検出側のペースト文字数照合（切り詰め検出）で二重に守る。
+長文も成功する）。そのため `_cmux_send_line` は **送信前に入力欄をクリアし、失敗時は待って再試行**
+する（既定 5 回・`XREV_SEND_RETRIES`）。残留が混入したまま送ると prompt が壊れるため、クリアと、
+応答検出側の切り詰め検出で二重に守る。
+
+**入力欄クリアも reviewer 種別で分岐する（C2）**: codex は ctrl-u（行クリア）と backspace（ペースト
+チップ削除）が有効。claude は ctrl-u/ctrl-a/ctrl-k/ctrl-w/escape がいずれも無効（実測）なため、
+生の `0x08`（バックスペース）バイトを1回の `cmux send` へまとめて送る方式を使う。
 
 ### reviewer ペインの自動生成（Phase1c: create-if-missing・冪等）
 
@@ -393,11 +425,21 @@ SKILL.md は「reviewer = レビュー専用・read-only」と約束する。こ
      なので、決定した引数列そのものを意味検証にかけ、不合格なら非ゼロ（fail closed）にする。
   2. **`start-reviewer.sh` の最終 argv**（launch 引数 + ユーザー追加引数を連結した後の列全体）。
      これにより `-s` の短縮形・結合形式によるあらゆる後置上書きを検出する。
-  3. **起動後、実際に走っているプロセスの argv**（`_verify_reviewer_launch_args`）。`ps -o pid=,args=`
-     で取得したコマンドラインを空白区切りで argv へ分解し（launch 引数は印字可能ASCIIのみ・空文字列
-     不可という型検証を経ており、要素自体に空白を含める運用を想定しないため十分）、意味検証にかける。
-     従来の「launch 引数が部分文字列として含まれるか」という判定は、launch 引数の**後ろ**に
-     危険な引数が付いていても部分一致さえ満たせば通ってしまう欠陥があったため置き換えた。
+  3. **起動後、実際に走っているプロセスの argv**（`_verify_reviewer_launch_args`）。従来の
+     「launch 引数が部分文字列として含まれるか」という判定は、launch 引数の**後ろ**に危険な
+     引数が付いていても部分一致さえ満たせば通ってしまう欠陥があったため置き換えた。
+     **argv の取得は `sysctl(KERN_PROCARGS2)` 経由（`_xrev_procargs2_snapshot`。指摘2への対処）**:
+     以前は `ps -o pid=,args=` が返す表示用文字列を空白区切りで argv へ再分解していたが、この
+     表示用文字列はシェルが見せるための整形済みテキストにすぎず argv の要素境界を保持しない。
+     cmux が claude へ自動注入する `--settings <JSON>`（値の内部に空白を含む単一 argv 要素。
+     probe-report.md R1 で実測）のような引数があると、その値の**内部**に現れた
+     `--permission-mode plan` のような文字列を独立した実フラグと誤認しうる（安全ポリシーの
+     誤判定に直結する high 指摘）。`sysctl(KERN_PROCARGS2)` はカーネルが保持する実 argv を
+     境界保持のまま（python3 の ctypes で直接呼び出して）返すため、この誤認は構造的に起きない。
+     macOS 専用の機構であり、取得できない場合（非 macOS・権限不足・パース不能）は当該 PID を
+     結果から省略する＝そのプロセスは意味検証に到達せず、他に合格する候補が無ければ
+     fail closed（`_xrev_create_reviewer` 経路は `exit 19`、`_xrev_classify_reviewer`/
+     `_xrev_verify_reviewer_policy` 経路は `exit 27`）。
   4. **既存ペインを「採用」する経路の実効検証**（`_xrev_verify_reviewer_policy`。下記参照）。
      `xrev_transport_review` では不具合Bの対処により、この検証を送信序盤の1回だけでなく
      `_xrev_gate_reviewer` を介して全ての送信ゲート（早期棄却・本文送信直前・Enter直前・
@@ -445,10 +487,17 @@ SKILL.md は「reviewer = レビュー専用・read-only」と約束する。こ
 
 `reviewer_reads_workspace=true` かつ**同一WS解決(resolve_path=same_ws)**のときのみ使える。diff 本文を
 cmux に流さず、reviewer に「自分で diff を取得してレビュー」させて送受信・reviewer 双方のコンテキストを削減する。
-別WS/別worktreeの誤レビューは **diff 内容ハッシュの不一致**で自動的に弾き、inline へ落とす。設計は 7 ラウンドの
-クロスレビューで収束。
+別WS/別worktreeの誤レビューは **diff 内容ハッシュの不一致**で自動的に弾き、`reference_unverified` として
+再試行させる（再試行の手段は下記のとおり reviewer 種別依存）。設計は 7 ラウンドのクロスレビューで収束。
 
 - **適用は実装フェーズのみ**（設計フェーズはコードが無く常に inline）。
+- **claude reviewer はこの参照モードが必須（専用）**: claude・inline は wire 長に関わらず常に
+  `exit 28` になる（「切り詰め検出」節参照。全文一致照合による inline 受理経路はクロスレビュー
+  2巡目で完全性証明にならないと指摘され撤去済み）。したがって主従反転プリセット
+  （`config/xrev.codex-primary.json`）は `reviewer_reads_workspace=true` を既定にし、実装フェーズは
+  必ずこの参照モードを使う。**設計フェーズのクロスレビューは claude reviewer では現状非対応**
+  （設計フェーズはコードが無く常に inline になるため、上記の理由で送信自体が成立しない）。設計段階の
+  レビューが必要な場合は人間レビューに切り替えるか、reviewer=codex の既定構成を使うこと。
 - **同一性照合 = diff 内容ハッシュ ＋ 基底 OID**（パス比較=symlink/submodule に弱い、を避ける）。primary と reviewer は
   **同一コード `scripts/transport.sh diff-hash <range>` を実行**して diff_hash を得る（手書き invocation の同期ズレを
   無くす単一の真実源）。primary は参照 payload に「`transport.sh diff-hash <range>` の実行指示・range（解決済み OID
@@ -466,8 +515,14 @@ cmux に流さず、reviewer に「自分で diff を取得してレビュー」
 - **検証と状態遷移**: review-loop は `XREV_REFERENCE_MODE=1` のとき、採用前に reviewer の `reference_context` を
   `mode=reference` / `status=verified` / `head==XREV_EXPECT_HEAD` / `diff_hash==XREV_EXPECT_DIFF_HASH` の**全一致**で照合する。
   いずれか不一致/未取得/期待値未設定/同一WS外(transport が exit18 で拒否)なら `decision=reference_unverified`(exit0)で、
-  primary は**同一 ITER を inline で再試行**する。フォールバック通算 `reference_fallbacks` が `max_reference_fallbacks`
-  を超えたら `escalate`（無限往復防止）。`reference_fallbacks` は round_state に載り次回へ引き継ぐ。
+  primary は同一 ITER で再試行する。**再試行の手段は reviewer 種別依存**（review-loop.sh 自身は
+  reviewer 種別を判別しない状態機械であり、分岐は primary 側の責務）: codex reviewer は従来どおり
+  同一 ITER を inline で再試行してよいが、claude reviewer は inline が常に `exit 28` になるため
+  **同一 ITER・参照モードのまま再試行する**（inline へは切り替えない。詳細は
+  `references/codex-primary-playbook.md` 6章）。フォールバック通算 `reference_fallbacks` が
+  `max_reference_fallbacks` を超えたら `escalate`（無限往復防止）。`reference_fallbacks` は
+  round_state に載り次回へ引き継ぐ（名称は「参照→inlineフォールバック」由来だが、意味は
+  「参照検証失敗時の再試行回数」に一般化されている）。
 - **意味の限定**: `reference_context` は「primary と reviewer が同一 diff を取得した」ことの同一性検証であり、
   reviewer がその diff を実際にレビューしたこと・品質を保証しない（信頼済み reviewer 前提）。
 - **read-only 不変・安定窓**: reviewer は読むだけ。primary は参照 payload 送信〜応答受領まで作業ツリーを編集しない。
@@ -563,9 +618,9 @@ cmux の外（通常ターミナル）からは接続できず `transport.sh` �
 - 出力先: `make-adr.sh` の引数 → `XREV_ADR_DIR` → `config` の `adr_dir` → `docs/adr`
   （相対は対象リポジトリ基準、絶対パスはそのまま）
 
-### 到達点（stop_at）の解決順
+### 完了アクション（stop_at）の解決順
 
-`scripts/finalize.sh` は到達点を次の優先順で決める（高 → 低）:
+`scripts/finalize.sh` は完了アクションを次の優先順で決める（高 → 低）:
 
 1. 引数（その場指定。依頼文 / `/xrev` 引数 / 一拍確認の回答を Claude が渡す）
 2. 環境変数 `XREV_STOP_AT`（シェル / プロジェクト単位の既定上書き）

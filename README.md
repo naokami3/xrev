@@ -7,11 +7,12 @@ Claude Code プラグイン。
 
 既定構成では **Claude が primary（設計・実装・修正反映）**、**Codex が reviewer（レビュー専用・read-only）**。
 レビュー往復は [cmux](https://cmux.com/) のペイン間通信を介して行い、`critical`/`high` の指摘が 0 件になるまで
-自動で往復する。収束後はオプションで ADR を生成し、到達点（**レビューのみ / コミット / ドラフト PR**）を選べる。
+自動で往復する。収束後はオプションで ADR を生成し、完了アクション（**レビューのみ / コミット / ドラフト PR**）を選べる。
 
 **最後の確認は必ず人間が行う。** PR は常にドラフトで作られ、マージ・確定の最終トリガは人間が引く。
 
-> 対応エージェント: `claude-code` / `codex`（主従は設定で切り替え。将来 Codex 主・Claude レビュー構成も予定）
+> 対応エージェント: `claude-code` / `codex`（主従は設定で切り替え。Codex 主・Claude レビュー構成の
+> 主従反転プリセットも提供中）
 
 ## なにが嬉しいか
 
@@ -19,7 +20,7 @@ Claude Code プラグイン。
 - **無限ループしない**。レビューは severity 付きの構造化出力で受け取り、blocker（critical/high）が 0 件に
   なったら機械的に収束。最大反復数の安全弁付き。
 - **リポジトリを汚さない**。エージェント間のやり取りに中間ファイルを使わない（ADR を除く）。
-- **cmux 依存を 1 ファイルに隔離**。配管は `scripts/transport.sh` だけに閉じ込めてあり、将来別方式へ
+- **cmux 依存を 1 ファイルに隔離**。通信層は `scripts/transport.sh` だけに閉じ込めてあり、将来別方式へ
   差し替え可能。
 
 ## 要件
@@ -27,10 +28,10 @@ Claude Code プラグイン。
 - **cmux**（macOS, libghostty ベースのターミナル）。バージョンは最新を推奨（CLI 仕様がバージョンで揺れる）。
 - **primary（Claude Code）を cmux ペインの中で起動すること（必須）。** cmux のソケットは認証が要り、
   認証情報は cmux ペイン内のシェルにのみ自動注入される。通常のターミナル（Apple Terminal 等）から
-  起動すると配管がソケットに接続できない（Broken pipe）。
+  起動すると通信層がソケットに接続できない（Broken pipe）。
 - **bash**, **python3**（JSON 処理に使用。`jq` は不要）。
 - **reviewer 用 Codex ペインを固定タイトル `Review Codex` で 1 枚**開いておくこと（タイトルは設定で変更可）。
-- 到達点に `pr` を使う場合は **GitHub CLI（`gh`）** が必要。
+- 完了アクションに `pr` を使う場合は **GitHub CLI（`gh`）** が必要。
 
 ## インストール
 
@@ -89,7 +90,7 @@ clone 済みのこのディレクトリを直接マーケットプレイスに�
 > ├── skills/xrev/SKILL.md     # 中核プレイブック
 > ├── commands/xrev.md         # /xrev（@xrev のフォールバック）
 > ├── hooks/                   # @xrev 検知フック
-> ├── scripts/                 # 配管・レビューループ・ADR・finalize
+> ├── scripts/                 # 通信層・レビューループ・ADR・finalize
 > ├── config/xrev.default.json # 既定設定
 > └── references/              # プロトコル詳細・レビュー出力契約
 > ```
@@ -123,7 +124,7 @@ clone 済みのこのディレクトリを直接マーケットプレイスに�
 ## 使い方
 
 0. **cmux のワークスペースを開き、その中のペインで primary の Claude Code を起動する**
-   （cmux の外から起動した Claude Code では配管が動かない）。接続確認は
+   （cmux の外から起動した Claude Code では通信層が動かない）。接続確認は
    `scripts/transport.sh ping` でできる。
 1. cmux 上に reviewer 用 Codex ペインを**タイトル `Review Codex`**（`cmux rename-tab` 等で設定）、
    **履歴ゼロ**で 1 枚開く。
@@ -132,13 +133,13 @@ clone 済みのこのディレクトリを直接マーケットプレイスに�
    ```
    このAPI設計を @xrev でレビューしてから実装して
    ```
-3. xrev は往復を即開始せず、**到達点（review/commit/pr）と ADR 有無を一度だけ確認**する。
+3. xrev は往復を即開始せず、**完了アクション（review/commit/pr）と ADR 有無を一度だけ確認**する。
 4. 設計フェーズ → 実装フェーズの順でクロスレビュー往復が回り、blocker が 0 件で収束する。
-5. （任意）ADR 生成 → 到達点処理。
+5. （任意）ADR 生成 → 完了アクション処理。
 
 `@xrev` が無い依頼では xrev は**完全に沈黙**する（暴発しない）。
 
-## 到達点（stop_at）
+## 完了アクション（stop_at）
 
 | 値 | 動作 |
 |----|------|
@@ -149,9 +150,9 @@ clone 済みのこのディレクトリを直接マーケットプレイスに�
 **PR は必ずドラフト。** Ready 化・マージ・確定の最終トリガは人間が引く。これが「人間の最終チェックは
 必要」という要件の物理的な保証。
 
-### 到達点の設定方法（3段階）
+### 完了アクションの設定方法（3段階）
 
-到達点は次の優先順で決まる（上が優先）。
+完了アクションは次の優先順で決まる（上が優先）。
 
 1. **その場で指定**（1 回限り）: 依頼文や `/xrev` 引数、または一拍確認への回答で伝える。
    ```
@@ -220,11 +221,44 @@ xrev は別ペインで**対話モードのまま常駐している** Claude/Cod
 
 | プリセット | primary | reviewer | 状態 |
 |-----------|---------|----------|------|
-| Claude 主（本リリース） | `claude` | `codex` | 提供中 |
-| Codex 主（将来） | `codex` | `claude` | 予定 |
+| Claude 主（既定） | `claude` | `codex` | 提供中 |
+| Codex 主（主従反転） | `codex` | `claude` | 提供中 |
 
-主従は `config/xrev.default.json` の `primary` / `reviewer` で切り替える。キーワードは共通で `@xrev`
-（主従でキーワードを分けない）。
+主従は config の `primary` / `reviewer` で切り替える（既定は `config/xrev.default.json`、主従反転は
+`config/xrev.codex-primary.json`）。キーワードは共通で `@xrev`（主従でキーワードを分けない）。
+
+### Codex 主プリセット（primary=codex / reviewer=claude）を使う
+
+**前提: xrev リポジトリの安定した checkout（clone 済みディレクトリ）から使うこと。** プラグイン
+キャッシュ配下（アップデートで再配置され得るパス）から使うと、後述のスニペットに埋め込む絶対パス
+（`XREV_ROOT`）が無効になるおそれがある。
+
+1. xrev リポジトリで `scripts/print-agents-snippet.sh` を実行し、出力されたスニペットを
+   利用者プロジェクトの `AGENTS.md` に貼り付ける（**このスクリプトはファイルを生成しない**。
+   貼り付けは人間が行う）。
+
+   ```bash
+   /path/to/xrev/scripts/print-agents-snippet.sh
+   ```
+
+2. codex がそのプロジェクトで作業を始めると、`AGENTS.md` のスニペット経由で
+   [`references/codex-primary-playbook.md`](references/codex-primary-playbook.md) に従い、
+   `config/xrev.codex-primary.json` を使ってクロスレビュー往復を回す。
+3. reviewer は Claude Code（`claude --permission-mode plan`。cmux ペインのタイトルは既定
+   `Review Claude`）。
+
+**claude reviewer 特有の注意（実装フェーズは参照モード必須）**: Claude Code の TUI はペースト内容の
+文字数を表示しないため、Codex 向けの「表示文字数と送信長の一致」による切り詰め検出が使えない。
+代わりに送信内容の全文一致照合を使うが、実測では空 payload でも実コードが生成する最小 wire は
+約 3,231 文字あり、composer に全文が可視な実測上限（約800文字）を常に超える。**つまり inline
+（本文を wire にそのまま載せる方式）での claude 送信は payload の内容に関わらず必ず送信前に拒否
+される（`exit 28`）。** そのため `config/xrev.codex-primary.json` は `reviewer_reads_workspace=true`
+を既定にしており、**実装フェーズは reviewer に自分で diff を取得させる参照モードを必ず使う**
+（diff 本文を送らないためこの制約を回避できる）。**設計フェーズのクロスレビューは claude
+reviewer では現状非対応**（設計フェーズは常に inline になるため）で、必要なら人間レビューか
+既定構成（primary=Claude・reviewer=Codex）を使う。詳細・手順は
+[`references/codex-primary-playbook.md`](references/codex-primary-playbook.md) の
+「claude reviewer 固有の注意」を参照。
 
 ## 設計の詳細
 

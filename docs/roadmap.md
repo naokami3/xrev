@@ -5,10 +5,10 @@ xrev のフェーズと進捗。詳細な設計は [architecture.md](architectur
 
 ## フェーズ 1: コアエンジン ✅ 完了
 
-- [x] 配管抽象 `transport.sh`（cmux 依存の局所化・宛先解決・送信・応答検出・preflight）
+- [x] 通信層抽象 `transport.sh`（cmux 依存の局所化・宛先解決・送信・応答検出・preflight）
 - [x] レビュー出力のパースと severity 集計 `parse-review.sh`（jq 非依存）
 - [x] 状態機械 `review-loop.sh`（1 ラウンド実行＋終端の機械判定・decision 返却）
-- [x] 到達点分岐 `finalize.sh`（review / commit / ドラフト PR）
+- [x] 完了アクション分岐 `finalize.sh`（review / commit / ドラフト PR）
 - [x] ADR 生成 `make-adr.sh`（往復ログ → `docs/adr/ADR-NNN.md`）
 
 ## フェーズ 2: プラグイン統合 ✅ 完了
@@ -17,7 +17,7 @@ xrev のフェーズと進捗。詳細な設計は [architecture.md](architectur
 - [x] `@xrev` 検知フック `hooks/user-prompt-submit.sh`（キーワード無しでは沈黙）
 - [x] フォールバックコマンド `commands/xrev.md`（`/xrev`）
 - [x] プラグインメタ `plugin.json`
-- [x] 到達点 `stop_at` を 3 段階（引数 / env / config）で設定可能化
+- [x] 完了アクション `stop_at` を 3 段階（引数 / env / config）で設定可能化
 - [x] ADR の必要有無・出力ディレクトリを設定可能化
 
 ## フェーズ 3: 配布 ✅ 完了
@@ -27,7 +27,7 @@ xrev のフェーズと進捗。詳細な設計は [architecture.md](architectur
 
 ## フェーズ 4: 実機検証 ✅ 完了
 
-- [x] cmux ペイン内での配管検証（接続 preflight）
+- [x] cmux ペイン内での通信層検証（接続 preflight）
 - [x] 宛先解決（`tree --all`、スピナー等の装飾タイトルの正規化）
 - [x] 送信（本文一括送信＋Enter 分離）
 - [x] 応答検出（round_id 相関・全画面 de-wrap → raw_decode 走査）
@@ -41,7 +41,36 @@ xrev のフェーズと進捗。詳細な設計は [architecture.md](architectur
       - [x] センチネル囲みのスキーマ準拠 JSON を返し、TUI 折り返しを de-wrap して安定取得できる
       - [x] 送信 → 検出 → parse → decision(continue) まで end-to-end 成立
 
+## フェーズ 5: 主従反転プリセット（primary=codex / reviewer=claude）
+
+コアの主従非依存（設計原則3）を実際に別プリセットとして具体化した。詳細設計・実測知見は
+[cmux-behavior.md](cmux-behavior.md) の実測知見節、契約は
+[`../references/protocol.md`](../references/protocol.md) を参照。
+
+- [x] reviewer バイナリ解決の一般化（`_xrev_reviewer_bin`。`XREV_REVIEWER_BIN` 新設・
+      `XREV_CODEX_BIN` は reviewer=codex 限定の後方互換エイリアス）
+- [x] 送信完全性検証の reviewer 種別対応・fail closed（codex=ペースト文字数照合 /
+      claude=実装フェーズは参照モード必須（inline の全文一致照合は実測上、実運用サイズで常に
+      `exit 28` になるため）/ 未知種別は `exit 28`）
+- [x] プリセット config `config/xrev.codex-primary.json`（primary=codex / reviewer=claude /
+      reviewer_pane_title="Review Claude"）
+- [x] keyword 判定の単一真実源化 `scripts/keyword-match.sh`（hook・プレイブック・スニペットが共有）
+- [x] codex 主プレイブック `references/codex-primary-playbook.md` と `AGENTS.md` の整理
+- [x] 導入スニペット出力 `scripts/print-agents-snippet.sh`（ファイル生成せず stdout 出力）
+- [x] 実測 R1〜R6（claude reviewer の cmux ペイン内挙動: プロセス同定・ペースト畳み・
+      composer クリア・タブタイトル・出力契約遵守・de-wrap 互換）
+
+未検証（実機 e2e。今後の実施項目）:
+
+- [ ] 別プロジェクトの Codex から `print-agents-snippet.sh` 経由のスニペットで 1 往復が成立する
+- [ ] xrev の checkout を移動した後、スニペットの前提検査が明確な診断で失敗する
+      （XREV_ROOT 不整合を握りつぶさず気づける）
+- [ ] claude reviewer との実機往復 e2e（cmux ペイン内で実際に `Review Claude` へ送受信する）
+
 ## 将来の検討事項
 
-- Codex 主・Claude レビューのプリセット（コアは主従非依存なので config 切替で対応予定）
 - `transport` 実装の差し替え（`codex exec` 方式・別エージェント等）
+- 生成直後ペインへの初回送信失敗（[cmux-behavior.md](cmux-behavior.md) 9節）の恒久対策:
+  ensure-reviewer の起動確認直後に捨て送信を 1 回挟む / 初回のみ settle 延長。
+  **実装前に実機で複数回の裏取りが必要**（現状は round_state 引き継ぎの再試行で運用対処）。
+- claude composer クリアの 0x08 一括送信量（現在固定 4000）の実機妥当性検証。

@@ -1,0 +1,32 @@
+{
+  "primary": "codex",
+  "reviewer": "claude",
+  "reviewer_pane_title": "Review Claude",
+  "keyword": "@xrev",
+  "max_iterations": 5,
+  "max_transport_attempts": 12,
+  "reviewer_reads_workspace": true,
+  "max_reference_fallbacks": 3,
+  "stop_at": "review",
+  "adr": false,
+  "adr_dir": "docs/adr",
+  "transport": "cmux",
+  "reviewer_process": "claude",
+  "reviewer_launch_args": {
+    "codex": ["--sandbox", "read-only", "--ask-for-approval", "never"],
+    "claude": ["--permission-mode", "plan"]
+  },
+  "reviewer_autocreate": "ask",
+  "reviewer_create_timeout_seconds": 30,
+  "allow_global_resolve": false,
+  "allow_cross_ws": false,
+  "severity_blockers": ["critical", "high"],
+  "medium_low_max_rounds": 2,
+  "read_screen_lines": 400,
+  "send_settle_seconds": 2,
+  "submit_settle_seconds": 1,
+  "chunk_size": 0,
+  "response_timeout_seconds": 180,
+  "response_poll_seconds": 3,
+  "wire_max_chars": 64000
+}
