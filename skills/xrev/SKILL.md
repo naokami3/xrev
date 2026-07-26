@@ -44,14 +44,43 @@ AI コーディングエージェント同士に、**設計段階からクロス
   作業を切り替えるときは Codex を再起動して履歴を切る運用。セッション復元フックが前作業を
   復元していないか目視確認してもらう。
 
-確認が取れたら、必要に応じて環境変数で設定を上書きして往復に入る:
+### 入口の自己申告（XREV_PRIMARY）
+
+自分（Claude）が primary であることをスクリプト呼び出し前に自己申告する。config の `reviewer`
+が既定 `auto` のとき、`transport.sh` はこの申告から「primary の相手方」を機械的に reviewer へ
+解決する（`XREV_PRIMARY` 未設定でも config の `primary`（既定 `claude`）から従来どおり
+`reviewer=codex` に解決されるが、明示しておくことで解決根拠が一拍確認の時点で確定する）。
 
 ```bash
+export XREV_PRIMARY=claude
 export XREV_CONFIG="${CLAUDE_PLUGIN_ROOT}/config/xrev.default.json"   # 既定。プロジェクト固有設定があれば差し替え
 # 任意の上書き例:
 # export XREV_REVIEWER_PANE_TITLE="Review Codex"
 # export XREV_MAX_ITERATIONS=5
 ```
+
+### reviewer の指定と質問規則（一拍確認）
+
+reviewer は既定で auto 解決される（primary=claude なら reviewer=codex）。ユーザーの依頼文から
+reviewer の指定を読み取り、次の規則で扱う（詳細は [references/protocol.md](../../references/protocol.md)
+「設定キー一覧」の auto 値・派生規則を参照）:
+
+- **ユーザーが依頼文で reviewer を明示した**（例:「claude をレビュアーにして」）→ それを正規の
+  上書きとして `XREV_REVIEWER` に設定する。**質問しない**（config の固定値と異なっていても質問しない。
+  明示指定は常に config より優先する）。
+- **質問するのは、人間の意図が一意に読めない場合だけ**:
+  (a) 同一依頼内に相反する reviewer 指定がある（例: 「codex でレビューして、claude 主体で」のように
+      主従とレビュアーの指定が矛盾する）。
+  (b) auto 解決に必要な primary が決められない（`XREV_PRIMARY` も config の `primary` も不正/未定）。
+- 上記いずれにも当たらない**通常フロー（入口宣言のみ・reviewer の明示指定なし）では質問ゼロ**で
+  往復に入ってよい。
+- **reviewer に claude が選択されたら**（明示指定 or auto 解決の結果）、一拍確認で必ず次の制約を
+  提示する: 「claude reviewer は設計フェーズのクロスレビューに非対応（実装フェーズのみ・参照モード
+  必須）」。詳細は 4 章「コンテキスト削減：参照モード」を参照。
+- **曖昧判定はしない**: cmux 上に両タイトル（`Review Codex` と `Review Claude`）のペインが両方
+  存在していても、宛先解決は解決済み reviewer のタイトルだけを resolve する（もう一方は無視する。
+  誤って両方を候補にしない）。同一タイトル内に複数一致がある場合は既存の `exit 16`（曖昧）で
+  fail closed のまま変わらない。
 
 ## 2. 通信層の前提（cmux）
 

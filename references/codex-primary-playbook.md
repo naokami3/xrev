@@ -1,15 +1,19 @@
 # codex 主プレイブック — primary = Codex / reviewer = Claude
 
-xrev の主従反転プリセット（`config/xrev.codex-primary.json`）向けの手順書。既定構成（primary=Claude・
+xrev の主従反転（primary=codex・reviewer=claude）向けの手順書。既定 config の `reviewer` は
+`auto` であり、`XREV_PRIMARY=codex` を自己申告するだけでこの主従反転が導出される（2章参照）。
+値を config ファイルへ明示的に固定しておきたい場合は主従反転プリセット
+（`config/xrev.codex-primary.json`）を使ってもよい（挙動は等価）。既定構成（primary=Claude・
 reviewer=Codex）の正典は [`../skills/xrev/SKILL.md`](../skills/xrev/SKILL.md) だが、その中身は
 Claude Code のスキル機構（`allowed-tools` 等）に紐づくため、**codex がそのまま読んで実行できる形**
 としてここに手順を複製する。スクリプト契約そのもの（センチネル・severity・終了コード・設定キー）は
 [protocol.md](protocol.md) が正典であり、ここでは重複させず参照する。
 
 **前提**: このリポジトリで xrev 自身を codex で開発する場合は `XREV_ROOT` はリポジトリルート。
-利用者プロジェクトから使う場合は `scripts/print-agents-snippet.sh` が出力するスニペット（利用者の
-`AGENTS.md` に貼るもの）が `XREV_ROOT` を解決してくれる。以下の手順はすべて `XREV_ROOT` が
-解決済みであることを前提にする。
+利用者プロジェクトから使う場合は、`scripts/print-agents-snippet.sh --append-global` でこのマシン
+上に一度だけ導入したグローバル `AGENTS.md`（`$CODEX_HOME/AGENTS.md`。既定 `~/.codex/AGENTS.md`）
+のスニペットが `XREV_ROOT` を解決してくれる（プロジェクトごとの `AGENTS.md` への貼り付けは不要）。
+以下の手順はすべて `XREV_ROOT` が解決済みであることを前提にする。
 
 ## 1. 発火条件
 
@@ -20,7 +24,7 @@ Claude Code のスキル機構（`allowed-tools` 等）に紐づくため、**co
   プレイブック側でキーワード文字列をハードコードしない。
 
   ```bash
-  printf '%s' "$依頼文" | XREV_CONFIG="$XREV_ROOT/config/xrev.codex-primary.json" \
+  printf '%s' "$依頼文" | XREV_CONFIG="$XREV_ROOT/config/xrev.default.json" \
     bash "$XREV_ROOT/scripts/keyword-match.sh"
   ```
 
@@ -42,11 +46,21 @@ Claude Code のスキル機構（`allowed-tools` 等）に紐づくため、**co
   `claude` エントリ）。
 - そのペインが**今回の作業用に履歴ゼロ**から始まっているか。
 
-確認が取れたら、この主従反転プリセットの config を使うことを明示してから往復に入る:
+確認が取れたら、**自分（codex）が primary であることを自己申告**してから往復に入る:
 
 ```bash
-export XREV_CONFIG="$XREV_ROOT/config/xrev.codex-primary.json"
+export XREV_PRIMARY=codex
+export XREV_CONFIG="$XREV_ROOT/config/xrev.default.json"
 ```
+
+**`XREV_CONFIG` に主従反転プリセット（`xrev.codex-primary.json`）を明示する必要は無くなった**:
+既定 config の `reviewer` は `auto` であり、`XREV_PRIMARY=codex` の自己申告から
+`transport.sh` が「primary の相手方」として `reviewer=claude`（`reviewer_pane_title=Review
+Claude` / `reviewer_process=claude` / `reviewer_reads_workspace=true` も連動して導出）を機械的に
+解決する。`xrev.codex-primary.json` は**この主従反転を明示的に固定したい場合にのみ**使うプリセットと
+して残っている（例: auto 解決に頼らず値を config ファイルへ書き切っておきたい運用）。使う場合は
+`export XREV_CONFIG="$XREV_ROOT/config/xrev.codex-primary.json"` を上記の代わりに設定する（挙動は
+等価）。詳細・派生規則の正典は [protocol.md](protocol.md) の「設定キー一覧」を参照。
 
 reviewer の有無確認・自動生成は既定構成と同じ契約（`transport.sh resolve --json` →
 `reviewer_autocreate` の方針に従い `transport.sh ensure-reviewer`）。詳細は
@@ -59,7 +73,8 @@ reviewer の有無確認・自動生成は既定構成と同じ契約（`transpo
 （`$XREV_ROOT/scripts/review-loop.sh` を介す。cmux は直接叩かない）:
 
 ```bash
-export XREV_CONFIG="$XREV_ROOT/config/xrev.codex-primary.json"
+export XREV_PRIMARY=codex
+export XREV_CONFIG="$XREV_ROOT/config/xrev.default.json"
 ITER=1
 printf '%s' "$payload" | XREV_ROUND_STATE="$prev_round_state" \
   "$XREV_ROOT/scripts/review-loop.sh" "$ITER"
@@ -122,9 +137,10 @@ reviewer にする既定構成とは送信完全性検証・復号契約が異�
   不採用となった（2巡目クロスレビューで棄却。詳細は [protocol.md](protocol.md) 参照）。よって
   **claude reviewer への inline 送信（本文を wire にそのまま載せる方式）は wire 長に関わらず
   無条件で `exit 28`（`integrity_unverifiable`）になり送信前に拒否される**。
-  `config/xrev.codex-primary.json` は `reviewer_reads_workspace=true` を既定にしているので、
-  **実装フェーズは必ず下記の参照モード手順を使うこと**。詳細・根拠は [protocol.md](protocol.md)
-  「参照モード」節を参照。
+  `XREV_PRIMARY=codex`（既定 config・auto 解決）でも `config/xrev.codex-primary.json`（明示プリセット）
+  でも、reviewer=claude のときは `reviewer_reads_workspace=true` になる（D1: reviewer=claude での
+  明示 false は設定エラーとして拒否される）。**実装フェーズは必ず下記の参照モード手順を使うこと**。
+  詳細・根拠は [protocol.md](protocol.md)「参照モード」節を参照。
 - **設計フェーズのクロスレビューは claude reviewer では現状非対応**: 設計フェーズはコードが無く
   diff を持たないため常に inline になり、上記の理由で送信自体が成立しない。設計段階のレビューが
   必要な場合は、人間レビューに切り替えるか、既定構成（primary=Claude・reviewer=Codex）を使うこと。
