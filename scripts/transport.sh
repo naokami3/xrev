@@ -504,18 +504,115 @@ _ps_snapshot() {
   ps -o pid=,pgid=,tpgid=,comm= "${args[@]}" 2>/dev/null
 }
 
-# ps スナップショット取得（フルコマンドライン込み・cmux 非依存の外部コマンド。テストではスタブする）。
-#   入力(stdin): PID を1行1件 / 出力: "<pid> <args...>" を1行1件（ps の既定区切り＝空白。args 自体に
-#   空白を含みうるため、末尾側は分割せず1本の文字列のまま扱う＝先頭の PID フィールドだけを分離する）。
-# 【用途】起動後の launch 引数の実効検証（_verify_reviewer_launch_args）専用。プロセス証明
-# （_ps_snapshot・pgid/tpgid 判定）とは目的が異なるため別関数にする。
-_ps_args_snapshot() {
-  local args=() p
-  while IFS= read -r p; do
-    [[ -n "$p" ]] && args+=(-p "$p")
-  done
-  (( ${#args[@]} )) || return 1
-  ps -o pid=,args= "${args[@]}" 2>/dev/null
+# 【共有の実体・その1】指定 PID の実 argv を sysctl(KERN_PROCARGS2) から取得する python 関数定義
+# （`_procargs2(pid)` 1個）だけを stdout に返す（副作用なし・実行はしない）。
+#
+# 【指摘2への対処】従来は `ps -o pid=,args=` が返す「引数を空白で連結した表示用文字列」を後段で
+# 再度空白分割して argv を復元していた。しかし ps の args= はシェルが表示するための整形済み文字列に
+# すぎず、argv の要素境界を保持しない。値自体に空白を含む単一 argv 要素（cmux が claude へ注入する
+# `--settings <JSON>` 等。probe-report.md R1 で実測）の内部に `--permission-mode plan` のような
+# フラグ文字列が現れると、空白分割はそれを独立した引数と誤認しうる（安全ポリシーの誤判定に直結する
+# high 指摘）。ここでは表示用文字列を経由せず、カーネルが保持する実 argv を sysctl(KERN_PROCARGS2)
+# で直接取得する（macOS 専用。`ps` 自身も内部でこの sysctl を使っており、境界情報を持つのは
+# カーネル側だけである）。
+#
+# 【指摘1（2巡目）への対処・この関数を共有する理由】`_procargs2` が返す argv は要素ごとに任意の
+# バイト列（空白・TAB・改行を含む）を持ちうる。これを呼び出し側が改行区切りの文字列へ変換して
+# stdout へ返すと、argv 要素**自体**に生の改行が含まれる場合に再び境界を失う（1要素が2行に
+# 分割され、後段の bash `while read` が別々の argv と誤認する）。そこで「PID 受領 → argv 取得 →
+# 安全ポリシー判定」を単一の python プロセス内で完結させる `_xrev_verify_foreground_policy` /
+# `_verify_reviewer_launch_args`（いずれも下方で定義）がこの関数定義をそのまま埋め込んで使う。
+# 自己診断用の一括スナップショット（`_xrev_procargs2_snapshot`。JSON を経由するため境界保持は
+# 維持されるが、そこから先の bash 側再構成はしない用途にのみ使う）もこれを共有し、判定原理を
+# 二重管理しない。
+_xrev_procargs2_py_src() {
+  cat <<'PY'
+import ctypes, ctypes.util
+
+def _procargs2(pid):
+    if sys.platform != "darwin":
+        return None
+    libc_path = ctypes.util.find_library("c") or "libSystem.dylib"
+    try:
+        libc = ctypes.CDLL(libc_path, use_errno=True)
+    except OSError:
+        return None
+    CTL_KERN, KERN_PROCARGS2 = 1, 49
+    mib = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid)
+    size = ctypes.c_size_t(0)
+    # 1回目: 必要バッファサイズだけを問い合わせる。
+    if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+        return None
+    if size.value < 4:
+        return None
+    # 問い合わせから実取得までの間にプロセスの argv は変化しない前提だが、念のため余裕を持たせる。
+    size = ctypes.c_size_t(size.value + 4096)
+    buf = ctypes.create_string_buffer(size.value)
+    size2 = ctypes.c_size_t(size.value)
+    if libc.sysctl(mib, 3, buf, ctypes.byref(size2), None, 0) != 0:
+        return None
+    n = size2.value
+    if n < 4:
+        return None
+    # レイアウト: 先頭4バイトが argc（native int）、続いて exec_path(NUL終端) + NUL パディング、
+    # その後 argc 個の NUL 区切り argv 文字列が続く（Apple 公開情報無し・実機/複数実装で確認済みの
+    # 既知レイアウト）。
+    argc = ctypes.cast(buf, ctypes.POINTER(ctypes.c_int))[0]
+    data = buf.raw[4:n]
+    nul = data.find(b"\x00")
+    if nul < 0:
+        return None
+    data = data[nul:]
+    j = 0
+    while j < len(data) and data[j] == 0:
+        j += 1
+    data = data[j:]
+    argv = []
+    for _ in range(argc):
+        nul = data.find(b"\x00")
+        if nul < 0:
+            return None
+        try:
+            argv.append(data[:nul].decode("utf-8"))
+        except UnicodeDecodeError:
+            return None
+        data = data[nul + 1:]
+    return argv
+PY
+}
+
+# argv スナップショット取得（境界保持・cmux 非依存の外部呼び出し。テストではスタブする）。
+# 自己診断（doctor）専用。安全ポリシー判定の入力には使わない（判定は単一プロセス内で完結させる
+# `_xrev_verify_foreground_policy` / `_verify_reviewer_launch_args` を使うこと）。
+#   入力(stdin): PID を1行1件 / 出力: "<pid><TAB><argvのJSON配列(argv[0]込み)>" を1行1件。
+#   取得できない PID（非対象OS・権限不足・ESRCH・パース不能）は出力から省略する
+#   （_ps_snapshot と同じ「欠落は呼び出し側が要求PIDとの過不足で検証する」契約）。
+# JSON エンコードは制御文字を必ず \uXXXX 形式でエスケープするため、argv 要素に生の TAB/改行が
+# 含まれていても出力の行区切り（本関数が使う実 TAB・実改行）と衝突しない。
+_xrev_procargs2_snapshot() {
+  # 【注意】`python3 - <<'PY' ... PY` は使わない: `-` はスクリプト本体を stdin から読む指定なので、
+  # ヒアドキュメントが stdin を占有してしまい、本関数が読むべき PID 一覧（呼び出し側の stdin）が
+  # 届かなくなる（_build_framed_line と同じ理由・同じ対処）。プログラム本文を変数化して
+  # `python3 -c` へ渡すことで、stdin を PID 一覧のためだけに空ける。
+  local prog
+  prog="import json, sys
+$(_xrev_procargs2_py_src)
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        pid = int(line)
+    except ValueError:
+        continue
+    if pid <= 0:
+        continue
+    argv = _procargs2(pid)
+    if argv is None:
+        continue
+    sys.stdout.write(\"%d\t%s\n\" % (pid, json.dumps(argv, ensure_ascii=True)))
+"
+  python3 -c "$prog"
 }
 
 # 純粋関数: 「対象 surface でキー入力を受け取るプロセス」が許可名かを判定する。
@@ -640,19 +737,41 @@ _verify_reviewer_process() {
   return 1
 }
 
-# 純粋関数: 対象 surface の前景プロセス（tty のフォアグラウンドプロセスグループを握る直下
-# プロセス）の argv を取得する。判定原理は `_decide_foreground_owner` と同じ（pgid==tpgid の
-# 直下プロセスが一意に決まること・許可名と一致すること）だが、`_decide_foreground_owner` は
-# 既存のテスト（test_send_gates.sh）が固定する契約（bool 相当の許可/拒否のみを返す）を持つため、
-# それを変えずに argv も欲しい本用途のために別関数として複製する（意図的な重複。判定条件は
-# 一字一句合わせること）。
-#   入力: $1=許可名(basename), env XREV_DIRECT="PID<TAB>name" 行群(_top_surface_processes 出力),
-#         env XREV_PS="pid pgid tpgid comm" 行群(_ps_snapshot 出力),
-#         env XREV_PS_ARGS="pid args" 行群(_ps_args_snapshot 出力)
-#   出力: 前景プロセスの argv[0]（実行ファイルパス）を除いた引数列を1行1要素で stdout。
-#   exit: 0=前景プロセスを一意に特定し許可名と一致 / 1=特定不能・不一致（fail closed）
-_xrev_foreground_argv() {
-  XREV_DIRECT="${XREV_DIRECT:-}" XREV_PS="${XREV_PS:-}" XREV_PS_ARGS="${XREV_PS_ARGS:-}" python3 - "$1" <<'PY'
+# 純粋関数: 「対象 surface でキー入力を受け取るプロセス（前景プロセス）」を一意に特定し、その
+# 実 argv が安全ポリシーを満たすかまでを**単一 python プロセス内**で完結させて判定する
+# （既存ペイン採用時の実効検証・`_xrev_verify_reviewer_policy` 用）。foreground 選定の原理は
+# `_decide_foreground_owner` と同じ（pgid==tpgid の直下プロセスが一意に決まること・許可名と
+# 一致すること）だが、`_decide_foreground_owner` は既存のテスト（test_send_gates.sh）が固定する
+# 契約（bool 相当の許可/拒否のみを返す）を持つため、それを変えずに argv も欲しい本用途のために
+# 別関数として複製する（意図的な重複。foreground 選定の判定条件は一字一句合わせること）。
+#
+# 【指摘1（2巡目）への対処】旧実装（`_xrev_foreground_argv`）は特定した前景プロセスの argv を
+# JSON から decode した生文字列のまま1行1要素で print し、呼び出し側の bash が `while read` で
+# 配列へ再構成していた。argv 要素自体に生の改行が含まれる場合（例: 単一要素
+# `--permission-mode\nplan`）、この print → 改行区切りテキスト → while read という往復で境界が
+# 再び失われ、実在しない安全フラグ（`--permission-mode` と `plan` という2要素）が現れたかのように
+# 誤判定しうる（high 指摘）。ここでは「前景プロセスの特定 → argv 取得(procargs2) → 安全ポリシー
+# 判定」までを同一 python プロセス内で完結させ、argv を改行・空白などの区切り文字ベースの形へ
+# 変換して bash へ戻すことを一切しない。argv 取得(`_procargs2`)・ポリシー判定
+# (`_xrev_check_policy`) はいずれも他経路（`_xrev_verify_effective_policy` /
+# `_verify_reviewer_launch_args`）と共有する実体（`_xrev_procargs2_py_src` /
+# `_xrev_policy_check_py_src`）を使い、判定リストを二重管理にしない。
+#   入力: $1=許可名(reviewer_process。basename を取って前景プロセスの期待名・安全ポリシー種別kind
+#         の両方に使う。従来 kind は basename(REVIEWER_PROCESS) と常に同値だったため1引数へ統合する),
+#         env XREV_DIRECT="PID<TAB>name" 行群(_top_surface_processes 出力),
+#         env XREV_PS="pid pgid tpgid comm" 行群(_ps_snapshot 出力)
+#   出力: stdout には何も書かない（exit のみ。_xrev_verify_reviewer_policy の契約をそのまま透過する。
+#     不具合Aの教訓により、この関数は成功時に stdout へ何も書いてはならない）。
+#   exit 0=前景プロセスを一意特定し、その実 argv が安全ポリシーに合格 /
+#   1=特定不能・不一致・不合格（fail closed）
+_xrev_verify_foreground_policy() {
+  # 【注意】ここで `prog="$(cat <<'PY' ... PY)"` を使わないこと: bash 3.2（macOS既定）は $(...) の
+  # 対応括弧探索がヒアドキュメント本文中の不均衡な括弧・引用符で誤爆する（_build_framed_line 参照）。
+  # `read -r -d ''` で変数化してから、共有実体（`_xrev_procargs2_py_src` / `_xrev_policy_check_py_src`。
+  # いずれも短い関数呼び出しを command substitution するだけなので上記の罠に当たらない）と
+  # 文字列連結する。
+  local drv
+  read -r -d '' drv <<'PY' || true
 import os, sys
 
 def as_int(s):
@@ -707,36 +826,36 @@ actual = os.path.basename(rows[fg_pid][2])
 if actual != expected:
     sys.exit(1)
 
-args_map = {}
-for line in os.environ.get("XREV_PS_ARGS", "").splitlines():
-    if not line.strip():
-        continue
-    f = line.split(None, 1)
-    pid = as_int(f[0])
-    if pid is None:
-        continue
-    args_map[pid] = f[1] if len(f) > 1 else ""
-argline = args_map.get(fg_pid)
-if argline is None:
+# 前景プロセスの実 argv を同一プロセス内で取得し、そのまま判定へ渡す（境界保持のまま。
+# bash へ一度も戻さない＝改行区切りの再構成を経由しない）。
+argv = _procargs2(fg_pid)
+if argv is None:
+    sys.stderr.write("[xrev/transport] 前景プロセス(pid=%d)の argv を取得できません\n" % fg_pid)
     sys.exit(1)
-for a in argline.split()[1:]:
-    print(a)
+_err = _xrev_check_policy(expected, argv[1:])
+if _err is not None:
+    sys.stderr.write("[xrev/transport] 安全ポリシー検証失敗: %s\n" % _err)
+    sys.exit(1)
 sys.exit(0)
 PY
+  local prog
+  prog="$(_xrev_procargs2_py_src)"$'\n'"$(_xrev_policy_check_py_src)"$'\n'"$drv"
+  XREV_DIRECT="${XREV_DIRECT:-}" XREV_PS="${XREV_PS:-}" python3 -c "$prog" "$1"
 }
 
 # 既存 reviewer を「採用」する経路（_xrev_classify_reviewer の present 判定・および送信直前の
-# xrev_transport_review）の実効ポリシー検証（指摘3）。対象 surface の前景プロセスの argv を取得し、
-# `_xrev_verify_effective_policy` で安全ポリシー（sandbox=read-only かつ承認=never）が実効に
-# 有効かを確認する。従来は前景プロセス名が REVIEWER_PROCESS と一致することしか見ておらず、手動起動・
-# 旧版の書き込み可能なペインがそのまま採用され得た。
+# xrev_transport_review）の実効ポリシー検証（指摘3）。対象 surface の前景プロセスを特定し、
+# `_xrev_verify_foreground_policy`（単一プロセス内で argv 取得〜判定まで完結）で安全ポリシー
+# （sandbox=read-only かつ承認=never）が実効に有効かを確認する。従来は前景プロセス名が
+# REVIEWER_PROCESS と一致することしか見ておらず、手動起動・旧版の書き込み可能なペインがそのまま
+# 採用され得た。
 #   入力: $1=surface ref
-#   出力: stdout には何も書かない（exit のみ。_xrev_verify_effective_policy の契約をそのまま透過する。
+#   出力: stdout には何も書かない（exit のみ。_xrev_verify_foreground_policy の契約をそのまま透過する。
 #     不具合Aの教訓により、この関数は成功時に stdout へ何も書いてはならない — 呼び出し元の
 #     xrev_transport_review は stdout が「reviewer の review JSON だけ」という契約を持つため）。
 #   exit 0=安全ポリシー確認 / 1=確認できない（fail closed）
 _xrev_verify_reviewer_policy() {
-  local surface="$1" top direct ps_out ps_args_out fg_argv
+  local surface="$1" top direct ps_out
   top="$(_cmux_top_processes)"
   if [[ -z "$top" ]]; then
     _log "cmux top を取得できません（既存 reviewer の安全ポリシー検証不可）。"
@@ -748,17 +867,7 @@ _xrev_verify_reviewer_policy() {
     return 1
   fi
   ps_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_snapshot)"
-  ps_args_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_args_snapshot)"
-  if ! fg_argv="$(XREV_DIRECT="$direct" XREV_PS="$ps_out" XREV_PS_ARGS="$ps_args_out" _xrev_foreground_argv "$REVIEWER_PROCESS")"; then
-    _log "reviewer surface($surface)の前景プロセスの argv を特定できません（安全ポリシー検証不可）。"
-    return 1
-  fi
-  local -a fg_args=()
-  local _fl
-  while IFS= read -r _fl; do
-    [[ -n "$_fl" ]] && fg_args+=("$_fl")
-  done <<< "$fg_argv"
-  _xrev_verify_effective_policy "$(basename -- "$REVIEWER_PROCESS")" "${fg_args[@]+"${fg_args[@]}"}"
+  XREV_DIRECT="$direct" XREV_PS="$ps_out" _xrev_verify_foreground_policy "$REVIEWER_PROCESS"
 }
 
 # 起動後の実効検証: reviewer 自動生成（_xrev_create_reviewer）が起動したプロセスの実コマンド
@@ -766,20 +875,28 @@ _xrev_verify_reviewer_policy() {
 # だけでは read-only が実際に効いているかは分からない（引数生成のバグ・cmux send の欠落等でも
 # 起動確認自体は通ってしまうため）ので、ここで実プロセスの args を見て機械的に裏取りする。
 #
-# 【指摘2への対処】従来は「期待する launch 引数が部分文字列として含まれるか」の判定だったため、
+# 【指摘2への対処・旧版】従来は「期待する launch 引数が部分文字列として含まれるか」の判定だったため、
 # launch 引数の**後ろ**に危険な引数（例 `-s danger-full-access`）が付いていても、期待した部分
 # 文字列さえ含まれていれば通ってしまっていた。ここでは部分文字列判定をやめ、実コマンドラインを
-# argv へ分解して `_xrev_verify_effective_policy` の意味検証（最終 argv 全体で安全ポリシーが
-# 一意に有効か）に通す。
+# argv へ分解して `_xrev_check_policy` の意味検証（最終 argv 全体で安全ポリシーが一意に有効か）に通す。
 #   入力: $1=surface ref, $2=reviewer 種別（basename。codex/claude）
 #   出力: なし（exit のみ）。exit: 0=直下プロセスのいずれかで安全ポリシーの実効を確認できた /
 #   1=確認できない（呼び出し側は起動を採用しない＝fail closed）
-# 【argv 分解を空白区切りで済ませる理由】launch 引数の要素は印字可能ASCIIのみ・空文字列不可という
-# 型検証（_xrev_reviewer_launch_args）を経ており、要素自体に空白を含める運用は想定していない
-# （含めた場合は分解がずれて意味検証が拒否側に倒れるだけで、安全側にしか壊れない）。
+# 【argv 取得は sysctl(KERN_PROCARGS2) 経由（指摘2・再対処）】以前は「起動確認済みの launch 引数は
+# 印字可能ASCIIのみ・空文字列不可という型検証を経ているので、要素自体に空白を含める運用は想定しない」
+# という理由で `ps -o args=` の表示文字列を空白分割していた。だがこの理屈は cmux 自身が起動時に
+# 追加注入する argv（`--settings <JSON>` 等。probe-report.md R1 で実測）には及ばない — 注入された
+# 単一 argv 要素の**値の中**に空白区切りのフラグ文字列が現れると、空白分割はそれを独立した引数と
+# 誤認しうる（安全ポリシーの誤判定に直結する high 指摘）。
+#
+# 【指摘1（2巡目）への対処】以前は procargs2 の結果を「PID<TAB>argvのJSON配列」で受け取ってから
+# argv[1:] を bash へ改行区切りで戻し(`_xrev_procargs2_argv_tail`)、`while read` で配列へ再構成して
+# いた。argv 要素に生の改行が含まれる場合にこの往復で境界を失う（修正1と同根の high 指摘）。ここでは
+# PID の一覧だけを python へ渡し、「argv 取得(procargs2) → 安全ポリシー判定」を候補 PID ごとに同一
+# プロセス内で完結させる（いずれか1件が合格すればよい・従来と同じ判定契約）。
 _verify_reviewer_launch_args() {
   local surface="$1" kind="$2"
-  local top direct ps_out
+  local top direct
   top="$(_cmux_top_processes)"
   if [[ -z "$top" ]]; then
     _log "cmux top を取得できません（launch 引数の実効検証不可）。"
@@ -790,27 +907,34 @@ _verify_reviewer_launch_args() {
     _log "reviewer surface($surface)の直下プロセスを特定できません（launch 引数の実効検証不可）。"
     return 1
   fi
-  ps_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_args_snapshot)"
-  local line rest
-  local -a warr rest_args
-  while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-    # 先頭の PID フィールドだけを分離する（args 自体の空白は分割しない。_ps_args_snapshot 参照）。
-    rest="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]*//')"
-    [[ -n "$rest" ]] || continue
-    # shellcheck disable=SC2206  # 空白区切りで argv へ分解する（本関数のコメント参照）
-    warr=($rest)
-    rest_args=()
-    (( ${#warr[@]} > 1 )) && rest_args=("${warr[@]:1}")  # argv[0]（実行ファイルパス）を除く
-    # stderr も含めて捨てる: 直下プロセスは複数あり得て「いずれか1件が合格すればよい」判定なので、
-    # 他の候補（例: sleep サイドカーやログインシェル）が意味検証に落ちるのは正常フローであり、
-    # そのたびに理由を診断ログへ出すと分類のたびにノイズが積み重なる（_xrev_classify_reviewer と
-    # 同じ理由）。
-    if _xrev_verify_effective_policy "$kind" "${rest_args[@]+"${rest_args[@]}"}" >/dev/null 2>&1; then
-      return 0
-    fi
-  done <<< "$ps_out"
-  return 1
+  local drv
+  read -r -d '' drv <<'PY' || true
+import sys
+
+kind = sys.argv[1] if len(sys.argv) > 1 else ""
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        pid = int(line)
+    except ValueError:
+        continue
+    if pid <= 0:
+        continue
+    argv = _procargs2(pid)
+    if argv is None:
+        continue
+    # 直下プロセスは複数あり得て「いずれか1件が合格すればよい」判定なので、他の候補
+    # （例: sleep サイドカーやログインシェル）が不合格になるのは正常フローであり、そのたびに
+    # 理由を診断ログへ出すとノイズが積み重なる（_xrev_classify_reviewer と同じ理由）。
+    if _xrev_check_policy(kind, argv[1:]) is None:
+        sys.exit(0)
+sys.exit(1)
+PY
+  local prog
+  prog="$(_xrev_procargs2_py_src)"$'\n'"$(_xrev_policy_check_py_src)"$'\n'"$drv"
+  printf '%s\n' "$direct" | cut -f1 | python3 -c "$prog" "$kind"
 }
 
 # reviewer ペインの最終確定入力（プロンプト送信）。本文（1物理行）を送り終えたあとに呼ぶ。
@@ -1263,11 +1387,35 @@ _compute_submit_settle() {
   printf '%s' "$settle"
 }
 
+# claude reviewer 向けの composer クリア用: 送信する 0x08(BS) バイトの文字数（C2）。
+# 実測（probe-report.md R3）: claude composer は ctrl-u/ctrl-a/ctrl-k/ctrl-w/escape が効かず、
+# backspace は1回1文字で遅い。生の 0x08 バイトを1回の cmux send でまとめて送るのが実用的だった。
+# claude reviewer は参照モード専用（inline は送信前に拒否済み）なので、実際に cmux へ送る本文は
+# 参照 payload（diff 本文を含まない指示文）に限られ、想定される残骸長は小さい。マージンを載せた
+# 固定量を送る（上限あり）。
+_XREV_CLAUDE_CLEAR_BS_CHARS=4000
+
+# claude reviewer の composer クリア（cmux 依存）。generateした 0x08 バイト列を1回の send で送る。
+_cmux_clear_input_claude() {
+  local surface="$1" bs
+  _xrev_build_addr "$surface"
+  bs="$(python3 -c 'import sys; sys.stdout.write(chr(8) * '"$_XREV_CLAUDE_CLEAR_BS_CHARS"')')"
+  _cmux send "${_XREV_ADDR[@]}" "$bs" >/dev/null 2>&1 || true
+}
+
 # reviewer ペインの入力欄をクリアする（残留テキスト/ペーストチップの除去）。best-effort。
-# ctrl-u（行クリア）と backspace（ペーストチップ削除）のみ使う。ctrl-c/Escape は
-# 生成を中断し得るので使わない（アイドル化はしない=実行中の処理は止めない）。
+# 種別ごとにクリア手段が異なる（C2: reviewer 種別対応・実測知見）:
+#   codex : ctrl-u（行クリア）と backspace（ペーストチップ削除）が有効。
+#   claude: ctrl-u/ctrl-a/ctrl-k/ctrl-w/escape は無効（probe-report.md R3）。
+#           生の 0x08(BS) バイトの一括送信を使う（_cmux_clear_input_claude）。
+# ctrl-c/Escape は生成を中断し得るので使わない（アイドル化はしない=実行中の処理は止めない）。
+#   $1=surface, $2=reviewer種別(basename。省略時は codex 相当の挙動)
 _cmux_clear_input() {
-  local surface="$1" _i
+  local surface="$1" kind="${2:-codex}" _i
+  if [[ "$kind" == "claude" ]]; then
+    _cmux_clear_input_claude "$surface"
+    return
+  fi
   _xrev_build_addr "$surface"
   for _i in 1 2 3; do _cmux send-key "${_XREV_ADDR[@]}" ctrl-u >/dev/null 2>&1 || true; done
   for _i in 1 2 3 4 5 6; do _cmux send-key "${_XREV_ADDR[@]}" backspace >/dev/null 2>&1 || true; done
@@ -1378,15 +1526,16 @@ PY
 #   同期ずれ・RPC のフレーミング境界・UTF-8 の境界処理・受信側 TUI の負荷はいずれも**未確定の仮説**。
 #   確定するまで分割送信などの恒久修正を決め打ちしない。各試行の rc と stderr を捕捉して
 #   最終失敗時に診断ログへ出す（本文は伏せる）。
+#   $3=reviewer種別(basename。省略時 codex。C2: composer クリア手段の分岐に使う)
 _cmux_send_line() {
-  local surface="$1" line="$2" tries=0
+  local surface="$1" line="$2" kind="${3:-codex}" tries=0
   local max; max="$(_xrev_uint "${XREV_SEND_RETRIES:-5}" 1 20 5 'XREV_SEND_RETRIES')"
   local err rc rcs="" last_err=""
   # stderr はコマンド置換で受ける。**production に一時ファイルを持ち込まない**のが要点で、
   # 予測可能な名前による symlink 追従・権限・シグナル時の残留という問題群を構造的に排除する。
   # （_cmux は "$CMUX_BIN" "$@" で状態を持たないため、サブシェル化しても実挙動は変わらない。
   #   スタブが状態を持つのはテストの都合であり、その面倒はテスト側で引き受ける。）
-  _cmux_clear_input "$surface"          # 残留を除去してから送る（混入による prompt 破壊を防ぐ）
+  _cmux_clear_input "$surface" "$kind"   # 残留を除去してから送る（混入による prompt 破壊を防ぐ）
   _xrev_build_addr "$surface"
   while (( tries < max )); do
     err="$(_cmux send "${_XREV_ADDR[@]}" "$line" 2>&1 1>/dev/null)"; rc=$?
@@ -1395,7 +1544,7 @@ _cmux_send_line() {
     # 失敗：busy/残留の可能性 → 少し待ち、再度クリアして再試行（busy 解消を待つ）。
     tries=$(( tries + 1 ))
     _xrev_sleep 2
-    _cmux_clear_input "$surface"
+    _cmux_clear_input "$surface" "$kind"
   done
   # 全滅時のみ診断を出す（成功時に無用なログを増やさない）。バイト長は仮説検証の主要な手掛かり。
   local nbytes; nbytes="$(printf '%s' "$line" | wc -c | tr -d ' ')"
@@ -1404,13 +1553,38 @@ _cmux_send_line() {
   return 6
 }
 
-# 送信本文が入力欄に欠落なく到達したかを判定する（切り詰め検出）。
-#   stdout: "ok"（到達確認）/ "truncated"（文字数不一致＝切り詰め）/ "unknown"（確認不能）
-# Codex の TUI は長いペーストを「[Pasted Content N chars]」へ畳むため、END_ROUND マーカーは
-# 画面に出ない。その代わり表示される文字数 N が送信長と一致するかで欠落を検出する。
-# 短いペーストはインライン表示されるので、その場合は de-wrap して末尾マーカーで確認する。
+# 純粋関数（C2）: reviewer 種別ごとの送信完全性検証手段を決定する（fail closed）。
+#   入力: $1 = reviewer 種別（basename。呼び出し側が basename -- で取ってから渡す）
+#   出力(stdout): "paste_chip"（codex）/ "reference_only"（claude）。exit: 0=決定 / 1=未知種別(fail closed)
+# 【なぜ未知種別を拒否するか】codex はペーストチップの文字数照合を使う。claude はペーストチップに
+# 文字数を表示せず（実測 R2）codex と同じ照合が成立しないうえ、inline 向けの代替照合（空白非依存の
+# 全文一致照合）は完全性証明にならないと判明し撤去した（指摘3・2巡目）ため、claude は参照モード
+# 専用（inline は wire 長に関わらず無条件で送信前拒否。呼び出し元 xrev_transport_review 参照）。
+# それ以外の reviewer は検証手段が未確立なので、確認できないまま送信することを避け送信前に拒否する。
+_xrev_integrity_kind() {
+  case "$1" in
+    codex)  printf 'paste_chip' ;;
+    claude) printf 'reference_only' ;;
+    *) return 1 ;;
+  esac
+}
+
+# 送信本文が入力欄に欠落なく到達したかを判定する（切り詰め検出）。reviewer 種別で照合手段が
+# 異なる（C2: reviewer 種別対応・fail closed）。
+#   stdout: "ok"（到達確認）/ "truncated"（切り詰め）/ "unknown"（確認不能。codex のみの縮退）
+# codex: TUI は長いペーストを「[Pasted Content N chars]」へ畳むため、END_ROUND マーカーは
+#   画面に出ない。その代わり表示される文字数 N が送信長と一致するかで欠落を検出する。
+#   短いペーストはインライン表示されるので、その場合は de-wrap して末尾マーカーで確認する
+#   （どちらも確認できなければ unknown＝縮退。続行するが警告する）。
+# claude: 参照モード専用（xrev_transport_review が inline を無条件 exit28 で拒否するため、本関数は
+#   常に参照モードでのみ呼ばれる）。呼び出し元は claude のとき本関数自体を呼ばず intact="ok" を
+#   直接立てる（完全性は diff_hash + 基底 HEAD の端到端照合で別途保証されるため。呼び出し元の
+#   コメント参照）。かつて inline 向けに wire 文字列の空白非依存な全文一致照合を試みていたが、
+#   完全性証明にならないと判明し撤去した（経緯は references/protocol.md「切り詰め検出」節）。
+#   $1=surface, $2=elen(codex用の送信長), $3=marker(codex用の末尾マーカー),
+#   $4=reviewer種別(basename。省略時 codex。claude では呼ばれない)
 _check_paste_intact() {
-  local surface="$1" elen="$2" marker="$3" screen
+  local surface="$1" elen="$2" marker="$3" kind="${4:-codex}" screen
   screen="$(_cmux_read_screen "$surface")"
   XREV_ELEN="$elen" XREV_MARK="$marker" python3 -c '
 import os, sys, re
@@ -1491,8 +1665,10 @@ _xrev_reviewer_bin() {
 # (c) 起動後に実際に走っているプロセスの argv（`_verify_reviewer_launch_args`）, (d) 既存ペイン採用時の
 # 実効検証（`_xrev_verify_reviewer_policy`）の4箇所で共有する。
 
-# 純粋関数: 「最終的に reviewer へ渡る argv 列」が安全ポリシーを一意に満たすかを検証する（正典）。
-#   入力: $1 = reviewer 種別（basename。codex / claude）, $2.. = 最終 argv 列（0件可）
+# 【共有の実体・その2】「argv 列が安全ポリシーを一意に満たすか」を判定する純粋 python 関数
+# `_xrev_check_policy(kind, argv)` の定義だけを stdout に返す（副作用なし・実行はしない・
+# sys.exit や stderr 出力もしない）。戻り値は合格時 None / 不合格時は理由の文字列。
+#   入力: kind = reviewer 種別（basename。codex / claude）, argv = 最終 argv 列（0件可）
 #   認識する引数形式（codex）:
 #     sandbox   = `--sandbox <値>` / `--sandbox=<値>` / `-s <値>` / `-s<値>`（結合形式）
 #     approval  = `--ask-for-approval <値>` / `--ask-for-approval=<値>` / `-a <値>` / `-a<値>`（結合形式）
@@ -1509,6 +1685,85 @@ _xrev_reviewer_bin() {
 #     ことを要求する（claude は短縮形を持たないため、それ以外の形式は単に「該当なし」として扱われ、
 #     結果的に「指定なし」で fail closed になる）。
 #   未知の reviewer 種別: fail closed（拒否）。
+#
+# 【指摘1（2巡目）への対処・この関数を共有する理由】判定の実体（sandbox/approval/permission-mode の
+# 認識形式・危険フラグ一覧）をここ1箇所にまとめ、(a) 改行を含まない trusted argv（launch 引数決定
+# 直後・start-reviewer.sh の最終 argv）を検証する `_xrev_verify_effective_policy`、(b) KERN_PROCARGS2
+# 由来の untrusted argv（既存ペイン採用・起動後検証）を単一 python プロセス内で判定する
+# `_xrev_verify_foreground_policy` / `_verify_reviewer_launch_args` の両方がこの1関数を呼ぶ。
+# 判定リストを二重管理しない。
+_xrev_policy_check_py_src() {
+  cat <<'PY'
+def _xrev_check_policy(kind, argv):
+    def collect(args, long_flag, short_flag=None):
+        # long_flag（空白区切り/=形式）と short_flag（空白区切り/結合形式）の実効値を左から集める。
+        # 呼び出し側で len(values) を検証する（0=指定なし、2以上=複数指定として fail closed）。
+        values = []
+        long_eq = long_flag + "="
+        i, n = 0, len(args)
+        while i < n:
+            a = args[i]
+            if a == long_flag:
+                if i + 1 >= n:
+                    return None, "%s の値がありません" % long_flag
+                values.append(args[i + 1]); i += 2; continue
+            if a.startswith(long_eq):
+                values.append(a[len(long_eq):]); i += 1; continue
+            if short_flag is not None:
+                if a == short_flag:
+                    if i + 1 >= n:
+                        return None, "%s の値がありません" % short_flag
+                    values.append(args[i + 1]); i += 2; continue
+                if a.startswith(short_flag) and len(a) > len(short_flag):
+                    values.append(a[len(short_flag):]); i += 1; continue
+            i += 1
+        return values, None
+
+    if kind == "codex":
+        # サンドボックス/承認を丸ごと外す既知フラグ（完全一致。1箇所にまとめる）。
+        DANGEROUS_EXACT = (
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--full-auto",
+            "--yolo",
+        )
+        for a in argv:
+            if a in DANGEROUS_EXACT:
+                return "サンドボックス/承認を丸ごと外すフラグが含まれています: %s" % a
+        sandbox_vals, err = collect(argv, "--sandbox", "-s")
+        if err:
+            return err
+        approval_vals, err = collect(argv, "--ask-for-approval", "-a")
+        if err:
+            return err
+        if len(sandbox_vals) != 1:
+            return "sandbox 指定が一意ではありません（%d 件）" % len(sandbox_vals)
+        if len(approval_vals) != 1:
+            return "承認ポリシー指定が一意ではありません（%d 件）" % len(approval_vals)
+        if sandbox_vals[0] != "read-only":
+            return "sandbox の実効値が read-only ではありません: %s" % sandbox_vals[0]
+        if approval_vals[0] != "never":
+            return "承認ポリシーの実効値が never ではありません: %s" % approval_vals[0]
+        return None  # 合格
+    elif kind == "claude":
+        perm_vals, err = collect(argv, "--permission-mode", None)
+        if err:
+            return err
+        if len(perm_vals) != 1:
+            return "--permission-mode 指定が一意ではありません（%d 件）" % len(perm_vals)
+        if perm_vals[0] != "plan":
+            return "--permission-mode の実効値が plan ではありません: %s" % perm_vals[0]
+        return None  # 合格
+    else:
+        return "未知の reviewer 種別です: %s" % kind
+PY
+}
+
+# 純粋関数: 「最終的に reviewer へ渡る argv 列」が安全ポリシーを一意に満たすかを検証する（正典）。
+# 判定の実体は `_xrev_policy_check_py_src`（共有）。本関数はその薄いドライバで、コマンドライン引数
+# として渡された argv（改行を含まない trusted な入力: launch 引数決定直後・start-reviewer.sh の
+# 最終 argv）を検証する用途に使う。KERN_PROCARGS2 由来の untrusted argv は本関数を経由せず
+# `_xrev_verify_foreground_policy` / `_verify_reviewer_launch_args`（単一プロセス内で完結）を使う。
+#   入力: $1 = reviewer 種別（basename。codex / claude）, $2.. = 最終 argv 列（0件可）
 #   出力: 合格時は stdout に何も書かない（exit 0。終了コードのみで成否を表現する）/ 不合格時は
 #     stderr に理由（exit 非ゼロ）。
 #   【重要・不具合A（実機で発生した回帰）への対処】この関数は「stdout が結果チャネルである経路」
@@ -1520,73 +1775,17 @@ _xrev_reviewer_bin() {
 #   合格時に何も出力しないことで、この種の事故を構造的に起こり得なくする。
 _xrev_verify_effective_policy() {
   local prog
-  read -r -d '' prog <<'PY' || true
+  prog="$(_xrev_policy_check_py_src)
 import sys
 
-def die(msg):
-    sys.stderr.write("[xrev/transport] 安全ポリシー検証失敗: %s\n" % msg)
-    sys.exit(1)
-
 if len(sys.argv) < 2:
-    die("reviewer 種別が指定されていません")
-kind = sys.argv[1]
-argv = sys.argv[2:]
-
-def collect(args, long_flag, short_flag=None):
-    # long_flag（空白区切り/=形式）と short_flag（空白区切り/結合形式）の実効値を左から集める。
-    # 呼び出し側で len(values) を検証する（0=指定なし、2以上=複数指定として fail closed）。
-    values = []
-    long_eq = long_flag + "="
-    i, n = 0, len(args)
-    while i < n:
-        a = args[i]
-        if a == long_flag:
-            if i + 1 >= n:
-                die("%s の値がありません" % long_flag)
-            values.append(args[i + 1]); i += 2; continue
-        if a.startswith(long_eq):
-            values.append(a[len(long_eq):]); i += 1; continue
-        if short_flag is not None:
-            if a == short_flag:
-                if i + 1 >= n:
-                    die("%s の値がありません" % short_flag)
-                values.append(args[i + 1]); i += 2; continue
-            if a.startswith(short_flag) and len(a) > len(short_flag):
-                values.append(a[len(short_flag):]); i += 1; continue
-        i += 1
-    return values
-
-if kind == "codex":
-    # サンドボックス/承認を丸ごと外す既知フラグ（完全一致。1箇所にまとめる）。
-    DANGEROUS_EXACT = (
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--full-auto",
-        "--yolo",
-    )
-    for a in argv:
-        if a in DANGEROUS_EXACT:
-            die("サンドボックス/承認を丸ごと外すフラグが含まれています: %s" % a)
-    sandbox_vals = collect(argv, "--sandbox", "-s")
-    approval_vals = collect(argv, "--ask-for-approval", "-a")
-    if len(sandbox_vals) != 1:
-        die("sandbox 指定が一意ではありません（%d 件）" % len(sandbox_vals))
-    if len(approval_vals) != 1:
-        die("承認ポリシー指定が一意ではありません（%d 件）" % len(approval_vals))
-    if sandbox_vals[0] != "read-only":
-        die("sandbox の実効値が read-only ではありません: %s" % sandbox_vals[0])
-    if approval_vals[0] != "never":
-        die("承認ポリシーの実効値が never ではありません: %s" % approval_vals[0])
-    # 合格。何も出力しない（成否は終了コードのみで表現する。関数コメント「不具合Aへの対処」参照）。
-elif kind == "claude":
-    perm_vals = collect(argv, "--permission-mode", None)
-    if len(perm_vals) != 1:
-        die("--permission-mode 指定が一意ではありません（%d 件）" % len(perm_vals))
-    if perm_vals[0] != "plan":
-        die("--permission-mode の実効値が plan ではありません: %s" % perm_vals[0])
-    # 合格。何も出力しない（同上）。
-else:
-    die("未知の reviewer 種別です: %s" % kind)
-PY
+    sys.stderr.write(\"[xrev/transport] 安全ポリシー検証失敗: reviewer 種別が指定されていません\n\")
+    sys.exit(1)
+_err = _xrev_check_policy(sys.argv[1], sys.argv[2:])
+if _err:
+    sys.stderr.write(\"[xrev/transport] 安全ポリシー検証失敗: %s\n\" % _err)
+    sys.exit(1)
+"
   python3 -c "$prog" "$@"
 }
 
@@ -1942,6 +2141,32 @@ xrev_transport_review() {
   # （_xrev_gate_reviewer が複数回呼ばれるため。往復ごとに毎回リセットする）。
   _XREV_UNVERIFIED_WARNED=""
   _cmux_preflight || return $?
+
+  # reviewer 種別（REVIEWER_PROCESS の basename）に応じた送信完全性検証手段を決定する（C2）。
+  # 未知種別（codex/claude 以外）は検証手段が確立していないため、cmux とやり取りする前に
+  # fail closed で拒否する（新設 exit 28 = integrity_unverifiable）。
+  local kind integrity_kind
+  kind="$(basename -- "$REVIEWER_PROCESS")"
+  if ! integrity_kind="$(_xrev_integrity_kind "$kind")"; then
+    _log "reviewer 種別 '${kind}' は送信完全性の検証手段が確立していません（codex/claude 以外は fail closed）。"
+    return 28
+  fi
+
+  # 【指摘3への対処・claude は参照モード専用】claude reviewer への inline 送信（本文をそのまま
+  # wire に載せる方式）は、wire 長に関わらず完全性を確認する手段が無い。以前は composer 上で
+  # wire 文字列と de-wrap 後の画面テキストを空白非依存で全文一致照合する経路を、一定の wire 長
+  # 以下でのみ試みていたが、「空白の削除と挿入が相殺すれば比較・frame 検証のどちらもすり抜ける」
+  # という2巡目クロスレビューの指摘（medium）を受け、完全性の証明にはならない可用性ヒューリス
+  # ティックにすぎないと判断し撤去した（経緯は references/protocol.md「切り詰め検出」節）。
+  # よって claude・inline は wire 長に関わらず無条件で cmux へは一切送信せず中止する
+  # （exit 28 = integrity_unverifiable）。参照モード（XREV_REFERENCE_MODE=1）は本文を wire に
+  # 載せず reviewer に自分の作業ツリーで diff-hash を取得させて返させる方式のため、この制限の
+  # 対象外（完全性は diff_hash + 基底 HEAD の端到端照合が別途保証する。「参照モード」節参照）。
+  if [[ "$kind" == "claude" && "${XREV_REFERENCE_MODE:-}" != "1" ]]; then
+    _log "claude reviewer は参照モード専用です（inline は送信完全性を検証できないため無条件で拒否します）。実装フェーズは参照モード（XREV_REFERENCE_MODE=1）を使うこと。"
+    return 28
+  fi
+
   # 宛先解決（同一WSスコープ）。グローバル(_XREV_RES_*)を使うためサブシェルにしない。
   # 失敗コード（10/15/16/3）はそのまま返す（review-loop 側で transport_reason に写像）。
   local surface
@@ -2069,25 +2294,37 @@ xrev_transport_review() {
   esac
 
   # 1物理行を送信 → 描画待ち → 切り詰め検出 → Enter 1回で確定。
-  _cmux_send_line "$surface" "$line" || { _log "送信に失敗しました。"; return 11; }
+  _cmux_send_line "$surface" "$line" "$kind" || { _log "送信に失敗しました。"; return 11; }
   _xrev_sleep "$(_compute_submit_settle "${#line}")"
-  # 切り詰め検出: 入力欄に送信本文が欠落なく到達したかを確認する。
-  #   確認できた(ok) → submit / 文字数不一致(truncated) → 中止 / 確認不能(unknown) → 警告して続行。
+  # 切り詰め検出: 入力欄に送信本文が欠落なく到達したかを確認する（reviewer 種別で照合手段が異なる。
+  # C2: codex=ペーストチップ文字数照合 / claude=参照モード専用のため本節の照合自体を行わない）。
+  #   確認できた(ok) → submit / 不一致(truncated) → 中止 / 確認不能(unknown。codex のみ) → 警告して続行。
   # 確認不能で中止すると正常な往復まで壊すため、確実な不一致のときだけ失敗にする。
+  #
+  # 【claude は必ず参照モード】上の送信前ゲートで claude・inline は無条件 exit28 済みなので、
+  # ここに到達する claude は常に参照モード（XREV_REFERENCE_MODE=1）である。参照モードは本文を
+  # wire に載せないため、この照合を行っても意味を持たない（完全性は diff_hash + 基底 HEAD の
+  # 端到端照合が別途保証する。「参照モード」節参照）。よって claude は常に照合をスキップして
+  # "ok" 扱いにする。
   local end_marker="END_ROUND_${round_id}" intact="unknown" t=0
-  while (( t < 8 )); do
-    intact="$(_check_paste_intact "$surface" "${#line}" "$end_marker")"
-    [[ "$intact" == "ok" || "$intact" == "truncated" ]] && break
-    _xrev_sleep 1; t=$(( t + 1 ))
-  done
+  if [[ "$kind" == "claude" ]]; then
+    intact="ok"
+  else
+    while (( t < 8 )); do
+      intact="$(_check_paste_intact "$surface" "${#line}" "$end_marker" "$kind")"
+      [[ "$intact" == "ok" || "$intact" == "truncated" ]] && break
+      _xrev_sleep 1; t=$(( t + 1 ))
+    done
+  fi
   if [[ "$intact" == "truncated" ]]; then
-    _log "ペースト文字数が送信長(${#line})と一致しません。切り詰めの恐れがあるため中止します。"
+    _log "送信本文の到達を確認できませんでした（長さ=${#line}）。切り詰めの恐れがあるため中止します。"
     return 13
   fi
   # 【縮退の可視化・変更2】ここに到達するのは "ok" か "unknown" のみ（"truncated" は上で return 済み）。
-  # unknown は fail closed にすると正常運用まで壊すため続行はするが、この経路が恒常化するのは
-  # 切り詰め検出そのものが実質無効化されている（＝防護の縮退）ことを意味するため、利用者が
-  # 見逃さないよう理由候補と保守手順まで含めた警告にする（挙動自体は従来どおり「続行」のまま）。
+  # unknown は codex 経路のみの縮退（claude は常に上の分岐で "ok" になるためここへは来ない）。
+  # fail closed にすると正常運用まで壊すため続行はするが、この経路が恒常化するのは切り詰め検出
+  # そのものが実質無効化されている（＝防護の縮退）ことを意味するため、利用者が見逃さないよう
+  # 理由候補と保守手順まで含めた警告にする（挙動自体は従来どおり「続行」のまま）。
   if [[ "$intact" != "ok" ]]; then
     _log "警告: ペースト到達を確認できませんでした（確認不能=unknown）。続行しますが切り詰め検出は機能していません。"
     _log "確認不能の理由候補: (a) Codex TUI の「Pasted Content N chars」表示文言がバージョンアップで変わった"
@@ -2359,6 +2596,37 @@ xrev_doctor() {
     _doctor_report ok "ps 契約" "pid pgid tpgid comm の4フィールドを確認しました（$(printf '%s' "$ps_out" | head -1)）"
   else
     _doctor_report fail "ps 契約" "ps が「pid pgid tpgid comm」の4フィールドを返しません（出力=${ps_out}）"
+  fi
+
+  # 7b) argv 境界保持取得(procargs2) 自己診断: 自プロセスの argv を sysctl(KERN_PROCARGS2) で
+  # 取得できるか（指摘2で導入した新方式そのものの生死診断）。非 macOS・権限不足では成立しないのが
+  # 仕様（安全ポリシー実効検証は fail closed に倒れる）なので、ここでは warn に留めて環境情報として
+  # 扱う（fail にはしない。CI の Linux ジョブでも成立しない前提）。
+  local procargs_out
+  procargs_out="$(printf '%s\n' "$$" | _xrev_procargs2_snapshot)"
+  if [[ -n "$procargs_out" ]] && printf '%s\n' "$procargs_out" | python3 -c '
+import json, sys
+ok = True
+seen = False
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    pid_s, tab, blob = line.partition("\t")
+    if not tab:
+        ok = False; break
+    try:
+        argv = json.loads(blob)
+    except ValueError:
+        ok = False; break
+    if not isinstance(argv, list) or not argv:
+        ok = False; break
+    seen = True
+sys.exit(0 if (ok and seen) else 1)
+' 2>/dev/null; then
+    _doctor_report ok "argv境界保持取得(procargs2)" "自プロセスの argv を sysctl(KERN_PROCARGS2) 経由で取得できました"
+  else
+    _doctor_report warn "argv境界保持取得(procargs2)" "この環境では sysctl(KERN_PROCARGS2) 経由の argv 取得ができません（非macOS・権限不足の可能性。安全ポリシー実効検証は fail closed で exit 27/19 になります）"
   fi
 
   # 8) reviewer 解決: 環境状態の情報表示（present以外もfailにはしない）

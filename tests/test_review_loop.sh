@@ -95,6 +95,15 @@ assert_rc "trc=25 で rc=22(transport_error)" 22 "$rc"
 assert_eq "trc=25 は decision=transport_error" "transport_error" "$(printf '%s' "$out" | json_get decision)"
 assert_eq "trc=25 は transport_reason=submit_failed" "submit_failed" "$(printf '%s' "$out" | json_get transport_reason)"
 
+# trc=28（C2: reviewer 種別の送信完全性検証が確立できない。未知種別 or claude の wire が
+# 全文一致照合の上限超過）→ transport_error / integrity_unverifiable として写像される。
+_stub_integrity_unverifiable() { return 28; }
+out="$(printf '%s' "ダミー差分" | XREV_REVIEW_FN=_stub_integrity_unverifiable _xrev_review_loop_run 1)"; rc=$?
+assert_rc "trc=28 で rc=22(transport_error)" 22 "$rc"
+assert_eq "trc=28 は decision=transport_error" "transport_error" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "trc=28 は transport_reason=integrity_unverifiable" "integrity_unverifiable" \
+  "$(printf '%s' "$out" | json_get transport_reason)"
+
 # ── ループ安全弁: round_state（通算 transport 試行の上限・巻戻し検知）──
 _stub_approve2() { printf '%s' '{"verdict":"approve","findings":[]}'; }
 
@@ -218,7 +227,9 @@ assert_eq "reference_context 欠落 → reference_unverified" "reference_unverif
 out="$(printf '%s' "x" | XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH=ABC XREV_REVIEW_FN=_stub_ref_ok _xrev_review_loop_run 1)"
 assert_eq "期待HEAD未設定 → reference_unverified" "reference_unverified" "$(printf '%s' "$out" | json_get decision)"
 
-# transport が同一WS外を拒否(exit18) → reference_unverified（inline へ切替）
+# transport が同一WS外を拒否(exit18) → reference_unverified（回復手段は reviewer 種別依存。
+# codex=inline へ切替 / claude=同一 ITER・参照モードのまま再試行。詳細は下記の同一ITER再試行
+# シーケンステスト、および references/protocol.md「切り詰め検出」節）
 out="$(printf '%s' "x" | XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH=ABC XREV_EXPECT_HEAD=H1 XREV_REVIEW_FN=_stub_ref_18 _xrev_review_loop_run 1)"; rc=$?
 assert_rc "同一WS外拒否(18)でも rc=0" 0 "$rc"
 assert_eq "同一WS外(exit18) → reference_unverified" "reference_unverified" "$(printf '%s' "$out" | json_get decision)"
@@ -227,6 +238,38 @@ assert_eq "同一WS外(exit18) → reference_unverified" "reference_unverified" 
 out="$(printf '%s' "x" | XREV_MAX_REFERENCE_FALLBACKS=3 XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH=ABC XREV_EXPECT_HEAD=H1 XREV_ROUND_STATE='{"transport_attempts":1,"iter":1,"reference_fallbacks":3}' XREV_REVIEW_FN=_stub_ref_diff_ng _xrev_review_loop_run 1)"
 assert_eq "fallback 上限超 → escalate" "escalate" "$(printf '%s' "$out" | json_get decision)"
 assert_eq "fallback 上限超の理由 max_reference_fallbacks" "max_reference_fallbacks" "$(printf '%s' "$out" | json_get state_violation)"
+
+# ── 修正2（decision-impl-2.json）: claude reviewer の reference_unverified 回復契約 ──────
+# claude reviewer では reference_unverified からの回復は「inline へのフォールバック」ではなく
+# 「同一 ITER・参照モードのまま再試行」である。review-loop.sh の状態機械自体は reviewer 種別を
+# 判別しないため、この契約は「同一 ITER・XREV_REFERENCE_MODE=1 を維持したまま呼び出しを繰り返す」
+# 呼び出し側の使い方だけで実現される。ここでは実際にそのシーケンスを模し、reference_fallbacks が
+# 正しく積み上がり、上限超過で escalate することを確認する（既存の reference_fallbacks 加算・
+# 上限超過 escalate のテストがこの契約でも意味を持つことの裏取り）。
+_stub_ref_seq_ng() { printf '%s' '{"verdict":"approve","findings":[],"reference_context":{"mode":"reference","status":"verified","head":"H1","diff_hash":"WRONG"}}'; }
+_rs='{"transport_attempts":0,"iter":1,"reference_fallbacks":0}'
+# 1回目: 同一 ITER(=1)・参照モードのまま送信 → 不一致 → reference_unverified・fb=1。
+out="$(printf '%s' "x" | XREV_MAX_REFERENCE_FALLBACKS=2 XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH=ABC XREV_EXPECT_HEAD=H1 \
+  XREV_ROUND_STATE="$_rs" XREV_REVIEW_FN=_stub_ref_seq_ng _xrev_review_loop_run 1)"
+assert_eq "同一ITER再試行1回目 → reference_unverified" "reference_unverified" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "同一ITER再試行1回目 → reference_fallbacks=1" "1" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["round_state"]["reference_fallbacks"])')"
+_rs="$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["round_state"]))')"
+# 2回目: primary は同一 ITER(=1)・XREV_REFERENCE_MODE=1 を維持したまま round_state だけ引き継いで
+# 再送する（inline へは切り替えない）。まだ上限(2)以内なので reference_unverified・fb=2。
+out="$(printf '%s' "x" | XREV_MAX_REFERENCE_FALLBACKS=2 XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH=ABC XREV_EXPECT_HEAD=H1 \
+  XREV_ROUND_STATE="$_rs" XREV_REVIEW_FN=_stub_ref_seq_ng _xrev_review_loop_run 1)"
+assert_eq "同一ITER再試行2回目 → まだ reference_unverified" "reference_unverified" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "同一ITER再試行2回目 → reference_fallbacks=2" "2" \
+  "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["round_state"]["reference_fallbacks"])')"
+_rs="$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["round_state"]))')"
+# 3回目: 同じ同一ITER・参照モードのまま再試行しても上限(2)を超えるため escalate（人間へ）。
+out="$(printf '%s' "x" | XREV_MAX_REFERENCE_FALLBACKS=2 XREV_REFERENCE_MODE=1 XREV_EXPECT_DIFF_HASH=ABC XREV_EXPECT_HEAD=H1 \
+  XREV_ROUND_STATE="$_rs" XREV_REVIEW_FN=_stub_ref_seq_ng _xrev_review_loop_run 1)"
+assert_eq "同一ITER再試行3回目(上限超) → escalate" "escalate" "$(printf '%s' "$out" | json_get decision)"
+assert_eq "同一ITER再試行3回目 → 違反理由 max_reference_fallbacks" "max_reference_fallbacks" \
+  "$(printf '%s' "$out" | json_get state_violation)"
+unset _rs
 
 # 参照モード OFF（既定）では検証しない（inline は従来どおり）
 out="$(printf '%s' "x" | XREV_REVIEW_FN=_stub_ref_diff_ng _xrev_review_loop_run 1)"

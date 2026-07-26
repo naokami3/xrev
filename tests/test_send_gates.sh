@@ -23,7 +23,7 @@
 # だけ」を返す契約であることも固定する（検証系の関数が stdout に何か書いてしまう回帰があると
 # review-loop 側の JSON パースが壊れた実績があるため）。
 #
-# cmux 非依存: 配管の入出力はすべてスタブし、検証結果の並びを台本で与える。
+# cmux 非依存: 通信層の入出力はすべてスタブし、検証結果の並びを台本で与える。
 
 export XREV_CONFIG="$DEFAULT_CONFIG"
 # shellcheck source=/dev/null
