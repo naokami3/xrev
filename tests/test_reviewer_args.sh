@@ -7,10 +7,18 @@ export XREV_CONFIG="$DEFAULT_CONFIG"
 # shellcheck source=/dev/null
 source "$SCRIPTS/transport.sh"
 
-# ── (a) 既定 config で codex → 2行（--sandbox, read-only）──────────────────────
+# ── (a) 既定 config で codex → sandbox と承認ポリシーの組 ──────────────────────
+# 【この組を崩さないこと】--sandbox read-only は「何ができるか」を縛るだけで、コマンド実行のたびに
+# 人間へ承認を求めるかは --ask-for-approval が決める別の軸。承認を既定のままにすると reviewer が
+# git diff / tests/run.sh を実行するたびに承認プロンプトで停止し、「人間の操作なしで往復させる」
+# という xrev の目的が成立しない（実機で発生。参照モードは必ずこの経路を踏む）。
+# never は「承認を求めず失敗はモデルへ返す」であり、read-only サンドボックスはそのまま効いている。
+# 逆に sandbox 指定なしで never だけを付けると承認もサンドボックスも無い状態になるため、
+# **両方が揃っていること**を検証する。詳細は references/protocol.md。
 out="$(_xrev_reviewer_launch_args codex)"; rc=$?
 assert_rc "codex: 既定 launch 引数の取得は成功" 0 "$rc"
-assert_eq "codex: 既定 launch 引数" $'--sandbox\nread-only' "$out"
+assert_eq "codex: 既定 launch 引数（sandbox と承認ポリシーの組）" \
+  $'--sandbox\nread-only\n--ask-for-approval\nnever' "$out"
 
 # ── (b) 既定 config で claude → --permission-mode / plan ──────────────────────
 out="$(_xrev_reviewer_launch_args claude)"; rc=$?
@@ -20,7 +28,15 @@ assert_eq "claude: 既定 launch 引数" $'--permission-mode\nplan' "$out"
 # basename を取ってから照合する（フルパス指定でも既定 config の codex 分が引ける）
 out="$(_xrev_reviewer_launch_args /usr/local/bin/codex)"; rc=$?
 assert_rc "フルパス指定も basename で照合され成功" 0 "$rc"
-assert_eq "フルパス指定でも既定 launch 引数" $'--sandbox\nread-only' "$out"
+assert_eq "フルパス指定でも既定 launch 引数" \
+  $'--sandbox\nread-only\n--ask-for-approval\nnever' "$out"
+
+# 既定 config の不変条件: codex の launch 引数には sandbox と承認ポリシーが**両方**含まれること
+# （片方だけの設定は「承認プロンプトで往復停止」か「無制限実行」のどちらかになる）。
+assert_contains "既定 config: sandbox 指定を含む" "$out" "--sandbox"
+assert_contains "既定 config: read-only を含む" "$out" "read-only"
+assert_contains "既定 config: 承認ポリシー指定を含む" "$out" "--ask-for-approval"
+assert_contains "既定 config: 承認ポリシーは never" "$out" "never"
 
 # ── (c) 未知の reviewer（例 foobar）→ 非ゼロ・エラーメッセージに reviewer 名 ────────
 err="$(_xrev_reviewer_launch_args foobar 2>&1 1>/dev/null)"; rc=$?

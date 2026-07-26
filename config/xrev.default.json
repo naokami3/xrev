@@ -13,7 +13,7 @@
   "transport": "cmux",
   "reviewer_process": "codex",
   "reviewer_launch_args": {
-    "codex": ["--sandbox", "read-only"],
+    "codex": ["--sandbox", "read-only", "--ask-for-approval", "never"],
     "claude": ["--permission-mode", "plan"]
   },
   "reviewer_autocreate": "ask",

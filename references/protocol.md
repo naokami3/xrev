@@ -283,7 +283,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | `adr_dir` | `docs/adr` | ADR の出力ディレクトリ（相対は対象リポジトリ基準 / 絶対パス可） |
 | `transport` | `cmux` | 配管実装の選択（将来の差し替え点） |
 | `reviewer_process` | `codex` | 送信前プロセス証明で対象 surface の直下に在るべきプロセス名 |
-| `reviewer_launch_args` | `{"codex":["--sandbox","read-only"],"claude":["--permission-mode","plan"]}` | reviewer バイナリ名をキーに持つ object。起動経路（`start-reviewer.sh` / `ensure-reviewer` の自動生成）で機械的に付与する read-only 相当の起動引数。既存ペインを採用する経路では強制しない |
+| `reviewer_launch_args` | `{"codex":["--sandbox","read-only","--ask-for-approval","never"],"claude":["--permission-mode","plan"]}` | reviewer バイナリ名をキーに持つ object。起動経路（`start-reviewer.sh` / `ensure-reviewer` の自動生成）で機械的に付与する read-only 相当の起動引数。既存ペインを採用する経路では強制しない |
 | `reviewer_autocreate` | `ask` | reviewer ペインの自動生成方針。`ask`(スキルが一拍確認で確認後生成)/`auto`(無確認で生成)/`off`(生成せず案内) |
 | `reviewer_create_timeout_seconds` | `30` | 自動生成時の codex 起動確認・競合待ちの上限秒。範囲 1..600 |
 | `allow_global_resolve` | `false` | `CMUX_SURFACE_ID` 未注入時のグローバル解決を許すか（危険・opt-in） |
@@ -373,6 +373,17 @@ SKILL.md は「reviewer = レビュー専用・read-only」と約束する。こ
 - **起動後の実効検証**: 自動生成経路は起動確認（read-screen probe + プロセス証明）に加え、
   `_verify_reviewer_launch_args` で対象 surface の直下プロセスの実コマンドライン（`ps -o pid=,args=`）に
   launch 引数がすべて含まれることを確認してから採用する。確認できなければ `exit 19`（採用しない）。
+- **サンドボックスと承認は別軸である（既定に両方を含める理由）**: codex の `--sandbox read-only` は
+  「何ができるか」を縛るが、コマンド実行のたびに人間へ承認を求めるかどうかは `--ask-for-approval` が
+  決める別の軸である。承認ポリシーを既定のままにすると、reviewer が `git diff` や `tests/run.sh` を
+  実行しようとするたびに承認プロンプトで停止し、**人間の操作なしに往復させる**という xrev の目的が
+  成立しない（応答が来ないまま `response_timeout_seconds` を使い切る）。とくに参照モードは reviewer 自身に
+  diff 取得を行わせるため必ずこの経路を踏む。よって既定は `--sandbox read-only --ask-for-approval never`
+  の**組**とする。`never` は「承認を求めず、実行失敗はモデルへ返す」の意味であり、サンドボックスは
+  そのまま効いている（書き込み・ネットワークは read-only サンドボックスが禁じる）。承認プロンプトを
+  外すことは権限の緩和ではなく、権限の強制を sandbox 側へ一本化することである。
+  **片方だけを設定してはならない**: `--ask-for-approval never` を sandbox 指定なしで使うと、承認も
+  サンドボックスも無い状態になる。この組を崩す変更は安全性の変更として扱うこと。
 - **限界**: 既存ペインを「採用」する経路（classify → present）では launch 引数を検証しない
   （ユーザーが手動で用意した端末を壊さないための意図的な限界）。同名の別バイナリへの差し替えや、
   codex/claude 自身の設定ファイル側での上書きまでは検出・保証しない（詳細は
