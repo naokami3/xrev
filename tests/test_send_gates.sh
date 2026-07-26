@@ -145,11 +145,18 @@ _xrev_verify_reviewer_policy() {
   return "$r"
 }
 _detect_content_type() { printf 'plain'; }
-_build_framed_line() { printf 'FRAMED_LINE_FOR_TEST'; }
+# 【重要・flake 防止】本番コードは `printf '%s' "$payload" | _build_framed_line ...` のように
+# パイプで stdin を渡し、transport.sh は set -o pipefail の下で動く。スタブが stdin を読まずに
+# 即終了すると、書き手の printf が SIGPIPE で死に pipefail によりパイプライン全体が非ゼロになる
+# （= encode 失敗 rc23 等と誤判定）。書き込みとスタブ終了のどちらが先かはタイミング次第なので、
+# 負荷の高い CI でだけ落ちる flake になる（実際に macOS CI で発生）。stdin を受け取るスタブは
+# 必ず `cat >/dev/null` で読み切ること。
+_build_framed_line() { cat >/dev/null; printf 'FRAMED_LINE_FOR_TEST'; }
 _cmux_read_screen() { printf ''; }
 # submit 済みなら「新着1件」を返す。応答待ちループを抜けさせると同時に、
 # submit より前に応答が観測されないこと（＝順序）も担保する。
 _scan_review_blocks() {
+  cat >/dev/null   # stdin を読み切る（上記 flake 防止のため必須）
   case "$_SG_CALLS" in
     *submit*) printf '1\n{"round_id":"x","verdict":"approve","findings":[]}' ;;
     *)        printf '0' ;;
@@ -216,12 +223,12 @@ assert_eq   "プロセス証明は 1 往復で 3 回走る" "3" "$_SG_VP_I"
 #    検証するため、上限そのものを小さく差し替え、_build_framed_line のスタブ出力を上限超にする。
 _SG_SAVED_MAX="$WIRE_MAX_CHARS"
 WIRE_MAX_CHARS=1000
-_build_framed_line() { printf 'x%.0s' {1..2000}; }
+_build_framed_line() { cat >/dev/null; printf 'x%.0s' {1..2000}; }
 _sg_run 0 0 0
 assert_rc   "wire 上限超 → rc26" 26 "$_SG_RC"
 assert_eq   "wire 上限超 → send も submit も呼ばれない" "" "$_SG_CALLS"
 WIRE_MAX_CHARS="$_SG_SAVED_MAX"
-_build_framed_line() { printf 'FRAMED_LINE_FOR_TEST'; }
+_build_framed_line() { cat >/dev/null; printf 'FRAMED_LINE_FOR_TEST'; }
 
 # 7) 変更1: 完成しているが壊れた応答（実機で観測したバグ）→ タイムアウトを待たず即座に rc24。
 #    _scan_review_blocks は「妥当な応答なし」を返すよう固定し、_cmux_read_screen は
@@ -235,7 +242,7 @@ RESP_TIMEOUT=100000    # 意図的に巨大値。もしタイムアウト待ち�
 RESP_POLL=1
 SETTLE_SECS=0
 XREV_ROUND_ID="rBROKEN"
-_scan_review_blocks() { printf '0'; }  # 妥当な応答は一切無い（常に新着0件）
+_scan_review_blocks() { cat >/dev/null; printf '0'; }  # 妥当な応答は一切無い（常に新着0件）
 _SG_BROKEN_SCREEN="$SENTINEL_BEGIN"$'\n{"round_id":"rBROKEN","verdict":"approve","findings":[{"file":"a","severity":"high","category":"bug","message":"彼は"だめ"と言った"}]}\n'"$SENTINEL_END"
 _cmux_read_screen() {
   case "$_SG_CALLS" in
@@ -249,6 +256,7 @@ assert_eq "壊れた完成応答でも send/submit は正常に完了してい�
 RESP_TIMEOUT="$_SG_SAVED_TIMEOUT"; RESP_POLL="$_SG_SAVED_POLL"; SETTLE_SECS="$_SG_SAVED_SETTLE"
 unset XREV_ROUND_ID _SG_BROKEN_SCREEN
 _scan_review_blocks() {
+  cat >/dev/null   # stdin を読み切る（flake 防止。ファイル冒頭の注意を参照）
   case "$_SG_CALLS" in
     *submit*) printf '1\n{"round_id":"x","verdict":"approve","findings":[]}' ;;
     *)        printf '0' ;;
