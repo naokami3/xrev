@@ -108,3 +108,23 @@ reviewer が自動解決される」方式へ簡素化した。プリセット c
   ensure-reviewer の起動確認直後に捨て送信を 1 回挟む / 初回のみ settle 延長。
   **実装前に実機で複数回の裏取りが必要**（現状は round_state 引き継ぎの再試行で運用対処）。
 - claude composer クリアの 0x08 一括送信量（現在固定 4000）の実機妥当性検証。
+- **`XREV-ASCII-V1`（ASCII 限定 wire）の削除可否判断** — 上流の UTF-8 チャンク欠陥
+  （[cmux-behavior.md](cmux-behavior.md) 4節）は報告 issue
+  [manaflow-ai/cmux#8924](https://github.com/manaflow-ai/cmux/issues/8924) が
+  PR [#8962](https://github.com/manaflow-ai/cmux/pull/8962)「Preserve UTF-8 across control
+  socket reads」として **2026-07-26 に main へマージ済み**。ただし安定版 v0.64.20（検証済み
+  ローカル版）には未収載のため、回避策は当面維持する（維持しても害はない。外すと日本語 payload
+  の `\uXXXX` 展開による約 6 倍膨張が消える＝効率改善）。**修正手順（安定版が出たら）**:
+  1. cmux をアップデートし、`transport.sh doctor` を実行（バージョン相違 warn の確認と、
+     検査 2 の「実測検証済みバージョン」定数の更新が必要になる）。
+  2. 非 ASCII 送信の実測: 日本語を含む payload（10KB / 30KB / 60KB 級）を `cmux send` で
+     複数回送る。元実測は日本語 30KB で 5 回中 3 失敗なので、**各条件 20 回以上**成功して
+     初めて修正を確認とする（cmux-behavior.md「調査するときの注意」の流儀。1 回の成功で
+     判定しない）。
+  3. 確認できたら encoding の新版（例 `XREV-UTF8-V2`）を設計する: `ENCODING` フィールドで
+     版を判定する現行設計のとおり**新版の追加**として行い、`_build_framed_line` の
+     `\uXXXX` エスケープを新版では省略、reviewer への復号指示（instr）も新版用に更新する。
+     `wire_max_chars` の根拠（膨張率）も見直す。切り詰め検出（チップ文字数照合）は wire 長
+     基準のため影響しない。
+  4. この変更は安全性・互換性に関わるため **@xrev のクロスレビュー対象**として実装する
+     （設計フェーズから回す）。

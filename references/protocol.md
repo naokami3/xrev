@@ -87,7 +87,10 @@
 ### wire encoding `XREV-ASCII-V1`（ASCII-only・暫定措置）
 
 **これは cmux 側の不具合に対する暫定回避策**である。上流が修正され普及したら削除可否を判断できるよう、
-encoding にバージョンを付けている。
+encoding にバージョンを付けている。上流の状況: 報告 issue
+[manaflow-ai/cmux#8924](https://github.com/manaflow-ai/cmux/issues/8924) は PR #8962 として
+2026-07-26 に main へマージ済み（安定版 v0.64.20 には未収載）。削除判断の具体的な手順は
+[../docs/roadmap.md](../docs/roadmap.md) の「将来の検討事項」を参照。
 
 - **なぜ必要か**: cmux 0.64.20 の受信側 `ControlClientLineReader` は最大 4095 バイトずつ `read(2)` し、
   **各チャンクを独立に UTF-8 変換して、失敗したチャンクを丸ごと捨てる**。Unix domain socket の
