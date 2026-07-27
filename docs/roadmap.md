@@ -65,8 +65,10 @@ xrev のフェーズと進捗。詳細な設計は [architecture.md](architectur
 - [x] `--append-global` を実 `~/.codex/AGENTS.md` へ導入（未作成の初回導入経路・マーカー 2 個・
       冪等性・ロック解放を実地確認）
 - [x] 別プロジェクトの codex がグローバル AGENTS.md 経由で xrev を認識する（`codex exec` で
-      発火スクリプト・手順書・XREV_PRIMARY の 3 点を正答。**codex 自身が primary として往復を
-      完走する確認は未実施**（実際の作業セッションが必要））
+      発火スクリプト・手順書・XREV_PRIMARY の 3 点を正答）
+- [x] codex 自身が primary として反復レビューを完走する（2026-07-27 実運用で確認。あわせて
+      「サンドボックスのソケット遮断」「export 非持続」「reviewer 応答の 180 秒タイムアウト不足」
+      が判明し、それぞれ playbook/スニペット修正と既定 600 秒への変更で対処済み）
 - [x] xrev の checkout 消滅時、スニペットの前提検査が明確な診断で失敗する
 - [x] claude reviewer との実機往復 e2e（`XREV_PRIMARY=codex` の auto 解決で `Review Claude` を
       ensure-reviewer 生成 → 参照モードで 1 往復 converged/approve。reviewer は diff_hash/HEAD を

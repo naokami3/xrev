@@ -216,7 +216,7 @@ CREATE_TIMEOUT="$(_xrev_uint "${XREV_REVIEWER_CREATE_TIMEOUT_SECONDS:-$(_cfg rev
 WIRE_MAX_CHARS="$(_xrev_uint "${XREV_WIRE_MAX_CHARS:-$(_cfg wire_max_chars 64000)}" 1000 1000000 64000 'wire_max_chars')"
 READ_LINES="$(_xrev_uint "${XREV_READ_SCREEN_LINES:-$(_cfg read_screen_lines 400)}" 10 10000 400 'read_screen_lines')"
 SETTLE_SECS="$(_xrev_uint "${XREV_SEND_SETTLE_SECONDS:-$(_cfg send_settle_seconds 2)}" 0 60 2 'send_settle_seconds')"
-RESP_TIMEOUT="$(_xrev_uint "${XREV_RESPONSE_TIMEOUT_SECONDS:-$(_cfg response_timeout_seconds 180)}" 1 3600 180 'response_timeout_seconds')"
+RESP_TIMEOUT="$(_xrev_uint "${XREV_RESPONSE_TIMEOUT_SECONDS:-$(_cfg response_timeout_seconds 600)}" 1 3600 600 'response_timeout_seconds')"
 # 最小 1 秒（0 だと応答待ちが busy-loop 化するため 0 は許可しない）。
 RESP_POLL="$(_xrev_uint "${XREV_RESPONSE_POLL_SECONDS:-$(_cfg response_poll_seconds 3)}" 1 60 3 'response_poll_seconds')"
 
@@ -2492,7 +2492,7 @@ xrev_transport_review() {
 
   # (変更1) Enter 送信（プロンプト確定）の失敗を検知・限定リトライする。
   # 【なぜ無視してはいけないか】従来は `_cmux_submit || true` で失敗を握りつぶしていた。送信できて
-  # いなければ Codex には何も届いておらず応答が来ないのは当然なのに、RESP_TIMEOUT(既定180秒)を
+  # いなければ Codex には何も届いておらず応答が来ないのは当然なのに、RESP_TIMEOUT(既定600秒)を
   # 丸ごと待って timeout(12) と誤診断してしまい、「送れなかった」と「Codex が返さない」を区別できない。
   # 【再試行の安全条件】Enter の再送は「前景が codex のまま、かつ安全ポリシーが崩れていない」ときだけ
   # 安全である。codex が死んで shell に落ちていれば Enter はコマンド実行になってしまうし、書き込み

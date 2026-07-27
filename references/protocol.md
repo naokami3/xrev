@@ -322,7 +322,7 @@ review-loop は受け取った状態から通算 `transport_attempts` を1つ進
 | `send_settle_seconds` | `2` | 送信（submit）後の反映待ち秒。範囲 0..60 |
 | `submit_settle_seconds` | `1` | submit 前のペースト描画待ちの基準秒（本文長に比例・上限8s）。範囲 0..8 |
 | `chunk_size` | `0` | 1物理行の分割送信サイズ（0=分割なし・一括送信） |
-| `response_timeout_seconds` | `180` | 応答待ちタイムアウト秒。範囲 1..3600 |
+| `response_timeout_seconds` | `600` | 応答待ちタイムアウト秒。範囲 1..3600。既定を 180 から 600 へ変更（実測: 拡張思考する claude reviewer や大きい diff の参照モードレビューで 180〜420 秒超過が頻発。応答は到着次第ポーリングが検出するため、長い既定のコストは「応答が永遠に来ないラウンドの見切りの遅さ」のみ） |
 | `response_poll_seconds` | `3` | 応答ポーリング間隔秒。範囲 1..60（**最小1**。0 だと応答待ちが busy-loop 化するため許可しない） |
 | `wire_max_chars` | `64000` | 送信直前の wire（1物理行）文字数の上限。超過は送信せず fail closed（`exit 26`）。範囲 1000..1000000 |
 
