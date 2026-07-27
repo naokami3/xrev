@@ -37,7 +37,7 @@ xrev/
 │   └── review-schema.json             # reviewer 出力契約（JSON Schema）
 ├── tools/                     # 開発用(テスト強制): verify.sh / claude-posttooluse.sh / claude-stop.sh / install-hooks.sh
 ├── tests/                     # ユニットテスト(cmux 不要・bash+python3): run.sh / lib.sh / test_*.sh
-├── docs/                      # architecture.md / roadmap.md / security-design.md / adr/（ADR-NNN）
+├── docs/                      # architecture.md / roadmap.md / security-design.md / setup-codex.md / adr/（ADR-NNN）
 ├── .githooks/pre-commit       # コミット前にテストを強制（core.hooksPath）
 └── .github/workflows/ci.yml   # CI（push / PR で tools/verify.sh を実行）
 ```

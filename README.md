@@ -245,6 +245,7 @@ xrev は別ペインで**対話モードのまま常駐している** Claude/Cod
 導入は**このマシン上で一度だけ**でよい（プロジェクトごとに `AGENTS.md` へ貼り付ける必要は無い）。
 codex はグローバル指示ファイル `$CODEX_HOME/AGENTS.md`（`CODEX_HOME` 未設定なら既定
 `~/.codex/AGENTS.md`）を読み込むため、そこにスニペットを一度導入しておけば全プロジェクトで有効になる。
+**セットアップ全体（3 層構成）とトラブルシュートは [docs/setup-codex.md](docs/setup-codex.md) を参照。**
 
 1. xrev リポジトリで `scripts/print-agents-snippet.sh --append-global` を実行し、グローバル
    `AGENTS.md` へスニペットを追加する（マーカー `<!-- xrev:snippet:BEGIN/END -->` で挟んで管理する
@@ -262,7 +263,7 @@ codex はグローバル指示ファイル `$CODEX_HOME/AGENTS.md`（`CODEX_HOME
    [`references/protocol.md`](references/protocol.md) を参照。
 
 2. codex がどのプロジェクトで作業を始めても、グローバル `AGENTS.md` のスニペット経由で
-   `export XREV_PRIMARY=codex` を自己申告したうえで
+   `XREV_PRIMARY=codex` を各コマンドに前置して自己申告したうえで
    [`references/codex-primary-playbook.md`](references/codex-primary-playbook.md) に従い、
    既定 config（`reviewer` は `auto`。自己申告から `reviewer=claude` が導出される）でクロスレビュー
    往復を回す。値を config ファイルへ明示的に固定したい場合のみ `config/xrev.codex-primary.json`
