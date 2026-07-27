@@ -154,7 +154,7 @@ REASONS = {
     13: "truncated", 14: "non_terminal", 15: "ws_mismatch", 16: "ambiguous",
     17: "process_mismatch", 19: "autocreate_failed", 20: "reviewer_contention",
     25: "submit_failed", 27: "reviewer_policy_mismatch", 28: "integrity_unverifiable",
-    30: "cmux_not_found", 31: "not_in_pane",
+    29: "reviewer_config_conflict", 30: "cmux_not_found", 31: "not_in_pane",
 }
 out = {
     "decision": decision,

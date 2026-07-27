@@ -157,8 +157,13 @@ _ti_run() {
 }
 _ti_cmux_log() { tr '\n' ' ' < "$_TI_CMUX_LOG_FILE"; }
 
-# (e-1) 未知種別（REVIEWER_PROCESS=gemini）→ 28。resolve すら試みない（早期 fail closed）。
+# (e-1) 未知種別（REVIEWER=gemini）→ 28。resolve すら試みない（早期 fail closed）。
+# 【D1】kind は semantic kind(REVIEWER)で決まる（basename(REVIEWER_PROCESS)ではない）。
+# REVIEWER_PROCESS も揃えて gemini にする（"gemini" は codex/claude いずれでもないため矛盾検査には
+# 掛からない＝前景照合専用の明示値として扱われる）。
+REVIEWER=gemini
 REVIEWER_PROCESS=gemini
+_XREV_REVIEWER_PROCESS_EXPLICIT=gemini
 _ti_run ""
 assert_rc "未知種別(gemini) → rc28" 28 "$_TI_RC"
 assert_eq "未知種別 → resolve は一切呼ばれない" "0" "$_TI_RESOLVE_CALLS"
@@ -166,7 +171,10 @@ assert_eq "未知種別 → resolve は一切呼ばれない" "0" "$_TI_RESOLVE_
 # (e-2)〜(e-4) claude・inline（参照モード無し）→ wire 長に関わらず無条件で rc28（指摘3・2巡目）。
 # resolve すら試みない（kind 判定直後・wire を組む前に fail closed）。診断メッセージは参照モードへの
 # 案内になっている。
+# 【D1】kind は semantic kind(REVIEWER)で決まるため REVIEWER も claude に揃える。
+REVIEWER=claude
 REVIEWER_PROCESS=claude
+_XREV_REVIEWER_PROCESS_EXPLICIT=claude
 _TI_RES_PATH="global"
 unset XREV_REFERENCE_MODE
 

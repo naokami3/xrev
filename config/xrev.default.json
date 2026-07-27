@@ -1,17 +1,17 @@
 {
   "primary": "claude",
-  "reviewer": "codex",
-  "reviewer_pane_title": "Review Codex",
+  "reviewer": "auto",
+  "reviewer_pane_title": "auto",
   "keyword": "@xrev",
   "max_iterations": 5,
   "max_transport_attempts": 12,
-  "reviewer_reads_workspace": false,
+  "reviewer_reads_workspace": "auto",
   "max_reference_fallbacks": 3,
   "stop_at": "review",
   "adr": false,
   "adr_dir": "docs/adr",
   "transport": "cmux",
-  "reviewer_process": "codex",
+  "reviewer_process": "auto",
   "reviewer_launch_args": {
     "codex": ["--sandbox", "read-only", "--ask-for-approval", "never"],
     "claude": ["--permission-mode", "plan"]
@@ -26,7 +26,7 @@
   "send_settle_seconds": 2,
   "submit_settle_seconds": 1,
   "chunk_size": 0,
-  "response_timeout_seconds": 180,
+  "response_timeout_seconds": 600,
   "response_poll_seconds": 3,
   "wire_max_chars": 64000
 }

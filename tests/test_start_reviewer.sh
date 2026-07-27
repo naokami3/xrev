@@ -66,4 +66,19 @@ CMUX_SURFACE_ID=surf-test XREV_CONFIG="$DEFAULT_CONFIG" \
 rc=$?
 assert_rc "codex不在 → exit127" 127 "$rc"
 
+# ── (4) 指摘3（2巡目）: reviewer 設定の矛盾は副作用（タイトル変更・exec）より前に拒否 ──────
+# XREV_REVIEWER=codex（解決済み reviewer）と XREV_REVIEWER_PROCESS=claude（明示値の basename が
+# codex/claude のどちらかで解決済み reviewer と異なる）を組み合わせ、matter 検査が exec の
+# 前で発火し rc29 になること・codex が一切起動されないことを確認する。
+marker4="$_str_dir/marker4"
+CMUX_SURFACE_ID=surf-test XREV_CONFIG="$DEFAULT_CONFIG" \
+  XREV_CMUX_BIN="$CMUX_STUB" XREV_CODEX_BIN="$CODEX_STUB" \
+  XREV_REVIEWER=codex XREV_REVIEWER_PROCESS=claude \
+  XREV_TEST_CODEX_MARKER="$marker4" \
+  bash "$START_REVIEWER" >/dev/null 2>"$_str_dir/err4.log"
+rc=$?
+assert_rc "reviewer設定の矛盾 → exit29" 29 "$rc"
+assert_eq "矛盾時はcodexが起動されない" "" "$(cat "$marker4" 2>/dev/null)"
+assert_contains "矛盾ログを出力する" "$(cat "$_str_dir/err4.log")" "矛盾"
+
 rm -rf "$_str_dir"

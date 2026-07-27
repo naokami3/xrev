@@ -60,12 +60,46 @@ xrev のフェーズと進捗。詳細な設計は [architecture.md](architectur
 - [x] 実測 R1〜R6（claude reviewer の cmux ペイン内挙動: プロセス同定・ペースト畳み・
       composer クリア・タブタイトル・出力契約遵守・de-wrap 互換）
 
-未検証（実機 e2e。今後の実施項目）:
+実機 e2e（2026-07-27 実施）:
 
-- [ ] 別プロジェクトの Codex から `print-agents-snippet.sh` 経由のスニペットで 1 往復が成立する
-- [ ] xrev の checkout を移動した後、スニペットの前提検査が明確な診断で失敗する
-      （XREV_ROOT 不整合を握りつぶさず気づける）
-- [ ] claude reviewer との実機往復 e2e（cmux ペイン内で実際に `Review Claude` へ送受信する）
+- [x] `--append-global` を実 `~/.codex/AGENTS.md` へ導入（未作成の初回導入経路・マーカー 2 個・
+      冪等性・ロック解放を実地確認）
+- [x] 別プロジェクトの codex がグローバル AGENTS.md 経由で xrev を認識する（`codex exec` で
+      発火スクリプト・手順書・XREV_PRIMARY の 3 点を正答）
+- [x] codex 自身が primary として反復レビューを完走する（2026-07-27 実運用で確認。あわせて
+      「サンドボックスのソケット遮断」「export 非持続」「reviewer 応答の 180 秒タイムアウト不足」
+      が判明し、それぞれ playbook/スニペット修正と既定 600 秒への変更で対処済み）
+- [x] xrev の checkout 消滅時、スニペットの前提検査が明確な診断で失敗する
+- [x] claude reviewer との実機往復 e2e（`XREV_PRIMARY=codex` の auto 解決で `Review Claude` を
+      ensure-reviewer 生成 → 参照モードで 1 往復 converged/approve。reviewer は diff_hash/HEAD を
+      正しく返し、実 diff への適切な指摘も返した）
+- [x] 新コードの実機動作確認（auto 解決の双方向・矛盾ゲート exit 29 の副作用前拒否・
+      送信ゲート一式のスモーク往復。この過程でセッション復元による read-only 喪失を
+      exit 27 が捕捉する実例を確認 → [cmux-behavior.md](cmux-behavior.md) 10節）
+
+## フェーズ 6: reviewer の auto 解決・グローバル一度きり導入 ✅ 完了
+
+主従反転の入口を「プリセット config を明示指定する」方式から「入口で primary を自己申告するだけで
+reviewer が自動解決される」方式へ簡素化した。プリセット config は値を明示的に固定したい場合の任意
+選択肢として残る。詳細設計は本ドキュメントと [protocol.md](../references/protocol.md) を参照。
+
+- [x] **D1: reviewer の auto 解決**（`_xrev_resolve_reviewer`。優先順 `XREV_REVIEWER` > config の
+      明示値 > auto=primary の相手方）。**semantic kind**（解決済み reviewer 名）を安全ポリシー
+      検証・送信完全性方式・launch 引数選択・composer クリア方式の唯一の種別判定源にする
+      （旧来の「kind = 前景プロセス名の basename」定義を置き換え）。派生3キー
+      （`reviewer_pane_title`/`reviewer_process`/`reviewer_reads_workspace`）の既定を `auto` 化。
+      明示値との種別矛盾は送信前に `exit 29`（`reviewer_config_conflict`）で fail closed。
+      既定 config での後方互換同値・主従反転プリセットとの等価性をテストで固定。
+- [x] **D2: 入口の自己申告と質問規則**（`XREV_PRIMARY`/`XREV_REVIEWER` を SKILL.md / codex 主
+      プレイブックへ追記。reviewer の明示指定は質問せず正規の上書きとして扱い、意図が一意に
+      読めない場合のみ一拍確認で質問する）。
+- [x] **D3: print-agents-snippet.sh のグローバル導入化**（`--append-global`。対象は
+      `$CODEX_HOME/AGENTS.md`。R7 実測で codex がこれを読み込むことを確認済み。symlink/既存
+      ファイル/初回導入の3経路収束・排他ロック（自己解放・待機なしという ensure-reviewer との
+      契約差）・マーカー `<!-- xrev:snippet:BEGIN/END -->` による冪等な追記/置換・mv 直前の
+      内容再検証。per-project 貼り付け前提の記述は README/playbook から撤去）。
+- [x] R7: codex のグローバル AGENTS.md 読込を実測で確認（一時 `CODEX_HOME` + `codex exec`。
+      マーカー有無での正例・対照例の両方で裏取り）。
 
 ## 将来の検討事項
 
@@ -74,3 +108,23 @@ xrev のフェーズと進捗。詳細な設計は [architecture.md](architectur
   ensure-reviewer の起動確認直後に捨て送信を 1 回挟む / 初回のみ settle 延長。
   **実装前に実機で複数回の裏取りが必要**（現状は round_state 引き継ぎの再試行で運用対処）。
 - claude composer クリアの 0x08 一括送信量（現在固定 4000）の実機妥当性検証。
+- **`XREV-ASCII-V1`（ASCII 限定 wire）の削除可否判断** — 上流の UTF-8 チャンク欠陥
+  （[cmux-behavior.md](cmux-behavior.md) 4節）は報告 issue
+  [manaflow-ai/cmux#8924](https://github.com/manaflow-ai/cmux/issues/8924) が
+  PR [#8962](https://github.com/manaflow-ai/cmux/pull/8962)「Preserve UTF-8 across control
+  socket reads」として **2026-07-26 に main へマージ済み**。ただし安定版 v0.64.20（検証済み
+  ローカル版）には未収載のため、回避策は当面維持する（維持しても害はない。外すと日本語 payload
+  の `\uXXXX` 展開による約 6 倍膨張が消える＝効率改善）。**修正手順（安定版が出たら）**:
+  1. cmux をアップデートし、`transport.sh doctor` を実行（バージョン相違 warn の確認と、
+     検査 2 の「実測検証済みバージョン」定数の更新が必要になる）。
+  2. 非 ASCII 送信の実測: 日本語を含む payload（10KB / 30KB / 60KB 級）を `cmux send` で
+     複数回送る。元実測は日本語 30KB で 5 回中 3 失敗なので、**各条件 20 回以上**成功して
+     初めて修正を確認とする（cmux-behavior.md「調査するときの注意」の流儀。1 回の成功で
+     判定しない）。
+  3. 確認できたら encoding の新版（例 `XREV-UTF8-V2`）を設計する: `ENCODING` フィールドで
+     版を判定する現行設計のとおり**新版の追加**として行い、`_build_framed_line` の
+     `\uXXXX` エスケープを新版では省略、reviewer への復号指示（instr）も新版用に更新する。
+     `wire_max_chars` の根拠（膨張率）も見直す。切り詰め検出（チップ文字数照合）は wire 長
+     基準のため影響しない。
+  4. この変更は安全性・互換性に関わるため **@xrev のクロスレビュー対象**として実装する
+     （設計フェーズから回す）。

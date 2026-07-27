@@ -124,6 +124,23 @@ _cmux_preflight(){ return 0; }
 _xrev_caller_ws(){ printf 'ws-test-uuid'; }
 _xrev_create_reviewer(){ echo created >> "$_MARK"; _XREV_RES_REF=surface:NEW; return 0; }
 
+# ── 指摘3（2巡目）: reviewer 設定の矛盾検査はペイン生成の副作用より前に行う ──────────
+# 従来は xrev_transport_review にしか組み込まれておらず、xrev_ensure_reviewer は矛盾があっても
+# _xrev_classify_reviewer（宛先解決・プロセス証明）まで進んでから気づく形だった。ここでは
+# classify が一切呼ばれずに rc29 で拒否されることを固定する。
+_CLS_CALLS="$(mktemp)"; : > "$_CLS_CALLS"
+_xrev_classify_reviewer(){ echo x >> "$_CLS_CALLS"; _XREV_RES_REF=surface:99; return 0; }
+_SAVED_REVIEWER="$REVIEWER"; _SAVED_RP_EXPLICIT="$_XREV_REVIEWER_PROCESS_EXPLICIT"
+REVIEWER="codex"
+_XREV_REVIEWER_PROCESS_EXPLICIT="claude"   # codex/claude のどちらかで解決済み reviewer と矛盾
+xrev_ensure_reviewer >/dev/null 2>"$_MARK.err"; rc=$?
+assert_rc "reviewer_process矛盾がある場合 → xrev_ensure_reviewerはrc29" 29 "$rc"
+assert_eq "矛盾検出は classify(宛先解決) より前に起きる(呼ばれない)" "0" "$(grep -c . "$_CLS_CALLS")"
+assert_contains "矛盾ログを出力する" "$(cat "$_MARK.err")" "矛盾"
+REVIEWER="$_SAVED_REVIEWER"; _XREV_REVIEWER_PROCESS_EXPLICIT="$_SAVED_RP_EXPLICIT"
+rm -f "$_CLS_CALLS" "$_MARK.err"
+unset _CLS_CALLS _SAVED_REVIEWER _SAVED_RP_EXPLICIT rc
+
 # present → 既存 ref を返し、生成しない（冪等）
 : > "$_MARK"
 _xrev_classify_reviewer(){ _XREV_RES_REF=surface:99; return 0; }

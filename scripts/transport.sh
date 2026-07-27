@@ -74,14 +74,136 @@ _xrev_uint() {
   printf '%s' "$def"
 }
 
+# ── reviewer の auto 解決（D1）───────────────────────────────────────────────
+#
+# 【設計】config の reviewer に "auto" を導入し（既定値もこれに変更）、「primary の相手方」を
+# 機械的に導出する。相手方マップは _xrev_resolve_reviewer 内の1箇所にのみ持つ（二重管理しない）。
+# semantic kind（解決済み reviewer 名 codex/claude）を安全ポリシー検証・送信完全性方式・launch
+# 引数選択・composer クリア方式の唯一の種別判定源とする（C1 の「kind = バイナリ basename」定義は
+# ここで置き換える。バイナリがラッパでも種別検証は reviewer 名の規則に従う）。
+_XREV_REVIEWER_OPPOSITE_CLAUDE="codex"
+_XREV_REVIEWER_OPPOSITE_CODEX="claude"
+
+# 純粋関数: primary を解決する。優先順: XREV_PRIMARY(明示) > config の primary > 既定 claude。
+_xrev_resolve_primary() {
+  local p="${XREV_PRIMARY:-}"
+  [[ -n "$p" ]] || p="$(_cfg primary 'claude')"
+  printf '%s' "$p"
+}
+
+# 純粋関数: reviewer を解決する（D1 正典）。
+#   優先順: 1) XREV_REVIEWER（新設 env・明示最優先） 2) config の reviewer が "auto" 以外ならその値
+#           3) auto: 「primary の相手方」（primary は _xrev_resolve_primary）。primary が
+#              claude/codex のどちらでもなければ auto 解決を fail closed で拒否する
+#              （組み合わせを機械的に決められないため）。
+#   出力(stdout): 解決済み reviewer 名。exit: 0=解決 / 1=fail closed（stdout は空）
+_xrev_resolve_reviewer() {
+  local explicit="${XREV_REVIEWER:-}"
+  if [[ -n "$explicit" ]]; then
+    printf '%s' "$explicit"; return 0
+  fi
+  local cfg_reviewer; cfg_reviewer="$(_cfg reviewer 'auto')"
+  if [[ "$cfg_reviewer" != "auto" ]]; then
+    printf '%s' "$cfg_reviewer"; return 0
+  fi
+  local primary; primary="$(_xrev_resolve_primary)"
+  case "$primary" in
+    claude) printf '%s' "$_XREV_REVIEWER_OPPOSITE_CLAUDE"; return 0 ;;
+    codex)  printf '%s' "$_XREV_REVIEWER_OPPOSITE_CODEX"; return 0 ;;
+    *)
+      _log "reviewer の auto 解決に失敗しました（primary='${primary}' が不正です。primary を claude/codex のいずれかにするか、reviewer(または XREV_REVIEWER)を明示してください）。"
+      return 1 ;;
+  esac
+}
+
+# 純粋関数: reviewer 設定の矛盾を検査する（D1・送信前・fail closed）。
+#   - reviewer_process の明示値の basename が {codex,claude} のどちらかで、解決済み reviewer と
+#     異なる場合を設定エラーとする（それ以外の明示値＝ラッパ名等は前景照合専用として扱い、
+#     種別判定に影響させないため矛盾にしない）。
+#   - reviewer=claude なのに reviewer_reads_workspace が明示 false のときも設定エラーとする
+#     （claude reviewer は参照モード専用のため、参照モードを禁止する組み合わせは矛盾）。
+#   入力: $1=解決済み reviewer(semantic kind) $2=reviewer_process の明示値(auto由来なら空文字)
+#         $3=reviewer_reads_workspace の明示値(auto由来なら空文字)
+#   出力: 矛盾があれば理由をstdoutに1行書きexit 1 / 無ければ何も書かずexit 0
+_xrev_check_reviewer_conflicts() {
+  local reviewer="$1" rp_explicit="$2" rw_explicit="$3"
+  if [[ -n "$rp_explicit" ]]; then
+    local rp_base; rp_base="$(basename -- "$rp_explicit")"
+    if [[ ( "$rp_base" == "codex" || "$rp_base" == "claude" ) && "$rp_base" != "$reviewer" ]]; then
+      printf 'reviewer_process の明示値(%s)が解決済み reviewer(%s)と矛盾しています' "$rp_explicit" "$reviewer"
+      return 1
+    fi
+  fi
+  if [[ "$reviewer" == "claude" && "$rw_explicit" == "false" ]]; then
+    printf 'reviewer=claude は参照モード専用のため reviewer_reads_workspace を明示 false にはできません'
+    return 1
+  fi
+  return 0
+}
+
+# 共有ゲート（指摘3・2巡目）: reviewer 設定の矛盾検査を、副作用（送信・ペイン生成・タイトル変更・
+# exec）を起こす**前**に必ず通す。従来は xrev_transport_review にしか組み込まれておらず、
+# xrev_ensure_reviewer（reviewer ペインの自動生成）や start-reviewer.sh（手動起動）は矛盾があっても
+# 副作用（ペイン生成・タイトル変更・exec）まで進んでから別の理由（送信時 exit 29 / 起動確認の失敗）
+# で気づく形になっていた。既知の矛盾を検出できるのに使えないペインを作ってしまう事故を避けるため、
+# 3経路（xrev_transport_review・xrev_ensure_reviewer・start-reviewer.sh）すべてがこの1関数を
+# 副作用の直前に呼ぶ（判定リストを二重管理しない）。
+#   グローバル変数 REVIEWER / _XREV_REVIEWER_PROCESS_EXPLICIT / _XREV_READS_WORKSPACE_EXPLICIT
+#   （いずれも本ファイル冒頭の reviewer 解決で確定済み）を読む。
+#   出力: 矛盾があればログを出す。exit: 0=矛盾なし / 29=矛盾（fail closed）
+_xrev_guard_reviewer_conflicts() {
+  local msg
+  if ! msg="$(_xrev_check_reviewer_conflicts "$REVIEWER" "$_XREV_REVIEWER_PROCESS_EXPLICIT" "$_XREV_READS_WORKSPACE_EXPLICIT")"; then
+    _log "reviewer 設定に矛盾があります: ${msg}"
+    return 29
+  fi
+  return 0
+}
+
 # 環境変数で上書きできる設定（テスト・運用都合）
-REVIEWER_PANE_TITLE="${XREV_REVIEWER_PANE_TITLE:-$(_cfg reviewer_pane_title 'Review Codex')}"
-# config の reviewer 値（バイナリ名。既定 codex）。主従反転プリセット（primary=codex/reviewer=claude）
-# でも同じ経路で解決できるよう、_xrev_reviewer_bin の解決基準として使う（C1）。
-REVIEWER="$(_cfg reviewer 'codex')"
-# 送信前の安全ゲートで「宛先サーフェスで動いているべきプロセス名」（既定 codex）。
-# プロセス証明: cmux top でこのプロセスが対象サーフェスの直下で動いていることを確認する。
-REVIEWER_PROCESS="${XREV_REVIEWER_PROCESS:-$(_cfg reviewer_process 'codex')}"
+PRIMARY="$(_xrev_resolve_primary)"
+REVIEWER="$(_xrev_resolve_reviewer)" || REVIEWER=""
+
+# 派生3キー（既定 "auto"。明示値があれば優先）。矛盾検査のため「明示値そのもの」も別途保持する
+# （"auto" 由来なら空文字。env/config どちらの明示かは区別せず、明示された値だけを持つ）。
+_XREV_REVIEWER_PROCESS_EXPLICIT=""
+if [[ -n "${XREV_REVIEWER_PROCESS:-}" ]]; then
+  _XREV_REVIEWER_PROCESS_EXPLICIT="$XREV_REVIEWER_PROCESS"
+else
+  _xrev_rp_cfg="$(_cfg reviewer_process 'auto')"
+  [[ "$_xrev_rp_cfg" != "auto" ]] && _XREV_REVIEWER_PROCESS_EXPLICIT="$_xrev_rp_cfg"
+fi
+# 送信前の安全ゲートで「宛先サーフェスで動いているべきプロセス名」。役割は前景 comm 名の照合専用
+# （安全ポリシー検証・送信完全性方式等の種別判定には REVIEWER(semantic kind) を使う。上記コメント参照）。
+REVIEWER_PROCESS="${_XREV_REVIEWER_PROCESS_EXPLICIT:-$REVIEWER}"
+
+_XREV_PANE_TITLE_EXPLICIT=""
+if [[ -n "${XREV_REVIEWER_PANE_TITLE:-}" ]]; then
+  _XREV_PANE_TITLE_EXPLICIT="$XREV_REVIEWER_PANE_TITLE"
+else
+  _xrev_pt_cfg="$(_cfg reviewer_pane_title 'auto')"
+  [[ "$_xrev_pt_cfg" != "auto" ]] && _XREV_PANE_TITLE_EXPLICIT="$_xrev_pt_cfg"
+fi
+if [[ -n "$_XREV_PANE_TITLE_EXPLICIT" ]]; then
+  REVIEWER_PANE_TITLE="$_XREV_PANE_TITLE_EXPLICIT"
+elif [[ "$REVIEWER" == "claude" ]]; then
+  REVIEWER_PANE_TITLE="Review Claude"
+else
+  REVIEWER_PANE_TITLE="Review Codex"   # codex、または reviewer が未解決(fail closed)時の既定
+fi
+
+# reviewer_reads_workspace（参照モードを許可するか）。env 上書きは無く config のみ。
+_XREV_READS_WORKSPACE_EXPLICIT=""
+_xrev_rw_cfg="$(_cfg reviewer_reads_workspace 'auto')"
+[[ "$_xrev_rw_cfg" != "auto" ]] && _XREV_READS_WORKSPACE_EXPLICIT="$_xrev_rw_cfg"
+if [[ -n "$_XREV_READS_WORKSPACE_EXPLICIT" ]]; then
+  REVIEWER_READS_WORKSPACE="$_XREV_READS_WORKSPACE_EXPLICIT"
+elif [[ "$REVIEWER" == "claude" ]]; then
+  REVIEWER_READS_WORKSPACE="true"
+else
+  REVIEWER_READS_WORKSPACE="false"
+fi
+unset _xrev_rp_cfg _xrev_pt_cfg _xrev_rw_cfg
 # 安全側既定の opt-in。CMUX_SURFACE_ID 未注入時のみグローバル解決を許す / 明示サーフェスの別WS送信を許す。
 ALLOW_GLOBAL_RESOLVE="${XREV_ALLOW_GLOBAL_RESOLVE:-$(_cfg allow_global_resolve 'false')}"
 ALLOW_CROSS_WS="${XREV_ALLOW_CROSS_WS:-$(_cfg allow_cross_ws 'false')}"
@@ -94,7 +216,7 @@ CREATE_TIMEOUT="$(_xrev_uint "${XREV_REVIEWER_CREATE_TIMEOUT_SECONDS:-$(_cfg rev
 WIRE_MAX_CHARS="$(_xrev_uint "${XREV_WIRE_MAX_CHARS:-$(_cfg wire_max_chars 64000)}" 1000 1000000 64000 'wire_max_chars')"
 READ_LINES="$(_xrev_uint "${XREV_READ_SCREEN_LINES:-$(_cfg read_screen_lines 400)}" 10 10000 400 'read_screen_lines')"
 SETTLE_SECS="$(_xrev_uint "${XREV_SEND_SETTLE_SECONDS:-$(_cfg send_settle_seconds 2)}" 0 60 2 'send_settle_seconds')"
-RESP_TIMEOUT="$(_xrev_uint "${XREV_RESPONSE_TIMEOUT_SECONDS:-$(_cfg response_timeout_seconds 180)}" 1 3600 180 'response_timeout_seconds')"
+RESP_TIMEOUT="$(_xrev_uint "${XREV_RESPONSE_TIMEOUT_SECONDS:-$(_cfg response_timeout_seconds 600)}" 1 3600 600 'response_timeout_seconds')"
 # 最小 1 秒（0 だと応答待ちが busy-loop 化するため 0 は許可しない）。
 RESP_POLL="$(_xrev_uint "${XREV_RESPONSE_POLL_SECONDS:-$(_cfg response_poll_seconds 3)}" 1 60 3 'response_poll_seconds')"
 
@@ -756,8 +878,10 @@ _verify_reviewer_process() {
 # (`_xrev_check_policy`) はいずれも他経路（`_xrev_verify_effective_policy` /
 # `_verify_reviewer_launch_args`）と共有する実体（`_xrev_procargs2_py_src` /
 # `_xrev_policy_check_py_src`）を使い、判定リストを二重管理にしない。
-#   入力: $1=許可名(reviewer_process。basename を取って前景プロセスの期待名・安全ポリシー種別kind
-#         の両方に使う。従来 kind は basename(REVIEWER_PROCESS) と常に同値だったため1引数へ統合する),
+#   入力: $1=許可名(reviewer_process。basename を取って前景プロセスの期待名の照合専用に使う),
+#         $2=安全ポリシー種別kind(解決済み reviewer 名。D1: 従来は kind = basename($1) だったが、
+#         reviewer_process はラッパ名等の明示値を取りうるため前景照合と種別判定を分離した。
+#         semantic kind は _xrev_resolve_reviewer が解決した REVIEWER を正典とする),
 #         env XREV_DIRECT="PID<TAB>name" 行群(_top_surface_processes 出力),
 #         env XREV_PS="pid pgid tpgid comm" 行群(_ps_snapshot 出力)
 #   出力: stdout には何も書かない（exit のみ。_xrev_verify_reviewer_policy の契約をそのまま透過する。
@@ -781,6 +905,7 @@ def as_int(s):
         return None
 
 expected = os.path.basename(sys.argv[1]) if len(sys.argv) > 1 else ""
+kind = sys.argv[2] if len(sys.argv) > 2 else ""
 if not expected:
     sys.exit(1)
 
@@ -832,7 +957,7 @@ argv = _procargs2(fg_pid)
 if argv is None:
     sys.stderr.write("[xrev/transport] 前景プロセス(pid=%d)の argv を取得できません\n" % fg_pid)
     sys.exit(1)
-_err = _xrev_check_policy(expected, argv[1:])
+_err = _xrev_check_policy(kind, argv[1:])
 if _err is not None:
     sys.stderr.write("[xrev/transport] 安全ポリシー検証失敗: %s\n" % _err)
     sys.exit(1)
@@ -840,7 +965,7 @@ sys.exit(0)
 PY
   local prog
   prog="$(_xrev_procargs2_py_src)"$'\n'"$(_xrev_policy_check_py_src)"$'\n'"$drv"
-  XREV_DIRECT="${XREV_DIRECT:-}" XREV_PS="${XREV_PS:-}" python3 -c "$prog" "$1"
+  XREV_DIRECT="${XREV_DIRECT:-}" XREV_PS="${XREV_PS:-}" python3 -c "$prog" "$1" "$2"
 }
 
 # 既存 reviewer を「採用」する経路（_xrev_classify_reviewer の present 判定・および送信直前の
@@ -849,6 +974,8 @@ PY
 # （sandbox=read-only かつ承認=never）が実効に有効かを確認する。従来は前景プロセス名が
 # REVIEWER_PROCESS と一致することしか見ておらず、手動起動・旧版の書き込み可能なペインがそのまま
 # 採用され得た。
+# 【D1】前景プロセス名の照合は REVIEWER_PROCESS のまま（ラッパ名等の明示値もそのまま使える）。
+# 安全ポリシー種別kindは REVIEWER(semantic kind。解決済み reviewer 名)を使う（両者を分離）。
 #   入力: $1=surface ref
 #   出力: stdout には何も書かない（exit のみ。_xrev_verify_foreground_policy の契約をそのまま透過する。
 #     不具合Aの教訓により、この関数は成功時に stdout へ何も書いてはならない — 呼び出し元の
@@ -867,7 +994,7 @@ _xrev_verify_reviewer_policy() {
     return 1
   fi
   ps_out="$(printf '%s\n' "$direct" | cut -f1 | _ps_snapshot)"
-  XREV_DIRECT="$direct" XREV_PS="$ps_out" _xrev_verify_foreground_policy "$REVIEWER_PROCESS"
+  XREV_DIRECT="$direct" XREV_PS="$ps_out" _xrev_verify_foreground_policy "$REVIEWER_PROCESS" "$REVIEWER"
 }
 
 # 起動後の実効検証: reviewer 自動生成（_xrev_create_reviewer）が起動したプロセスの実コマンド
@@ -1972,7 +2099,9 @@ _xrev_create_reviewer() {
   # config/env が壊れている場合に無駄なペイン生成をしない。生成できなければ fail closed で中止。
   local -a launch_args=()
   local launch_out
-  if ! launch_out="$(_xrev_reviewer_launch_args "$codex")"; then
+  # D1: launch 引数のキーは semantic kind(REVIEWER)で引く（バイナリがラッパでも正しく解決するため。
+  # basename($codex) ではなく $REVIEWER を使う）。
+  if ! launch_out="$(_xrev_reviewer_launch_args "$REVIEWER")"; then
     _log "reviewer(${codex}) の launch 引数を決定できませんでした（生成を中止します）。"
     return 19
   fi
@@ -2014,7 +2143,8 @@ _xrev_create_reviewer() {
       # read-only 引数の実効検証。ここまでは「起動できた」だけで、launch 引数が実際に効いて
       # いる保証にはならない（引数生成のバグ・cmux send の欠落等でも起動確認は通り得る）ため、
       # 実プロセスのコマンドラインで裏取りしてから採用する。確認できなければ採用しない(fail closed)。
-      if ! _verify_reviewer_launch_args "$_XREV_RES_REF" "$(basename -- "$codex")"; then
+      # D1: kind は semantic kind(REVIEWER)を使う（basename($codex)ではない）。
+      if ! _verify_reviewer_launch_args "$_XREV_RES_REF" "$REVIEWER"; then
         _log "reviewer は起動しましたが read-only 引数の実効を確認できませんでした（surface=${ref}）。"
         return 19
       fi
@@ -2032,9 +2162,14 @@ _xrev_create_reviewer() {
 
 # 公開: 同一WSの reviewer を保証する（あれば採用・無ければ生成）。stdout に採用 surface ref。
 # exit: 0 / 10(absent かつ autocreate=off) / 14/16/17(既存が壊れ/曖昧/別物→人間) /
-#       27(既存が安全ポリシー不合格→人間) / 15(ws不明) / 19(生成したが起動確認失敗) / 20(競合で期限切れ→人間)。
+#       27(既存が安全ポリシー不合格→人間) / 15(ws不明) / 19(生成したが起動確認失敗) / 20(競合で期限切れ→人間) /
+#       29(reviewer 設定に矛盾。指摘3・2巡目: ペイン生成という副作用の前に検出する)。
 xrev_ensure_reviewer() {
   _cmux_preflight || return $?
+  # D1/指摘3: reviewer 設定の矛盾検査は、ペイン生成という副作用を起こす前に行う（既知の矛盾が
+  # あるのに使えないペインを作ってしまってから気づく、という事故を避けるため）。
+  # xrev_transport_review / start-reviewer.sh と共有する単一ゲート。
+  _xrev_guard_reviewer_conflicts || return 29
   # 注意: classify は _XREV_RES_* グローバルをセットするため $() で捕捉しない（サブシェルで失われる）。
   local rc
   _xrev_classify_reviewer >/dev/null; rc=$?
@@ -2142,11 +2277,15 @@ xrev_transport_review() {
   _XREV_UNVERIFIED_WARNED=""
   _cmux_preflight || return $?
 
-  # reviewer 種別（REVIEWER_PROCESS の basename）に応じた送信完全性検証手段を決定する（C2）。
-  # 未知種別（codex/claude 以外）は検証手段が確立していないため、cmux とやり取りする前に
+  # D1/指摘3: reviewer 設定の矛盾検査（送信前・fail closed。新設 exit 29 = reviewer_config_conflict）。
+  # xrev_ensure_reviewer / start-reviewer.sh と共有する単一ゲート（_xrev_guard_reviewer_conflicts）。
+  _xrev_guard_reviewer_conflicts || return 29
+
+  # reviewer 種別（semantic kind = 解決済み reviewer 名。D1）に応じた送信完全性検証手段を決定する
+  # （C2）。未知種別（codex/claude 以外）は検証手段が確立していないため、cmux とやり取りする前に
   # fail closed で拒否する（新設 exit 28 = integrity_unverifiable）。
   local kind integrity_kind
-  kind="$(basename -- "$REVIEWER_PROCESS")"
+  kind="$REVIEWER"
   if ! integrity_kind="$(_xrev_integrity_kind "$kind")"; then
     _log "reviewer 種別 '${kind}' は送信完全性の検証手段が確立していません（codex/claude 以外は fail closed）。"
     return 28
@@ -2353,7 +2492,7 @@ xrev_transport_review() {
 
   # (変更1) Enter 送信（プロンプト確定）の失敗を検知・限定リトライする。
   # 【なぜ無視してはいけないか】従来は `_cmux_submit || true` で失敗を握りつぶしていた。送信できて
-  # いなければ Codex には何も届いておらず応答が来ないのは当然なのに、RESP_TIMEOUT(既定180秒)を
+  # いなければ Codex には何も届いておらず応答が来ないのは当然なのに、RESP_TIMEOUT(既定600秒)を
   # 丸ごと待って timeout(12) と誤診断してしまい、「送れなかった」と「Codex が返さない」を区別できない。
   # 【再試行の安全条件】Enter の再送は「前景が codex のまま、かつ安全ポリシーが崩れていない」ときだけ
   # 安全である。codex が死んで shell に落ちていれば Enter はコマンド実行になってしまうし、書き込み
@@ -2647,7 +2786,8 @@ sys.exit(0 if (ok and seen) else 1)
     _doctor_report warn "reviewer バイナリ" "見つかりません（bin=${codex}）。送信検証は前景プロセス名しか見ないため致命ではありませんが、ensure-reviewer は失敗します"
   fi
   local largs_out
-  if largs_out="$(_xrev_reviewer_launch_args "$codex" 2>&1)"; then
+  # D1: launch 引数のキーは semantic kind(REVIEWER)で引く（basename($codex)ではない）。
+  if largs_out="$(_xrev_reviewer_launch_args "$REVIEWER" 2>&1)"; then
     _doctor_report ok "reviewer launch 引数" "$(printf '%s' "$largs_out" | tr '\n' ' ')"
   else
     _doctor_report fail "reviewer launch 引数" "決定できません（自動生成が全滅します）: ${largs_out}"
