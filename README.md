@@ -14,6 +14,8 @@ Claude Code プラグイン。
 > 対応エージェント: `claude-code` / `codex`（主従は設定で切り替え。Codex 主・Claude レビュー構成の
 > 主従反転プリセットも提供中）
 
+**ドキュメント（図付きの技術概観・詳細仕様）→ [naokami3.github.io/xrev](https://naokami3.github.io/xrev/)**
+
 ## なにが嬉しいか
 
 - **筋の悪いプランを実装前に潰せる**。実装後だけでなく、設計・実装プランの段階から Codex レビューを回す。
@@ -291,9 +293,6 @@ reviewer では現状非対応**（設計フェーズは常に inline になる�
 [`llms.txt`](llms.txt)）。HTML は正典 md から `tools/render-spec.sh` で自動生成され、内容は同一。
 
 ブラウザで読むなら **[naokami3.github.io/xrev](https://naokami3.github.io/xrev/)**
-（main の更新ごとに自動で再公開。
-GitHub 上の `.html` はソース表示になるため、こちらが読みやすい）。以下のリンク先も同じ内容。
-
 - **図付きの技術概観（まずここから）** → [`docs/overview.html`](docs/overview.html)
 - **詳細仕様（人間向け HTML・図付き）** → [`docs/spec/index.html`](docs/spec/index.html)
 - **cmux 詳細解説（エージェント×cmux の対比・プロンプトの一生）** → [`docs/cmux.html`](docs/cmux.html)
