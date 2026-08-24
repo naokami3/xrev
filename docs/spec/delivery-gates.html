@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xrev 詳細仕様 — 宛先解決と送信ゲート</title>
+<style>
+  :root {
+    --bg: #faf9f7; --fg: #24292e; --muted: #6a737d; --card: #ffffff;
+    --line: #d4d0c8; --accent: #3b5bdb; --accent-soft: #e7ecfb;
+    --ok: #2f7d32; --ok-soft: #e5f2e6; --warn: #b26a00; --warn-soft: #f8edda;
+    --err: #c02f2f; --err-soft: #f9e5e5; --ref: #7048a8; --ref-soft: #efe7f8;
+    --box: #f2f0ec; --code: #eceae5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #d8dde3; --muted: #8b949e; --card: #1c2026;
+      --line: #3a4048; --accent: #7c96f0; --accent-soft: #232c45;
+      --ok: #6dbb71; --ok-soft: #1d2f1e; --warn: #d9a04f; --warn-soft: #33281a;
+      --err: #e07575; --err-soft: #382020; --ref: #b394e8; --ref-soft: #2a2138;
+      --box: #232830; --code: #262b33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif;
+    line-height: 1.8; font-size: 16px; }
+  main { max-width: 900px; margin: 0 auto; padding: 0 20px 80px; }
+  header.top { border-bottom: 1px solid var(--line); padding: 22px 0 14px; margin-bottom: 8px;
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+  header.top .crumbs { font-size: 0.9rem; }
+  header.top .crumbs a { color: var(--accent); text-decoration: none; }
+  header.top .src { font-size: 0.8rem; color: var(--muted); }
+  header.top .src a { color: var(--accent); }
+  .gen-note { background: var(--accent-soft); border-radius: 8px; padding: 8px 14px;
+    font-size: 0.82rem; margin: 14px 0; color: var(--fg); }
+  h1 { font-size: 1.55rem; line-height: 1.4; margin: 20px 0 12px; }
+  h2 { font-size: 1.25rem; margin: 44px 0 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 32px 0 8px; }
+  p { margin: 10px 0; }
+  a { color: var(--accent); }
+  code { background: var(--code); padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em;
+    overflow-wrap: anywhere; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; line-height: 1.55; }
+  pre code { background: none; padding: 0; font-size: 0.82rem; }
+  .tablewrap { overflow-x: auto; margin: 14px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  th, td { border: 1px solid var(--line); padding: 7px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--box); white-space: nowrap; }
+  td:first-child code { overflow-wrap: normal; }
+  blockquote { margin: 14px 0; padding: 4px 16px; border-left: 3px solid var(--accent);
+    background: var(--box); border-radius: 0 8px 8px 0; color: var(--muted); }
+  ul, ol { margin: 10px 0; padding-left: 26px; }
+  li { margin: 5px 0; }
+  li p { margin: 8px 0; }
+  nav.pager { display: flex; justify-content: space-between; gap: 12px; margin-top: 48px;
+    border-top: 1px solid var(--line); padding-top: 14px; font-size: 0.9rem; }
+  nav.pager a { color: var(--accent); text-decoration: none; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px; margin: 18px 0; padding: 0; list-style: none; }
+  .cards li { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; margin: 0; }
+  .cards a { font-weight: 600; text-decoration: none; }
+  .cards p { color: var(--muted); font-size: 0.85rem; margin: 6px 0 0; }
+  img { max-width: 100%; vertical-align: middle; }
+
+  /* 図（tools/spec-figures/ からの注入フラグメント用） */
+  .fig { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px; margin: 18px 0; overflow-x: auto; }
+  .fig svg { display: block; min-width: 820px; width: 100%; height: auto; }
+  .fig figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 8px; }
+  figure { margin: 0; }
+  svg text { font-family: "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif; fill: var(--fg); }
+  svg .small { font-size: 11px; fill: var(--muted); }
+  svg .label { font-size: 13px; }
+  svg .strong { font-size: 13px; font-weight: 600; }
+  svg .boxtitle { font-size: 14px; font-weight: 700; }
+  svg .mono { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  svg .mono-strong { font-family: ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700; }
+  svg .frame { fill: none; stroke: var(--line); stroke-width: 1.5; rx: 10; }
+  svg .box { fill: var(--box); stroke: var(--line); stroke-width: 1; rx: 8; }
+  svg .box-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; rx: 8; }
+  svg .box-ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.2; rx: 8; }
+  svg .box-warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; rx: 8; }
+  svg .box-err { fill: var(--err-soft); stroke: var(--err); stroke-width: 1.2; rx: 8; }
+  svg .box-ref { fill: var(--ref-soft); stroke: var(--ref); stroke-width: 1.2; rx: 8; }
+  svg .arrow { stroke: var(--fg); stroke-width: 1.4; fill: none; }
+  svg .arrow-dash { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 4; fill: none; }
+</style>
+</head>
+<body>
+<main>
+<header class="top"><span class="crumbs"><a href="../overview.html">技術概観</a> / <a href="index.html">詳細仕様</a> / delivery-gates</span><span class="src"><a href="../../references/protocol/delivery-gates.md">正典（md）を見る</a></span></header><p class="gen-note">本ページは <code>references/protocol/delivery-gates.md</code>（正典・エージェント向け）から <code>tools/render-spec.sh</code> で自動生成されている。内容の修正は md 側で行い、再生成すること。</p><h1 id="宛先解決と送信ゲート">宛先解決と送信ゲート</h1><p><a href="../../references/protocol.md"><code>../protocol.md</code></a>（索引）から分割された正典の一部。</p><p><strong>この文書で分かること</strong>:</p><ul><li>宛先解決の順序（明示指定 → 同一 WS スコープ → グローバル opt-in）と曖昧時の fail closed</li><li>送信前ゲート 3 点検査（UUID 再検証・端末性・プロセス証明＋安全ポリシー）と TOCTOU の残余</li><li>read-screen/send/send-key を workspace+surface UUID の組で指定する理由</li><li>送信の堅牢化（入力欄クリア + 再試行）と reviewer 種別ごとのクリア方式</li></ul><h3 id="宛先解決と送信ゲートphase1-誤配送shell-誤実行の防止">宛先解決と送信ゲート（Phase1: 誤配送・shell 誤実行の防止）</h3><figure class="fig">
+<svg viewBox="0 0 880 600" role="img" aria-labelledby="fig-dg1">
+<title id="fig-dg1">送信ゲートの多段フィルタ: 宛先解決から UUID 再検証、端末性プリフライト、プロセス証明と安全ポリシー検証、本文送信、切り詰め検出、Enter 直前の最終ゲートまで、各段の終了コード付きで payload が通過する関門を示す。</title>
+<defs>
+<marker id="m-dg1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+</marker>
+</defs>
+<rect x="40" y="20" width="420" height="58" class="box"/>
+<text x="54" y="42" class="strong">宛先解決（_cmux_resolve_surface）</text>
+<text x="54" y="62" class="small">明示 XREV_REVIEWER_SURFACE → 同一 WS 内タイトル一致 → (opt-in) グローバル</text>
+<text x="500" y="42" class="small">0 件 = exit 10 ／ 複数一致 = exit 16（曖昧）</text>
+<text x="500" y="60" class="small">WS 不整合・別 WS = exit 15</text>
+
+<path class="arrow" d="M 250 78 V 96" marker-end="url(#m-dg1)"/>
+<rect x="40" y="96" width="420" height="52" class="box"/>
+<text x="54" y="118" class="strong">① UUID 同一性・WS 所属の再検証（送信直前に tree を取り直す）</text>
+<text x="54" y="138" class="small">ref 再利用・WS 移動・surface 差し替えを検出</text>
+<text x="500" y="122" class="small">不一致 = exit 15</text>
+
+<path class="arrow" d="M 250 148 V 166" marker-end="url(#m-dg1)"/>
+<rect x="40" y="166" width="420" height="52" class="box"/>
+<text x="54" y="188" class="strong">② 端末性プリフライト（read-screen probe）</text>
+<text x="54" y="208" class="small">エージェント統合パネル（PTY 無し）を reviewer にしない</text>
+<text x="500" y="192" class="small">読めない = exit 14</text>
+
+<path class="arrow" d="M 250 218 V 236" marker-end="url(#m-dg1)"/>
+<rect x="40" y="236" width="420" height="70" class="box-err"/>
+<text x="54" y="258" class="strong">③ プロセス証明 + 安全ポリシー実効検証（_xrev_gate_reviewer）</text>
+<text x="54" y="276" class="small">前景プロセスグループ（pgid == tpgid）の comm が reviewer と一致し、</text>
+<text x="54" y="292" class="small">実 argv が sandbox=read-only かつ承認=never を実効に満たすこと</text>
+<text x="500" y="266" class="small">前景不一致 = exit 17</text>
+<text x="500" y="288" class="small">ポリシー不成立 = exit 27</text>
+
+<path class="arrow" d="M 250 306 V 324" marker-end="url(#m-dg1)"/>
+<rect x="40" y="324" width="420" height="52" class="box"/>
+<text x="54" y="346" class="strong">本文送信（cmux send・1 物理行）</text>
+<text x="54" y="366" class="small">失敗時: 待機 → 入力欄クリア → 再送（既定 5 回）</text>
+<text x="500" y="340" class="small">encode 失敗 = exit 23 ／ wire 超過 = exit 26</text>
+<text x="500" y="358" class="small">送信失敗 = exit 11</text>
+
+<path class="arrow" d="M 250 376 V 394" marker-end="url(#m-dg1)"/>
+<rect x="40" y="394" width="420" height="52" class="box"/>
+<text x="54" y="416" class="strong">切り詰め検出（ペーストチップ N chars と送信長の照合）</text>
+<text x="54" y="436" class="small">rc=0 でも部分到達する実測への対処。最後の一致を今回分とみなす</text>
+<text x="500" y="420" class="small">不一致 = exit 13（truncated）</text>
+
+<path class="arrow" d="M 250 446 V 464" marker-end="url(#m-dg1)"/>
+<rect x="40" y="464" width="420" height="70" class="box-err"/>
+<text x="54" y="486" class="strong">Enter 直前の最終ゲート（③ と同一の検査を再実行）</text>
+<text x="54" y="504" class="small">検査 3 点: 早期棄却 / 本文送信直前 / Enter 直前（再送前も同様）。</text>
+<text x="54" y="520" class="small">不一致なら Enter を送らず中止（本文は入力行に残る → ペインは汚染扱い）</text>
+<text x="500" y="490" class="small">exit 17 / 27</text>
+<text x="500" y="508" class="small">Enter 失敗 = exit 25</text>
+
+<text x="40" y="554" class="small">通過後: 応答待ち（タイムアウト = exit 12 ／ 完成応答が不正 JSON = exit 24）。TOCTOU の残余窓は原理的に排除できない（本文参照）。</text>
+<text x="40" y="578" class="small">※ この図より前（宛先解決の前）に事前検査がある: reviewer 設定の矛盾 = exit 29 ／ reviewer 種別に応じた送信完全性の検証手段が</text>
+<text x="40" y="594" class="small">　確立できない（未知種別・claude への inline）= exit 28（integrity_unverifiable）。いずれも cmux へは一切送信しない。</text>
+</svg>
+<figcaption>図: 全段を通過して初めて Enter が送られる。プロセス証明と安全ポリシー検証は常に同じゲートで行う（どちらか一方だけの再検証を許さない）。</figcaption>
+</figure>
+<p>複数ワークスペースに同名 <code>Review Codex</code> があると、旧実装は「最初に見つかった1件」を返して
+<strong>呼び出し元と別ワークスペースの Codex へ誤配送</strong>し得た（実機で観測）。Phase1 でこれを根絶する。
+設計は 7 ラウンドのクロスレビューで収束（critical/high 0）。</p><p><strong>宛先解決（<code>_cmux_resolve_surface</code>）の順序</strong>:</p><ol><li><code>XREV_REVIEWER_SURFACE</code>（明示指定・最優先）。<code>CMUX_SURFACE_ID</code> があり <code>allow_cross_ws</code> が false の
+ときは、明示先が呼び出し元と同一WSであることを検証（別WSは <code>exit 15</code>、<code>XREV_ALLOW_CROSS_WS=true</code> で許可）。</li><li><strong>同一ワークスペース・スコープ解決</strong>（<code>CMUX_SURFACE_ID</code> 必須）。<code>cmux tree --all --json --id-format both</code>
+を呼び出し元 surface の UUID で辿り、<strong>同一WS内</strong>で <code>reviewer_pane_title</code> にタイトル一致（完全→部分）する
+surface を選ぶ。1件→採用 / 複数→<code>exit 16</code>（曖昧）/ 0件→<code>exit 10</code>。<strong><code>active</code>/<code>focused</code> は使わない</strong>
+（フォーカスは他WSへ移動しうるため）。reviewer の役割識別根拠は<strong>タイトル一致 or 明示指定のみ</strong>
+（プロセス名での自動採用はしない＝別作業中の Codex を誤って reviewer にしない）。</li><li><code>CMUX_SURFACE_ID</code> 未注入時のみ、<code>XREV_ALLOW_GLOBAL_RESOLVE=true</code> の明示 opt-in でグローバル解決
+（同一WS保証なし・危険・強い診断）。未許可なら <code>exit 15</code>。</li></ol><p><strong>送信前ゲート（<code>xrev_transport_review</code>、全段通過で初めて送信）</strong>:</p><ol><li><strong>UUID 同一性・WS 所属の再検証</strong>（same_ws 経路）。送信直前に最新 tree を取り直し、解決した surface UUID が
+今も同一WSに存在し、呼び出し元も同一WSに居続けているかを確認（ref 再利用・WS移動・差し替えを <code>exit 15</code> で弾く）。</li><li><strong>端末性プリフライト</strong>。<code>read-screen</code> の成否で判定（成功＝空でも usable / <code>not a terminal</code> 等＝<code>exit 14</code> /
+一時失敗は限定リトライ）。cmux のエージェント統合パネル（PTY 無し）は read-screen 不可なので reviewer に使えない。</li><li><strong>プロセス証明＋安全ポリシー実効検証（<code>_xrev_gate_reviewer</code> に統合。不具合Bへの対処）</strong>。
+対象 surface の tty で<strong>前景プロセスグループ</strong>を握るプロセスが <code>reviewer_process</code>
+（既定 <code>codex</code>）であることを確認し（<code>exit 17</code>）、<strong>同じゲートで続けて</strong>前景プロセスの argv を
+取得し <code>_xrev_verify_effective_policy</code> により sandbox=read-only かつ承認=never が実効に有効かを
+確認する（<code>exit 27</code>）。Codex 終了後に shell へ戻った端末へ payload を送って<strong>コマンド実行</strong>される
+事故と、無承認でワークスペースを変更されてしまう事故の両方をここで防ぐ。手順は
+<code>cmux top --all --processes --format tsv</code> で対象 surface の直下プロセスを <strong>PID 付き</strong>で取得し、
+その PID 群を <code>ps -o pid=,pgid=,tpgid=,comm=</code>（安全ポリシー検証時はさらに <code>args=</code>）に渡して
+<code>pgid == tpgid</code> を満たす1件を特定、その <code>comm</code> の basename を許可名と完全一致で照合したうえで、
+その argv を意味検証にかける。tree の <code>identify</code> はプロセスを出さないため top を使う。<p>直下プロセスの<strong>件数</strong>では判定しない。実機の cmux では surface 直下が常に
+<code>[アプリ, sleep, ログインシェル]</code> の複数件になり、「直下が厳密に1件」は原理的に成立しない
+（旧実装はこれで全ペインを拒否していた）。また cmux の name 列は実行ファイル名とは限らない
+（Claude Code が <code>2.1.220</code> 等のバージョン文字列で報告される）ため、プロセス同定は必ず PID 経由で
+<code>ps</code> に委ねる。</p><p>検査は <strong>3 点</strong>で行う: (iii) payload 構築前の早期棄却 / (iii-b) 本文送信の直前 /
+(iii-c) <strong>Enter の直前（最終ゲート）</strong>。Enter 送信が失敗し再送する場合も再送の直前に同じゲートを
+通す。いずれの点でも<strong>プロセス証明と安全ポリシー実効検証を必ず同じゲートで行い、どちらか一方
+だけを再検証して他方が古いまま残ることを許さない</strong>（後述「TOCTOU は安全ポリシー側にも残る」参照）。
+(iii-c) やそれ以降のゲートで不一致（前景プロセス不一致・安全ポリシー不成立のいずれか）が
+検出されれば Enter を送らずに中止し、送信済みの本文が入力行に残る旨を案内する。限界は
+<a href="../security-design.md"><code>../../docs/security-design.md</code></a> を参照。</p><p><code>XREV_ALLOW_UNVERIFIED_REVIEWER=1</code>（明示 opt-in）のときは各ゲートの安全ポリシー部分だけを
+省略する（プロセス証明は省略しない）。既定は検証する（fail closed）。警告ログは1往復
+（<code>xrev_transport_review</code> の1回の呼び出し）につき1回だけ出す（ゲートごとに出すと同じ警告が
+最大5回積み重なるため）。</p><p><strong>TOCTOU は安全ポリシー側にも残る（不具合Bの教訓）</strong>: 従来は安全ポリシー実効検証を送信処理の
+序盤（旧(iii)直後の(iii')）で1回だけ行い、以降の各ゲートはプロセス名しか再検証していなかった。
+初回検証後に reviewer プロセスが終了し、同名だが書き込み可能な reviewer（例
+<code>--sandbox workspace-write</code> の codex）が起動し直した場合、本文送信〜Enter確定までの描画待ち
+（最大約10秒）の窓で「名前は一致するがポリシーは崩れている」状態を名前検証だけが通過し、
+無承認のまま payload を確定できてしまっていた。プロセス証明と安全ポリシー検証を常に同じゲートで
+行う現在の構成はこれを塞ぐが、<strong>検査から実際の Enter 送出までのごく短い競合窓自体は原理的に
+排除できない</strong>（安全ポリシー検証は ps を追加で叩くためコストが増えるが、結果をキャッシュすると
+まさにこの TOCTOU を再導入するためキャッシュしない）。</p></li></ol><p><code>transport.sh resolve --json</code> は機械可読の診断契約（<code>{ok, exit_code, surface_ref, surface_uuid, workspace,
+resolve_path}</code>）を返す。<code>resolve_path</code> は <code>explicit|same_ws|global</code>。</p><p><strong>read-screen/send/send-key は <code>--workspace &lt;workspace_uuid&gt; --surface &lt;surface_uuid&gt;</code> で指定する（実機知見）</strong>:
+短縮 ref（<code>surface:N</code>）や surface UUID 単独だと、呼び出し元と別ワークスペースの文脈で cmux が surface を
+TerminalPanel として解決できず <code>Surface is not a terminal</code> を返す（＝ワークスペース文脈が要る）。UUID が取れない
+グローバルフォールバック経路のみ従来の <code>--surface &lt;ref&gt;</code> に縮退する。<strong><code>tty</code> フィールドは読み取り可否の指標では
+ない</strong>（シェル統合が報告するメタデータに過ぎない）。読めるかどうかの唯一の受入条件は read-screen probe の成否。</p><blockquote><p><strong>参照モード（diff 本文を送らずファイル参照を渡す方式）は<a href="reference-mode.html">参照モード（Phase2）</a></strong>を参照。
+Phase1 の宛先解決＋送信ゲートが前提（同一WS解決時のみ参照モードを許可）。</p></blockquote><h3 id="送信の堅牢化実機知見">送信の堅牢化（実機知見）</h3><p>送信先が Codex のとき、<strong>ビジー（前応答の処理中）や入力欄の残留（テキスト/ペーストチップ）</strong>が
+あると <code>cmux send</code> が非ゼロで失敗する（<code>cmux send</code> 自体の長さ上限ではない。プレーンシェルへは
+長文も成功する）。そのため <code>_cmux_send_line</code> は <strong>送信前に入力欄をクリアし、失敗時は待って再試行</strong>
+する（既定 5 回・<code>XREV_SEND_RETRIES</code>）。残留が混入したまま送ると prompt が壊れるため、クリアと、
+応答検出側の切り詰め検出で二重に守る。</p><p><strong>入力欄クリアも reviewer 種別で分岐する（C2）</strong>: codex は ctrl-u（行クリア）と backspace（ペースト
+チップ削除）が有効。claude は ctrl-u/ctrl-a/ctrl-k/ctrl-w/escape がいずれも無効（実測）なため、
+生の <code>0x08</code>（バックスペース）バイトを1回の <code>cmux send</code> へまとめて送る方式を使う。</p><nav class="pager"><span><a href="config.html">&larr; config</a></span><span><a href="reviewer-lifecycle.html">reviewer-lifecycle &rarr;</a></span></nav>
+</main>
+</body>
+</html>

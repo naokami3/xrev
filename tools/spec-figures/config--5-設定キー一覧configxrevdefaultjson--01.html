@@ -1,0 +1,49 @@
+<figure class="fig">
+<svg viewBox="0 0 880 380" role="img" aria-labelledby="fig-cf1">
+<title id="fig-cf1">設定の解決優先順位と auto 導出チェーン: 環境変数が config ファイルより優先し、どちらも無ければ既定値。reviewer が auto のときは primary の相手方が導出され、pane_title・process・reads_workspace が連動して決まる。</title>
+<defs>
+<marker id="m-cf1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+</marker>
+</defs>
+<text x="20" y="28" class="boxtitle">解決の優先順位（高 → 低）</text>
+<rect x="20" y="44" width="250" height="52" class="box-accent"/>
+<text x="34" y="66" class="strong">1. 環境変数（XREV_*）</text>
+<text x="34" y="86" class="small">明示指定は常に config より優先・質問しない</text>
+<path class="arrow" d="M 270 70 H 310" marker-end="url(#m-cf1)"/>
+<rect x="310" y="44" width="250" height="52" class="box"/>
+<text x="324" y="66" class="strong">2. config ファイル</text>
+<text x="324" y="86" class="small">XREV_CONFIG（既定 xrev.default.json）</text>
+<path class="arrow" d="M 560 70 H 600" marker-end="url(#m-cf1)"/>
+<rect x="600" y="44" width="260" height="52" class="box"/>
+<text x="614" y="66" class="strong">3. 既定値</text>
+<text x="614" y="86" class="small">数値は _xrev_uint で検証してからフォールバック</text>
+
+<text x="20" y="140" class="boxtitle">auto 導出チェーン（D1: semantic kind = 解決済み reviewer 名）</text>
+<rect x="20" y="156" width="200" height="56" class="box-accent"/>
+<text x="34" y="178" class="strong">primary の決定</text>
+<text x="34" y="198" class="mono">XREV_PRIMARY &gt; config</text>
+<path class="arrow" d="M 220 184 H 260" marker-end="url(#m-cf1)"/>
+<rect x="260" y="156" width="240" height="56" class="box"/>
+<text x="274" y="178" class="strong">reviewer = 「primary の相手方」</text>
+<text x="274" y="198" class="mono">claude→codex ／ codex→claude</text>
+<path class="arrow" d="M 500 184 H 540" marker-end="url(#m-cf1)"/>
+<rect x="540" y="146" width="320" height="150" class="box"/>
+<text x="554" y="170" class="strong">派生 3 キー（解決済み reviewer から導出）</text>
+<text x="554" y="194" class="mono">reviewer_pane_title:</text>
+<text x="554" y="210" class="mono">  codex→"Review Codex" / claude→"Review Claude"</text>
+<text x="554" y="230" class="mono">reviewer_process: reviewer と同名</text>
+<text x="554" y="250" class="mono">reviewer_reads_workspace:</text>
+<text x="554" y="266" class="mono">  claude→true（参照モード専用）/ codex→false</text>
+<text x="554" y="286" class="small">いずれも明示値があればそれが優先</text>
+
+<rect x="20" y="228" width="480" height="68" class="box-err"/>
+<text x="34" y="250" class="strong">矛盾検査（exit 29・副作用の前・fail closed）</text>
+<text x="34" y="270" class="small">reviewer_process の明示値（codex/claude）が解決済み reviewer と不一致、</text>
+<text x="34" y="286" class="small">または reviewer=claude で reads_workspace 明示 false → 3 経路共有の 1 関数で拒否</text>
+
+<text x="20" y="330" class="small">後方互換: XREV_PRIMARY 未設定・既定 config（reviewer=auto）なら primary=claude から reviewer=codex に解決され、</text>
+<text x="20" y="348" class="small">派生 3 キーも旧来の既定値と完全同値。XREV_PRIMARY=codex の自己申告だけで主従反転プリセットと等価な状態になる。</text>
+</svg>
+<figcaption>図: 設定解決の優先順位と D1 の auto 導出。数値設定は共通バリデータ <code>_xrev_uint</code> を通ってから bash 算術式に入る。</figcaption>
+</figure>

@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xrev 詳細仕様 — reviewer ペインのライフサイクル（自動生成・read-only 強制・グローバル導入）</title>
+<style>
+  :root {
+    --bg: #faf9f7; --fg: #24292e; --muted: #6a737d; --card: #ffffff;
+    --line: #d4d0c8; --accent: #3b5bdb; --accent-soft: #e7ecfb;
+    --ok: #2f7d32; --ok-soft: #e5f2e6; --warn: #b26a00; --warn-soft: #f8edda;
+    --err: #c02f2f; --err-soft: #f9e5e5; --ref: #7048a8; --ref-soft: #efe7f8;
+    --box: #f2f0ec; --code: #eceae5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #d8dde3; --muted: #8b949e; --card: #1c2026;
+      --line: #3a4048; --accent: #7c96f0; --accent-soft: #232c45;
+      --ok: #6dbb71; --ok-soft: #1d2f1e; --warn: #d9a04f; --warn-soft: #33281a;
+      --err: #e07575; --err-soft: #382020; --ref: #b394e8; --ref-soft: #2a2138;
+      --box: #232830; --code: #262b33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif;
+    line-height: 1.8; font-size: 16px; }
+  main { max-width: 900px; margin: 0 auto; padding: 0 20px 80px; }
+  header.top { border-bottom: 1px solid var(--line); padding: 22px 0 14px; margin-bottom: 8px;
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+  header.top .crumbs { font-size: 0.9rem; }
+  header.top .crumbs a { color: var(--accent); text-decoration: none; }
+  header.top .src { font-size: 0.8rem; color: var(--muted); }
+  header.top .src a { color: var(--accent); }
+  .gen-note { background: var(--accent-soft); border-radius: 8px; padding: 8px 14px;
+    font-size: 0.82rem; margin: 14px 0; color: var(--fg); }
+  h1 { font-size: 1.55rem; line-height: 1.4; margin: 20px 0 12px; }
+  h2 { font-size: 1.25rem; margin: 44px 0 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 32px 0 8px; }
+  p { margin: 10px 0; }
+  a { color: var(--accent); }
+  code { background: var(--code); padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em;
+    overflow-wrap: anywhere; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; line-height: 1.55; }
+  pre code { background: none; padding: 0; font-size: 0.82rem; }
+  .tablewrap { overflow-x: auto; margin: 14px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  th, td { border: 1px solid var(--line); padding: 7px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--box); white-space: nowrap; }
+  td:first-child code { overflow-wrap: normal; }
+  blockquote { margin: 14px 0; padding: 4px 16px; border-left: 3px solid var(--accent);
+    background: var(--box); border-radius: 0 8px 8px 0; color: var(--muted); }
+  ul, ol { margin: 10px 0; padding-left: 26px; }
+  li { margin: 5px 0; }
+  li p { margin: 8px 0; }
+  nav.pager { display: flex; justify-content: space-between; gap: 12px; margin-top: 48px;
+    border-top: 1px solid var(--line); padding-top: 14px; font-size: 0.9rem; }
+  nav.pager a { color: var(--accent); text-decoration: none; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px; margin: 18px 0; padding: 0; list-style: none; }
+  .cards li { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; margin: 0; }
+  .cards a { font-weight: 600; text-decoration: none; }
+  .cards p { color: var(--muted); font-size: 0.85rem; margin: 6px 0 0; }
+  img { max-width: 100%; vertical-align: middle; }
+
+  /* 図（tools/spec-figures/ からの注入フラグメント用） */
+  .fig { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px; margin: 18px 0; overflow-x: auto; }
+  .fig svg { display: block; min-width: 820px; width: 100%; height: auto; }
+  .fig figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 8px; }
+  figure { margin: 0; }
+  svg text { font-family: "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif; fill: var(--fg); }
+  svg .small { font-size: 11px; fill: var(--muted); }
+  svg .label { font-size: 13px; }
+  svg .strong { font-size: 13px; font-weight: 600; }
+  svg .boxtitle { font-size: 14px; font-weight: 700; }
+  svg .mono { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  svg .mono-strong { font-family: ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700; }
+  svg .frame { fill: none; stroke: var(--line); stroke-width: 1.5; rx: 10; }
+  svg .box { fill: var(--box); stroke: var(--line); stroke-width: 1; rx: 8; }
+  svg .box-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; rx: 8; }
+  svg .box-ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.2; rx: 8; }
+  svg .box-warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; rx: 8; }
+  svg .box-err { fill: var(--err-soft); stroke: var(--err); stroke-width: 1.2; rx: 8; }
+  svg .box-ref { fill: var(--ref-soft); stroke: var(--ref); stroke-width: 1.2; rx: 8; }
+  svg .arrow { stroke: var(--fg); stroke-width: 1.4; fill: none; }
+  svg .arrow-dash { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 4; fill: none; }
+</style>
+</head>
+<body>
+<main>
+<header class="top"><span class="crumbs"><a href="../overview.html">技術概観</a> / <a href="index.html">詳細仕様</a> / reviewer-lifecycle</span><span class="src"><a href="../../references/protocol/reviewer-lifecycle.md">正典（md）を見る</a></span></header><p class="gen-note">本ページは <code>references/protocol/reviewer-lifecycle.md</code>（正典・エージェント向け）から <code>tools/render-spec.sh</code> で自動生成されている。内容の修正は md 側で行い、再生成すること。</p><h1 id="reviewer-ペインのライフサイクル自動生成read-only-強制グローバル導入">reviewer ペインのライフサイクル（自動生成・read-only 強制・グローバル導入）</h1><p><a href="../../references/protocol.md"><code>../protocol.md</code></a>（索引）から分割された正典の一部。</p><p><strong>この文書で分かること</strong>:</p><ul><li>ensure-reviewer（create-if-missing・冪等）の分類・生成・競合の直列化</li><li>reviewer read-only 強制の正典（最終 argv の意味検証）と検証を通す 4 箇所</li><li>サンドボックスと承認が別軸である理由（既定に両方を含める根拠）</li><li>print-agents-snippet.sh --append-global の対象解決・排他ロック・終了コード</li></ul><h3 id="reviewer-ペインの自動生成phase1c-create-if-missing冪等">reviewer ペインの自動生成（Phase1c: create-if-missing・冪等）</h3><figure class="fig">
+<svg viewBox="0 0 880 540" role="img" aria-labelledby="fig-rl1">
+<title id="fig-rl1">ensure-reviewer のフローチャート: 矛盾検査の後に既存ペインを分類し、present なら採用、absent なら WS ロックを取って生成、壊れ・曖昧・別物なら作り直さず人間へ委ねる。</title>
+<defs>
+<marker id="m-rl1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+</marker>
+</defs>
+<rect x="330" y="20" width="220" height="48" class="box-accent"/>
+<text x="440" y="40" class="strong" text-anchor="middle">transport.sh ensure-reviewer</text>
+<text x="440" y="58" class="small" text-anchor="middle">冪等: あれば採用・無ければ 1 枚生成</text>
+
+<path class="arrow" d="M 440 68 V 88" marker-end="url(#m-rl1)"/>
+<rect x="330" y="88" width="220" height="48" class="box-err"/>
+<text x="440" y="108" class="strong" text-anchor="middle">矛盾検査（最優先）</text>
+<text x="440" y="126" class="small" text-anchor="middle">reviewer 設定の矛盾 → exit 29 で中止</text>
+
+<path class="arrow" d="M 440 136 V 156" marker-end="url(#m-rl1)"/>
+<rect x="330" y="156" width="220" height="48" class="box"/>
+<text x="440" y="176" class="strong" text-anchor="middle">分類（resolve + probe）</text>
+<text x="440" y="194" class="small" text-anchor="middle">_xrev_classify_reviewer</text>
+
+<path class="arrow" d="M 350 204 L 160 240" marker-end="url(#m-rl1)"/>
+<path class="arrow" d="M 440 204 V 240" marker-end="url(#m-rl1)"/>
+<path class="arrow" d="M 530 204 L 730 240" marker-end="url(#m-rl1)"/>
+
+<rect x="60" y="240" width="220" height="86" class="box-ok"/>
+<text x="170" y="262" class="strong" text-anchor="middle">present（使える既存あり）</text>
+<text x="170" y="282" class="small" text-anchor="middle">前景=reviewer + 安全ポリシー実効検証</text>
+<text x="170" y="298" class="small" text-anchor="middle">合格 → そのまま採用</text>
+<text x="170" y="316" class="small" text-anchor="middle">不合格 → policy_mismatch（exit 27）</text>
+
+<rect x="330" y="240" width="220" height="86" class="box-warn"/>
+<text x="440" y="262" class="strong" text-anchor="middle">absent（同一 WS に無い）</text>
+<text x="440" y="282" class="small" text-anchor="middle">reviewer_autocreate: ask（既定）=</text>
+<text x="440" y="298" class="small" text-anchor="middle">一拍確認で了承を得てから生成 /</text>
+<text x="440" y="316" class="small" text-anchor="middle">auto = 無確認生成 / off = 案内のみ</text>
+
+<rect x="620" y="240" width="220" height="86" class="box-err"/>
+<text x="730" y="262" class="strong" text-anchor="middle">壊れ / 曖昧 / 別物</text>
+<text x="730" y="282" class="small" text-anchor="middle">non_terminal=14 / ambiguous=16 /</text>
+<text x="730" y="298" class="small" text-anchor="middle">process_mismatch=17</text>
+<text x="730" y="316" class="small" text-anchor="middle">→ 作り直さず人間へ（二重生成しない）</text>
+
+<path class="arrow" d="M 440 326 V 350" marker-end="url(#m-rl1)"/>
+<rect x="280" y="350" width="320" height="56" class="box"/>
+<text x="440" y="372" class="strong" text-anchor="middle">WS 鍵ロック（mkdir 原子取得・回収しない）</text>
+<text x="440" y="392" class="small" text-anchor="middle">取れない側は present を deadline まで待つ → 期限切れ exit 20</text>
+
+<path class="arrow" d="M 440 406 V 430" marker-end="url(#m-rl1)"/>
+<rect x="120" y="430" width="640" height="66" class="box"/>
+<text x="440" y="452" class="strong" text-anchor="middle">生成シーケンス（すべて成功して初めて採用）</text>
+<text x="440" y="472" class="small" text-anchor="middle">new-pane --type terminal（caller WS 明示・返った surface UUID を所有物に固定）→ launch 引数の決定と意味検証</text>
+<text x="440" y="488" class="small" text-anchor="middle">→ exec reviewer → read-screen probe + 前景=reviewer 確認 → 実 argv の実効検証 → rename-tab（規約タイトル）</text>
+
+<text x="120" y="522" class="small">launch 引数の決定失敗・起動未確認・実効未確認はいずれも exit 19（autocreate_failed）。タブ名は起動の「後」に設定する</text>
+<text x="120" y="538" class="small">（codex は起動時に cwd 由来の名前でタイトルを上書きするため。rename が定着して次回の title 解決が当たる = 冪等性の要）。</text>
+</svg>
+<figcaption>図: ensure-reviewer の分岐。既存が壊れているときに「作り直す」選択肢を持たないのは、誤った二重生成を防ぐため。</figcaption>
+</figure>
+<p><code>transport.sh ensure-reviewer</code> は「同一WSに使える reviewer があれば採用、無ければ1枚だけ生成」する（冪等）。
+マーケット導入ユーザーがスクリプトのパスを知らなくても、何も手実行せず reviewer が用意されることを狙う。
+設計は 4 ラウンドのクロスレビューで収束。</p><ul><li><strong>矛盾検査が最優先（指摘3・2巡目）</strong>: <code>_xrev_classify_reviewer</code>（分類・resolve＋probe）を呼ぶ<strong>前</strong>に
+<code>_xrev_guard_reviewer_conflicts</code> で reviewer 設定の矛盾を検査する（<code>exit 29</code>）。矛盾があるまま
+ペイン生成へ進み、生成後に別の理由（送信時の <code>exit 29</code> や起動確認の失敗）で気づく事故を避ける。</li><li><strong>分類</strong>: resolve＋probe で <code>present</code>/<code>absent</code>/<code>ambiguous</code>(16)/<code>non_terminal</code>(14)/<code>process_mismatch</code>(17) を判別。
+既存が<strong>壊れ(14)/曖昧(16)/別物(17)</strong>のときは<strong>作り直さず人間へ</strong>（誤って二重生成しない）。</li><li><strong>生成は absent のときだけ</strong>: caller の WS UUID を明示して <code>cmux new-pane --type terminal --workspace &lt;WS&gt;</code> で生成し、
+<strong>new-pane が返した surface UUID を所有物に固定</strong>（title は一意でないので生成判定に使わない）→
+<code>reviewer_launch_args</code>（read-only 強制。下記参照）を決定して各要素を shell-safe クォート →
+<code>send 'exec &lt;quoted codex&gt; &lt;quoted launch args...&gt;'</code> → read-screen probe 成功＋直下=codex で起動確認 →
+直下プロセスの実コマンドラインに launch 引数が含まれることを検証（<code>_verify_reviewer_launch_args</code>）→
+<code>rename-tab</code> で規約タイトル。launch 引数の決定失敗・起動未確認・実効未確認はいずれも <code>exit 19</code>。</li><li><strong>競合の直列化</strong>: WS UUID 鍵の <code>mkdir</code> ロック（${TMPDIR}/xrev-reviewer-&lt;wsuuid&gt;.lock・<strong>リポジトリには作らない</strong>）を
+原子取得。<strong>ロックは回収しない</strong>（stale 回収レースを構造的に排除）。取れない側は<strong>奪わず</strong> deadline まで
+read+codex 確認済みの present を待ち、期限切れは <code>exit 20</code>（残留ロックは案内に従い手動削除）。これで複数 primary
+同時実行でも「1枚だけ生成・他は採用」へ収束する。</li><li><strong>モード</strong>: <code>reviewer_autocreate</code> = <code>ask</code>(既定)/<code>auto</code>/<code>off</code>。<code>ask</code> はスキルが一拍確認で「作成しますか？」を確認して
+から <code>auto</code> 相当で呼ぶ（ペイン生成はレイアウトを変える副作用のため暴発させない）。<code>off</code> は生成せず案内のみ。</li><li>手動経路 <code>scripts/start-reviewer.sh</code>（既に開いた端末をその場で reviewer にする）とはタイトル・codex バイナリ解決を
+共有し、仕様の乖離を避ける。</li><li><strong>タブ名は codex 起動の「後」に設定する（実機知見）</strong>: codex は起動時にタブ名を cwd 由来の名前で上書きするため、
+起動前に rename しても定着しない。生成は「起動確認 → rename」の順にする。<code>rename-tab</code> も read/send 同様
+<code>--workspace &lt;ws_uuid&gt; --surface &lt;surface_uuid&gt;</code> 指定が要る（短縮 ref/uuid 単独は <code>Tab not found</code>）。これにより
+reviewer_pane_title が定着し、次回の title 解決が当たる（create-if-missing の冪等性を保つ）。</li></ul><h3 id="reviewer-read-only-強制最終-argv-の意味検証が正典">reviewer read-only 強制（最終 argv の意味検証が正典）</h3><p>SKILL.md は「reviewer = レビュー専用・read-only」と約束する。これを起動経路（<code>start-reviewer.sh</code> の
+手動起動 / <code>_xrev_create_reviewer</code> の自動生成）と、既存ペインを「採用」する経路の<strong>両方</strong>で機械的に
+強制する。設計はクロスレビューで収束。</p><p><strong>正典は「拒否リスト」ではなく「最終 argv の意味検証」である。</strong> 拒否リスト（前方一致でフラグを
+弾く方式）は、型として不正な値（空配列・危険値）を持つ config/env や、<code>-s</code>（codex の sandbox 短縮形）
+のような未収録の表現・結合形式（<code>-sdanger-full-access</code>）による後置上書きを原理的に漏らす。そこで
+<code>transport.sh</code> の純粋関数 <code>_xrev_verify_effective_policy &lt;reviewer 種別&gt; &lt;argv...&gt;</code> を単一の判定基盤とし、
+「最終的に reviewer へ渡る argv 列」に対して<strong>実効値</strong>を合成してから合否を判定する。</p><ul><li><strong>認識する引数形式（codex）</strong>: sandbox = <code>--sandbox &lt;値&gt;</code> / <code>--sandbox=&lt;値&gt;</code> / <code>-s &lt;値&gt;</code> /
+<code>-s&lt;値&gt;</code>（結合形式）。承認 = <code>--ask-for-approval &lt;値&gt;</code> / <code>--ask-for-approval=&lt;値&gt;</code> / <code>-a &lt;値&gt;</code> /
+<code>-a&lt;値&gt;</code>（結合形式）。</li><li><strong>複数指定は理由を問わず拒否する</strong>: sandbox・承認それぞれの指定は argv 全体を左から走査して集め、
+<strong>ちょうど1回</strong>だけ現れることを要求する。0回（指定なし）はもちろん、2回以上（例: 安全な組の
+直後に <code>-s danger-full-access</code> を後置する攻撃）も、<strong>たとえ最後の値が安全でも拒否</strong>する。
+「後勝ちで良しとする」寛容さは意図的に採らない — 同じ軸への複数指定それ自体が「意図が曖昧な
+argv」であり、fail closed の対象にする。</li><li><strong>合格条件</strong>: sandbox の実効値が <code>read-only</code>、かつ承認の実効値が <code>never</code> であること。加えて
+<code>--dangerously-bypass-approvals-and-sandbox</code> / <code>--full-auto</code> / <code>--yolo</code>（完全一致。前方一致では
+なく、リストは関数内の1箇所にまとめる）のいずれも含まれていないこと。claude は
+<code>--permission-mode &lt;値&gt;</code> / <code>--permission-mode=&lt;値&gt;</code> の実効値が一意に <code>plan</code> であることを要求し、
+短縮形を持たないため他の形式は「該当なし」として扱われ結果的に拒否される（fail closed）。
+未知の reviewer 種別も fail closed。</li><li><strong><code>_xrev_verify_effective_policy</code> を通す4箇所</strong>:<ol><li><strong>launch 引数の決定直後</strong>（<code>_xrev_reviewer_launch_args</code> 内）。config/env の型検証を通っても
+「安全なポリシーか」は別問題（空配列や <code>["--sandbox","danger-full-access"]</code> も型としては正しい）
+なので、決定した引数列そのものを意味検証にかけ、不合格なら非ゼロ（fail closed）にする。</li><li><strong><code>start-reviewer.sh</code> の最終 argv</strong>（launch 引数 + ユーザー追加引数を連結した後の列全体）。
+これにより <code>-s</code> の短縮形・結合形式によるあらゆる後置上書きを検出する。</li><li><strong>起動後、実際に走っているプロセスの argv</strong>（<code>_verify_reviewer_launch_args</code>）。従来の
+「launch 引数が部分文字列として含まれるか」という判定は、launch 引数の<strong>後ろ</strong>に危険な
+引数が付いていても部分一致さえ満たせば通ってしまう欠陥があったため置き換えた。
+<strong>argv の取得は <code>sysctl(KERN_PROCARGS2)</code> 経由（<code>_xrev_procargs2_snapshot</code>。指摘2への対処）</strong>:
+以前は <code>ps -o pid=,args=</code> が返す表示用文字列を空白区切りで argv へ再分解していたが、この
+表示用文字列はシェルが見せるための整形済みテキストにすぎず argv の要素境界を保持しない。
+cmux が claude へ自動注入する <code>--settings &lt;JSON&gt;</code>（値の内部に空白を含む単一 argv 要素。
+probe-report.md R1 で実測）のような引数があると、その値の<strong>内部</strong>に現れた
+<code>--permission-mode plan</code> のような文字列を独立した実フラグと誤認しうる（安全ポリシーの
+誤判定に直結する high 指摘）。<code>sysctl(KERN_PROCARGS2)</code> はカーネルが保持する実 argv を
+境界保持のまま（python3 の ctypes で直接呼び出して）返すため、この誤認は構造的に起きない。
+macOS 専用の機構であり、取得できない場合（非 macOS・権限不足・パース不能）は当該 PID を
+結果から省略する＝そのプロセスは意味検証に到達せず、他に合格する候補が無ければ
+fail closed（<code>_xrev_create_reviewer</code> 経路は <code>exit 19</code>、<code>_xrev_classify_reviewer</code>/
+<code>_xrev_verify_reviewer_policy</code> 経路は <code>exit 27</code>）。</li><li><strong>既存ペインを「採用」する経路の実効検証</strong>（<code>_xrev_verify_reviewer_policy</code>。下記参照）。
+<code>xrev_transport_review</code> では不具合Bの対処により、この検証を送信序盤の1回だけでなく
+<code>_xrev_gate_reviewer</code> を介して全ての送信ゲート（早期棄却・本文送信直前・Enter直前・
+Enter再送前）で毎回行う（詳細は<a href="delivery-gates.html">宛先解決と送信ゲート</a>の「送信前ゲート」）。</li></ol></li><li><strong>単一の生成関数（型検証）</strong>: <code>transport.sh</code> の <code>_xrev_reviewer_launch_args &lt;reviewer バイナリ名&gt;</code> を
+両起動経路が共有する。優先順位は env <code>XREV_REVIEWER_LAUNCH_ARGS</code>（JSON 配列文字列）&gt; config の
+<code>reviewer_launch_args[&lt;basename&gt;]</code>。型検証（object であること・キー存在・文字列のみの配列・
+印字可能ASCIIのみ・空文字列不可）に加えて上記の意味検証を通り、違反時・未知 reviewer 時は
+fail closed。出力は1行1要素（改行区切り）で、呼び出し側は <code>while read</code> で bash 配列へ集める
+（<strong>eval は使わない</strong>）。</li><li><strong>拒否リストは早期棄却の best-effort（正典ではない）</strong>: <code>_xrev_reject_unsafe_reviewer_args</code>
+（前方一致: <code>--sandbox</code> <code>-s</code> <code>--ask-for-approval</code> <code>--approval</code> <code>--full-auto</code> <code>--dangerously</code>
+<code>--permission-mode</code> <code>--yolo</code> <code>-a</code>）は分かりやすいエラーメッセージを即座に返すための早期ゲートに
+すぎない。<code>start-reviewer.sh</code> はユーザー追加引数をこれに通してから launch 引数の<strong>後ろ</strong>に連結する
+が、最終的な合否は必ず上記の意味検証（最終 argv 全体）で決まる。</li><li><strong>起動後の実効検証</strong>: 自動生成経路は起動確認（read-screen probe + プロセス証明）に加え、
+<code>_verify_reviewer_launch_args</code> で対象 surface の直下プロセスの実効ポリシーを確認してから採用する。
+確認できなければ <code>exit 19</code>（採用しない）。</li><li><strong>既存ペインを「採用」する経路の実効検証（指摘3への対処）</strong>: 従来は前景プロセス名が
+<code>reviewer_process</code>（既定 <code>codex</code>）と一致することしか見ておらず、手動起動・旧版の書き込み可能な
+ままの端末がそのまま present（採用）扱いになり得た。<code>_xrev_classify_reviewer</code> の present 判定
+（<code>_verify_reviewer_process</code> 成功後）と、<code>xrev_transport_review</code> の全送信ゲート（<code>_xrev_gate_reviewer</code>
+経由。不具合Bへの対処により1回だけでなく毎ゲート）の双方で <code>_xrev_verify_reviewer_policy</code> を通し、
+対象 surface の前景プロセスの argv を取得して意味検証にかける。不合格なら <code>_xrev_classify_reviewer</code>
+は <code>policy_mismatch</code> を返し <code>exit 27</code>、
+<code>xrev_ensure_reviewer</code> / <code>xrev_transport_review</code> の呼び出し側はこれを受けて「ペインを閉じて
+ensure-reviewer で作り直すか、start-reviewer.sh で起動し直してください」と案内して中止する。
+既定はこの検証を行う（fail closed）。<code>XREV_ALLOW_UNVERIFIED_REVIEWER=1</code>（明示 opt-in）のときだけ
+検証を省略し警告ログを出す — 手動で用意した reviewer を使う運用を完全に壊さないための後方互換。</li><li><strong>サンドボックスと承認は別軸である（既定に両方を含める理由）</strong>: codex の <code>--sandbox read-only</code> は
+「何ができるか」を縛るが、コマンド実行のたびに人間へ承認を求めるかどうかは <code>--ask-for-approval</code> が
+決める別の軸である。承認ポリシーを既定のままにすると、reviewer が <code>git diff</code> や <code>tests/run.sh</code> を
+実行しようとするたびに承認プロンプトで停止し、<strong>人間の操作なしに往復させる</strong>という xrev の目的が
+成立しない（応答が来ないまま <code>response_timeout_seconds</code> を使い切る）。とくに参照モードは reviewer 自身に
+diff 取得を行わせるため必ずこの経路を踏む。よって既定は <code>--sandbox read-only --ask-for-approval never</code>
+の<strong>組</strong>とする。<code>never</code> は「承認を求めず、実行失敗はモデルへ返す」の意味であり、サンドボックスは
+そのまま効いている（書き込み・ネットワークは read-only サンドボックスが禁じる）。承認プロンプトを
+外すことは権限の緩和ではなく、権限の強制を sandbox 側へ一本化することである。
+<strong>片方だけを設定してはならない</strong>: <code>--ask-for-approval never</code> を sandbox 指定なしで使うと、承認も
+サンドボックスも無い状態になる。この組を崩す変更は安全性の変更として扱うこと。</li><li><strong>限界</strong>: 同名の別バイナリへの差し替えや、codex/claude 自身の設定ファイル側での上書きまでは
+検出・保証しない（詳細は <a href="../security-design.md"><code>../../docs/security-design.md</code></a>）。</li></ul><h3 id="print-agents-snippetsh---append-globald3グローバル導入">print-agents-snippet.sh --append-global（D3・グローバル導入）</h3><p><code>scripts/print-agents-snippet.sh</code> は既定で stdout にスニペットを出すだけだが、<code>--append-global</code>
+は codex のグローバル指示ファイル（<code>$CODEX_HOME/AGENTS.md</code>。<code>CODEX_HOME</code> 未設定なら既定
+<code>~/.codex/AGENTS.md</code>）へスニペットを冪等に追記/更新する。R7 実測（<code>codex exec</code> を一時
+<code>CODEX_HOME</code> で実行し確認済み）: codex は起動時にこのファイルを読み込む。</p><p><strong>対象解決</strong>（lstat 基準・最初に該当した規則のみ）:</p><ol><li>symlink（存否より先に判定）→ <code>realpath</code> 成功必須。失敗（リンク切れ）は無変更で fail closed
+（リンクを温存する。上書きしない）。</li><li>symlink でない既存通常ファイル → <code>realpath</code> 正規化。</li><li>存在しない → 初回導入。<code>CODEX_HOME</code> ディレクトリ（存在必須。無ければ fail closed。<code>mkdir</code> は
+しない）を <code>realpath</code> 正規化し <code>basename "AGENTS.md"</code> を結合。</li><li>その他（ディレクトリ・FIFO 等）→ 無変更で fail closed。</li></ol><p><strong>path は bash の command substitution を一度も通らない（指摘1・4巡目・正典）</strong>: <code>--append-global</code>
+の実処理（対象解決→ロック→マーカー検査→一時ファイル→mv直前再検証→mv）は<strong>すべて単一の python
+プロセス内</strong>で行う。3巡目までの実装は対象解決の結果（kind・canonical path・<code>CODEX_HOME</code>）を JSON
+で python→bash へ返し、bash 側が <code>resolved="$(...)"</code> のようなコマンド置換で受けてからフィールドを
+再抽出していたが、コマンド置換は末尾の改行を無条件に取り除くため、<code>CODEX_HOME</code> や symlink 解決先が
+<strong>改行で終わる有効なパス</strong>だと、そのフィールドを再抽出した時点で末尾の改行が失われ canonical
+target が別パスに変化してしまい、誤配送防止が未達だった（タブや改行が"途中"にあるだけのケースは
+JSON化で救えていたが、末尾の改行はどのみち再抽出の command substitution で失われるため検出でき
+なかった）。ここでは path を運ぶ経路を「python プロセス内のローカル変数」に限定し、bash は
+オプション解釈・スニペット本文の stdin 渡し・python の終了コードの伝播だけを担う。診断メッセージ・
+成功メッセージも python が直接 stderr/stdout へ書く（bash での再組み立てをしない）。</p><p>対象解決 <code>_xrev_resolve_agents_target(home_dir)</code> と書き込み本体 <code>_xrev_write_agents_file(...)</code>
+（下記）は transport.sh の <code>_xrev_*_py_src</code> 共有方式に倣い、python の関数定義だけを返す bash
+関数（<code>_xrev_agents_resolve_py_src</code> / <code>_xrev_agents_write_py_src</code>）として実体を持つ。本番の結合
+ドライバ（<code>_xrev_append_global</code>）はこの2つと専用の driver 片を1つの python プロセスへ結合して
+実行し、テスト（下記）も同じ実体を共有する（判定ロジックの二重管理をしない）。単体で対象解決だけを
+確認したいテスト向けに <code>_xrev_resolve_agents_target</code>（bash 関数。stdout に JSON を返す）を残して
+いるが、<strong>本番の <code>--append-global</code> 経路はこれを経由しない</strong>。</p><p><strong>排他ロック</strong>: 正規対象（realpath 後）の親ディレクトリに固定名 <code>.&lt;basename&gt;.xrev-lock</code>（<code>mkdir</code>
+原子取得。<code>TMPDIR</code> 等の環境依存値はロックパスに含めない）。symlink 経由でも直接 realpath を指した
+別実行でも、ロックは同じ正規対象の親ディレクトリに収束する。取得後に「再読取り→マーカー構造検査→
+一時ファイル生成→パーミッション引き継ぎ(stat→chmod)→mv」を行う（すべて同一 python プロセス内。
+TOCTOU 窓を最小化する）。ロック解放は python の <code>try</code>/<code>finally</code> で必ず行う（自己解放）。競合時は
+<strong>待機せず無変更で拒否</strong>する（診断で再実行を案内）。</p><p>mv 直前に、正規対象の状態が「ロック内で読んだ時点（baseline）」から不変であることを確認する補助
+検査を行う（ロックの代替ではない。非協調プロセス＝エディタ等による同時書き換え対策）。<strong>比較対象は
+種別（<code>lstat</code> による通常ファイルか否か）・識別情報（<code>st_dev</code>/<code>st_ino</code>）・パーミッション（mode）・
+内容 sha256 のすべて</strong>（指摘2・3巡目。旧実装は exists の真偽と内容 sha256 だけを比較しており、
+非協調プロセスが対象を「同一バイト列の別ファイル」（通常ファイルを同内容の symlink に置換する、
+またはエディタの atomic-save のように新しい inode の同内容ファイルへ差し替える）へ入れ替えても
+見逃していた。<code>os.replace</code> は symlink を辿らずリンクそのものを置き換えるため、置換後にそこへ
+書き込むのは意図しない対象の破壊になる。また mode だけの変更（内容は不変）も検出できず、
+旧 baseline の mode で静かに上書きしていた）。上記いずれか1つでも変化していれば無変更で拒否する。</p><p><strong>書き込み本体はテスト用の hook を持つ純粋関数（指摘2・4巡目）</strong>: <code>_xrev_write_agents_file(target,
+begin, end, snippet, hook=None)</code> は一時ファイル書き出し・パーミッション引き継ぎの直後、mv 直前の
+再検証の直前で <code>hook</code>（引数なしの callable。既定 <code>None</code>）を呼ぶ。<strong>本番のドライバは常に
+<code>hook=None</code> で呼び出し、この引数は一切使わない</strong>。3巡目までの実装は
+<code>XREV_TEST_AGENTS_WRITE_SYNC_DIR</code> という環境変数でテスト専用の同期（baseline 取得後に一時停止し、
+外部から <code>chmod</code> を注入できるようにする）を行っていたが、<strong>本番コードが無条件に信頼する env
+フックは、利用者環境や上位エージェントから継承されるだけで「任意ディレクトリに <code>ready</code> ファイルを
+作成・最大10秒停止」できる外部書込み能力になり、「未設定なら no-op」は安全境界にならない</strong>と判定
+され撤回した。代わりに、書き込みロジックを hook 引数を持つ python 関数として定義し、テストは
+<code>_xrev_agents_write_py_src</code>（本番と共有する実体）にテスト専用の小さな driver を結合した自前の
+python プロセスから <code>hook</code> へ直接 <code>chmod</code> を注入して駆動する（env 経由の到達経路を一切作らない。
+transport.sh の <code>_xrev_*_py_src</code> 共有方式と同じ流儀）。symlink 置換・inode 差し替えは「毎回
+新規 inode」という単調に一意な性質を利用した継続レースのままで確実に検出できる（決定論的な
+hook 注入が要るのは mode のような小さな値集合の変化だけ）。</p><p><strong>マーカー</strong>: <code>&lt;!-- xrev:snippet:BEGIN --&gt;</code> / <code>&lt;!-- xrev:snippet:END --&gt;</code> の対で挟む。0 対=末尾
+追記 / 正確に1対（BEGIN が END より前）=範囲置換（マーカー内側のみ）/ それ以外（欠損・重複・
+入れ子・逆順）=無変更で fail closed。BEGIN/END は常に独立行にする（<strong>指摘2・2巡目</strong>: 呼び出し側は
+<code>body="$(_xrev_snippet_body)"</code> という command substitution でスニペット本文を受け取るため、bash が
+本文末尾の改行を無条件に取り除く。writer 側でスニペット本文を必ず1個の末尾改行で終わるよう正規化
+してから END マーカーを続けることで、生成ファイルでも本文最終行の直後に END が連結されず、
+stdout モードと同じ「独立行のマーカーブロック」形式を保つ）。</p><p><strong>契約差（ensure-reviewer の WS ロックとの違い。重要）</strong>: <code>transport.sh ensure-reviewer</code> の WS
+ロックは「回収しない」（stale 回収レースを構造的に排除するため）ため競合側は deadline まで present
+を待つ。本ロックは性質が異なる: 生成（cmux ペインという副作用の大きい対象）ではなく既存ファイルへの
+短時間の書き込みであるため、<strong>このプロセスが必ず自己解放し</strong>、<strong>競合したら待機せず即座に拒否する</strong>
+（待つ意味が薄く、待つより早く失敗させて再実行を促す方が診断しやすいため）。</p><p><strong>対象解決の I/O エラー（指摘1・2巡目）</strong>: 対象パスの <code>lstat</code>／symlink 先の <code>stat</code>／<code>CODEX_HOME</code>
+の存在確認は、<code>FileNotFoundError</code> だけを「未作成」として受理する。権限拒否や親経路が非ディレクトリ
+であるといった、それ以外の <code>OSError</code> を「存在しない」と誤分類して初回導入(new)扱いにはしない
+（fail-open の欠陥だった）。専用の <code>error</code> kind として無変更で拒否する（<code>exit 16</code>）。また symlink は
+リンク先を実際に <code>stat</code>（シンボリックリンクを辿る）して通常ファイルであることまで確認し、
+ディレクトリ等を指す symlink は canonical target にしない（<code>other</code> 扱いで拒否）。</p><p><strong>終了コード</strong>（<code>print-agents-snippet.sh</code> 独自の名前空間。<code>transport.sh</code> の終了コードとは無関係）:
+0=成功 / 10=dangling symlink（リンク温存） / 11=<code>CODEX_HOME</code> ディレクトリ不在（<code>mkdir</code> しない） /
+12=対象が想定外の種類（symlink のリンク先がディレクトリ等の場合を含む） /
+13=ロック競合（待機せず拒否） / 14=マーカー構造異常（欠損・重複・逆順） /
+15=mv 直前の内容変化（無変更で拒否） / 16=対象解決中の I/O エラー（権限拒否等。指摘1・2巡目） /
+1=その他の内部エラー。</p><nav class="pager"><span><a href="delivery-gates.html">&larr; delivery-gates</a></span><span><a href="reference-mode.html">reference-mode &rarr;</a></span></nav>
+</main>
+</body>
+</html>

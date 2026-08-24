@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xrev 詳細仕様 — レビュー契約（severity・verdict・act ラベル）</title>
+<style>
+  :root {
+    --bg: #faf9f7; --fg: #24292e; --muted: #6a737d; --card: #ffffff;
+    --line: #d4d0c8; --accent: #3b5bdb; --accent-soft: #e7ecfb;
+    --ok: #2f7d32; --ok-soft: #e5f2e6; --warn: #b26a00; --warn-soft: #f8edda;
+    --err: #c02f2f; --err-soft: #f9e5e5; --ref: #7048a8; --ref-soft: #efe7f8;
+    --box: #f2f0ec; --code: #eceae5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #d8dde3; --muted: #8b949e; --card: #1c2026;
+      --line: #3a4048; --accent: #7c96f0; --accent-soft: #232c45;
+      --ok: #6dbb71; --ok-soft: #1d2f1e; --warn: #d9a04f; --warn-soft: #33281a;
+      --err: #e07575; --err-soft: #382020; --ref: #b394e8; --ref-soft: #2a2138;
+      --box: #232830; --code: #262b33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif;
+    line-height: 1.8; font-size: 16px; }
+  main { max-width: 900px; margin: 0 auto; padding: 0 20px 80px; }
+  header.top { border-bottom: 1px solid var(--line); padding: 22px 0 14px; margin-bottom: 8px;
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+  header.top .crumbs { font-size: 0.9rem; }
+  header.top .crumbs a { color: var(--accent); text-decoration: none; }
+  header.top .src { font-size: 0.8rem; color: var(--muted); }
+  header.top .src a { color: var(--accent); }
+  .gen-note { background: var(--accent-soft); border-radius: 8px; padding: 8px 14px;
+    font-size: 0.82rem; margin: 14px 0; color: var(--fg); }
+  h1 { font-size: 1.55rem; line-height: 1.4; margin: 20px 0 12px; }
+  h2 { font-size: 1.25rem; margin: 44px 0 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 32px 0 8px; }
+  p { margin: 10px 0; }
+  a { color: var(--accent); }
+  code { background: var(--code); padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em;
+    overflow-wrap: anywhere; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; line-height: 1.55; }
+  pre code { background: none; padding: 0; font-size: 0.82rem; }
+  .tablewrap { overflow-x: auto; margin: 14px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  th, td { border: 1px solid var(--line); padding: 7px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--box); white-space: nowrap; }
+  td:first-child code { overflow-wrap: normal; }
+  blockquote { margin: 14px 0; padding: 4px 16px; border-left: 3px solid var(--accent);
+    background: var(--box); border-radius: 0 8px 8px 0; color: var(--muted); }
+  ul, ol { margin: 10px 0; padding-left: 26px; }
+  li { margin: 5px 0; }
+  li p { margin: 8px 0; }
+  nav.pager { display: flex; justify-content: space-between; gap: 12px; margin-top: 48px;
+    border-top: 1px solid var(--line); padding-top: 14px; font-size: 0.9rem; }
+  nav.pager a { color: var(--accent); text-decoration: none; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px; margin: 18px 0; padding: 0; list-style: none; }
+  .cards li { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; margin: 0; }
+  .cards a { font-weight: 600; text-decoration: none; }
+  .cards p { color: var(--muted); font-size: 0.85rem; margin: 6px 0 0; }
+  img { max-width: 100%; vertical-align: middle; }
+
+  /* 図（tools/spec-figures/ からの注入フラグメント用） */
+  .fig { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px; margin: 18px 0; overflow-x: auto; }
+  .fig svg { display: block; min-width: 820px; width: 100%; height: auto; }
+  .fig figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 8px; }
+  figure { margin: 0; }
+  svg text { font-family: "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif; fill: var(--fg); }
+  svg .small { font-size: 11px; fill: var(--muted); }
+  svg .label { font-size: 13px; }
+  svg .strong { font-size: 13px; font-weight: 600; }
+  svg .boxtitle { font-size: 14px; font-weight: 700; }
+  svg .mono { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  svg .mono-strong { font-family: ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700; }
+  svg .frame { fill: none; stroke: var(--line); stroke-width: 1.5; rx: 10; }
+  svg .box { fill: var(--box); stroke: var(--line); stroke-width: 1; rx: 8; }
+  svg .box-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; rx: 8; }
+  svg .box-ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.2; rx: 8; }
+  svg .box-warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; rx: 8; }
+  svg .box-err { fill: var(--err-soft); stroke: var(--err); stroke-width: 1.2; rx: 8; }
+  svg .box-ref { fill: var(--ref-soft); stroke: var(--ref); stroke-width: 1.2; rx: 8; }
+  svg .arrow { stroke: var(--fg); stroke-width: 1.4; fill: none; }
+  svg .arrow-dash { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 4; fill: none; }
+</style>
+</head>
+<body>
+<main>
+<header class="top"><span class="crumbs"><a href="../overview.html">技術概観</a> / <a href="index.html">詳細仕様</a> / review-contract</span><span class="src"><a href="../../references/protocol/review-contract.md">正典（md）を見る</a></span></header><p class="gen-note">本ページは <code>references/protocol/review-contract.md</code>（正典・エージェント向け）から <code>tools/render-spec.sh</code> で自動生成されている。内容の修正は md 側で行い、再生成すること。</p><h1 id="レビュー契約severityverdictact-ラベル">レビュー契約（severity・verdict・act ラベル）</h1><p><a href="../../references/protocol.md"><code>../protocol.md</code></a>（索引）から分割された正典の一部。</p><p><strong>この文書で分かること</strong>:</p><ul><li>どの severity が blocker で、収束をどう機械判定するか</li><li>verdict の位置づけ（収束判定には使わない）</li><li>act ラベルの語彙と会話終端の規則（think に追撃しない / close に返信しない）</li></ul><h2 id="2-severity-と-verdict">2. severity と verdict</h2><figure class="fig">
+<svg viewBox="0 0 880 300" role="img" aria-labelledby="fig-rc1">
+<title id="fig-rc1">severity から収束判定までの流れ: findings の severity を集計し、blocker（critical と high）が 0 件なら converged、残っていれば反復上限に応じて continue か escalate になる。</title>
+<defs>
+<marker id="m-rc1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+</marker>
+</defs>
+<rect x="20" y="30" width="220" height="70" class="box"/>
+<text x="34" y="54" class="strong">reviewer の findings[]</text>
+<text x="34" y="74" class="small">severity: critical / high /</text>
+<text x="34" y="90" class="small">medium / low / nit</text>
+
+<path class="arrow" d="M 240 65 H 290" marker-end="url(#m-rc1)"/>
+
+<rect x="290" y="30" width="240" height="70" class="box-accent"/>
+<text x="304" y="54" class="strong">blocker 集計（機械判定）</text>
+<text x="304" y="74" class="mono">severity_blockers =</text>
+<text x="304" y="90" class="mono">["critical","high"]（既定）</text>
+
+<path class="arrow" d="M 530 65 H 580" marker-end="url(#m-rc1)"/>
+
+<rect x="580" y="36" width="150" height="56" class="box"/>
+<text x="655" y="60" class="strong" text-anchor="middle">blockers == 0 ?</text>
+<text x="655" y="80" class="small" text-anchor="middle">verdict は判定に使わない</text>
+
+<path class="arrow" d="M 655 92 V 130" marker-end="url(#m-rc1)"/>
+<text x="668" y="118" class="small">yes</text>
+<rect x="580" y="130" width="150" height="48" class="box-ok"/>
+<text x="655" y="150" class="strong" text-anchor="middle">converged</text>
+<text x="655" y="168" class="small" text-anchor="middle">収束・次工程へ</text>
+
+<path class="arrow" d="M 730 64 H 790 V 130" marker-end="url(#m-rc1)"/>
+<text x="748" y="56" class="small">no</text>
+<rect x="740" y="130" width="120" height="48" class="box"/>
+<text x="800" y="150" class="strong" text-anchor="middle">iter &lt; 上限?</text>
+<path class="arrow" d="M 770 178 V 210" marker-end="url(#m-rc1)"/>
+<text x="742" y="200" class="small">yes</text>
+<rect x="680" y="210" width="120" height="44" class="box-accent"/>
+<text x="740" y="230" class="strong" text-anchor="middle">continue</text>
+<text x="740" y="246" class="small" text-anchor="middle">反映して ITER+1</text>
+<path class="arrow" d="M 840 178 V 210" marker-end="url(#m-rc1)"/>
+<text x="848" y="200" class="small">no</text>
+<rect x="810" y="210" width="60" height="44" class="box-warn"/>
+<text x="840" y="230" class="strong" text-anchor="middle">esca-</text>
+<text x="840" y="246" class="strong" text-anchor="middle">late</text>
+
+<rect x="20" y="130" width="510" height="124" class="box"/>
+<text x="34" y="154" class="strong">blocker にならない severity の扱い（運用指針）</text>
+<text x="34" y="176" class="small">medium: 1〜2 周だけ反映し、以降は無視して収束扱い（medium_low_max_rounds は助言値。</text>
+<text x="34" y="192" class="small">スクリプトは消費せず、スキルが運用指針として参照する）。low / nit: 任意。収束を妨げない。</text>
+<text x="34" y="216" class="small">例外: decode_error の finding は severity・severity_blockers の設定に関わらず常に blocker として</text>
+<text x="34" y="232" class="small">集計される（誤収束防止。message-format の「失敗時の契約」参照）。</text>
+</svg>
+<figcaption>図: 収束は verdict（reviewer の自己申告）ではなく blocker 件数で機械的に決まる。</figcaption>
+</figure>
+<div class="tablewrap"><table><thead><tr><th>severity</th><th>blocker か</th><th>往復での扱い</th></tr></thead><tbody><tr><td><code>critical</code></td><td>yes</td><td>0 件になるまで反映（収束条件）</td></tr><tr><td><code>high</code></td><td>yes</td><td>同上</td></tr><tr><td><code>medium</code></td><td>no</td><td>1〜2 周のみ反映、以降は無視して収束扱い</td></tr><tr><td><code>low</code></td><td>no</td><td>任意。収束を妨げない</td></tr><tr><td><code>nit</code></td><td>no</td><td>任意</td></tr></tbody></table></div><ul><li>blocker の集合は <code>config/xrev.default.json</code> の <code>severity_blockers</code> で定義（既定 <code>["critical","high"]</code>）。</li><li><code>verdict</code> は <code>approve</code> / <code>request_changes</code>。収束判定は verdict ではなく <strong>blocker 件数</strong>で機械的に行う
+（<code>blockers == 0</code> で収束）。verdict は人間向けの要約として保持する。</li></ul><h2 id="3-act-ラベル会話終端の思想">3. act ラベル（会話終端の思想）</h2><p><code>cmux-bridge</code> 等の知見に倣い、AI 同士の無限相槌を避けるため、各メッセージの意図をラベルで捉える。
+xrev では severity/verdict による機械判定を主とするが、運用上の指針として次を踏襲する:</p><div class="tablewrap"><table><thead><tr><th>act</th><th>意味</th><th>返信の扱い</th></tr></thead><tbody><tr><td><code>propose</code></td><td>変更を提案</td><td>レビュー対象</td></tr><tr><td><code>react</code></td><td>指摘・反応</td><td>反映して次へ</td></tr><tr><td><code>decide</code></td><td>最終決定</td><td>確定（ADR の Decision に対応）</td></tr><tr><td><code>think</code></td><td>熟考中</td><td><strong>追撃しない</strong>（待つ）</td></tr><tr><td><code>close</code></td><td>議論終端</td><td><strong>返信しない</strong>（相槌も送らない）</td></tr></tbody></table></div><p>要点: <strong><code>think</code> には追撃しない / <code>close</code> には返信しない</strong>。これが AI 同士の無限ループを防ぐ。</p><nav class="pager"><span><a href="message-format.html">&larr; message-format</a></span><span><a href="exit-codes.html">exit-codes &rarr;</a></span></nav>
+</main>
+</body>
+</html>

@@ -1,0 +1,56 @@
+<figure class="fig">
+<svg viewBox="0 0 880 300" role="img" aria-labelledby="fig-rc1">
+<title id="fig-rc1">severity から収束判定までの流れ: findings の severity を集計し、blocker（critical と high）が 0 件なら converged、残っていれば反復上限に応じて continue か escalate になる。</title>
+<defs>
+<marker id="m-rc1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+</marker>
+</defs>
+<rect x="20" y="30" width="220" height="70" class="box"/>
+<text x="34" y="54" class="strong">reviewer の findings[]</text>
+<text x="34" y="74" class="small">severity: critical / high /</text>
+<text x="34" y="90" class="small">medium / low / nit</text>
+
+<path class="arrow" d="M 240 65 H 290" marker-end="url(#m-rc1)"/>
+
+<rect x="290" y="30" width="240" height="70" class="box-accent"/>
+<text x="304" y="54" class="strong">blocker 集計（機械判定）</text>
+<text x="304" y="74" class="mono">severity_blockers =</text>
+<text x="304" y="90" class="mono">["critical","high"]（既定）</text>
+
+<path class="arrow" d="M 530 65 H 580" marker-end="url(#m-rc1)"/>
+
+<rect x="580" y="36" width="150" height="56" class="box"/>
+<text x="655" y="60" class="strong" text-anchor="middle">blockers == 0 ?</text>
+<text x="655" y="80" class="small" text-anchor="middle">verdict は判定に使わない</text>
+
+<path class="arrow" d="M 655 92 V 130" marker-end="url(#m-rc1)"/>
+<text x="668" y="118" class="small">yes</text>
+<rect x="580" y="130" width="150" height="48" class="box-ok"/>
+<text x="655" y="150" class="strong" text-anchor="middle">converged</text>
+<text x="655" y="168" class="small" text-anchor="middle">収束・次工程へ</text>
+
+<path class="arrow" d="M 730 64 H 790 V 130" marker-end="url(#m-rc1)"/>
+<text x="748" y="56" class="small">no</text>
+<rect x="740" y="130" width="120" height="48" class="box"/>
+<text x="800" y="150" class="strong" text-anchor="middle">iter &lt; 上限?</text>
+<path class="arrow" d="M 770 178 V 210" marker-end="url(#m-rc1)"/>
+<text x="742" y="200" class="small">yes</text>
+<rect x="680" y="210" width="120" height="44" class="box-accent"/>
+<text x="740" y="230" class="strong" text-anchor="middle">continue</text>
+<text x="740" y="246" class="small" text-anchor="middle">反映して ITER+1</text>
+<path class="arrow" d="M 840 178 V 210" marker-end="url(#m-rc1)"/>
+<text x="848" y="200" class="small">no</text>
+<rect x="810" y="210" width="60" height="44" class="box-warn"/>
+<text x="840" y="230" class="strong" text-anchor="middle">esca-</text>
+<text x="840" y="246" class="strong" text-anchor="middle">late</text>
+
+<rect x="20" y="130" width="510" height="124" class="box"/>
+<text x="34" y="154" class="strong">blocker にならない severity の扱い（運用指針）</text>
+<text x="34" y="176" class="small">medium: 1〜2 周だけ反映し、以降は無視して収束扱い（medium_low_max_rounds は助言値。</text>
+<text x="34" y="192" class="small">スクリプトは消費せず、スキルが運用指針として参照する）。low / nit: 任意。収束を妨げない。</text>
+<text x="34" y="216" class="small">例外: decode_error の finding は severity・severity_blockers の設定に関わらず常に blocker として</text>
+<text x="34" y="232" class="small">集計される（誤収束防止。message-format の「失敗時の契約」参照）。</text>
+</svg>
+<figcaption>図: 収束は verdict（reviewer の自己申告）ではなく blocker 件数で機械的に決まる。</figcaption>
+</figure>

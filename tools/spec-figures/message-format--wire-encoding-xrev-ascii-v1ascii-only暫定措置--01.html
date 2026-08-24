@@ -1,0 +1,43 @@
+<figure class="fig">
+<svg viewBox="0 0 880 300" role="img" aria-labelledby="fig-mf1">
+<title id="fig-mf1">wire（1 物理行）の構造: ヘッダ・ASCII ヒント・長さ付きフィールド群・終端マーカーがそれぞれ「スペース :: スペース」で連結され、instr・out・payload の 3 フィールドは区切り文字なしで直接連結される（長さで切り出す）。</title>
+<text x="20" y="28" class="boxtitle">wire（1 物理行）の構造 — 全文字が印字可能 ASCII（0x20–0x7E）</text>
+
+<rect x="20" y="48" width="240" height="64" class="box-accent"/>
+<text x="32" y="70" class="mono-strong">XREV_REVIEW round_id=&lt;rid&gt;</text>
+<text x="32" y="88" class="mono">ENCODING=XREV-ASCII-V1</text>
+<text x="32" y="104" class="mono">LEN_INSTR=a LEN_OUT=b LEN_PAYLOAD=c</text>
+
+<rect x="268" y="48" width="110" height="64" class="box"/>
+<text x="280" y="76" class="mono">:: &lt;hint&gt; ::</text>
+<text x="280" y="96" class="small">reviewer 向け補助</text>
+
+<rect x="386" y="48" width="130" height="64" class="box-warn"/>
+<text x="398" y="76" class="mono">&lt;instr&gt;</text>
+<text x="398" y="96" class="small">長さ a で切り出し</text>
+
+<rect x="524" y="48" width="100" height="64" class="box-warn"/>
+<text x="536" y="76" class="mono">&lt;out&gt;</text>
+<text x="536" y="96" class="small">長さ b</text>
+
+<rect x="632" y="48" width="120" height="64" class="box-err"/>
+<text x="644" y="76" class="mono">&lt;payload&gt;</text>
+<text x="644" y="96" class="small">長さ c・frame 解析対象</text>
+
+<rect x="760" y="48" width="100" height="64" class="box-ok"/>
+<text x="772" y="76" class="mono">:: END_</text>
+<text x="772" y="92" class="mono">ROUND_&lt;rid&gt;</text>
+<text x="772" y="108" class="small">切り詰め検出</text>
+
+<text x="20" y="132" class="small">※ ブロック間は「 :: 」で連結。instr・out・payload の 3 フィールド間には区切りが無く、LEN_* の長さだけで切り出す。</text>
+<text x="20" y="158" class="strong">なぜ長さ付きフィールドか</text>
+<text x="20" y="180" class="small">instr には || LNNNN: や &lt;XREV-NL&gt; が「説明文として」含まれるため、区切り文字の探索では領域を分離できない。</text>
+<text x="20" y="198" class="small">長さは wire 上の文字数で数え、不足・末尾マーカー不一致は復号側が拒否する（fail closed）。</text>
+
+<text x="20" y="224" class="strong">なぜ ASCII だけか</text>
+<text x="20" y="246" class="small">cmux のソケット受信は UTF-8 チャンク欠陥（未修正バグ）を持ち、多バイト文字が読み取り境界で分断されると最大 4095 バイト消える。</text>
+<text x="20" y="264" class="small">非 ASCII は \uXXXX に畳む（非 BMP はサロゲート対）。encode 直前に「\・改行・CR・TAB が 0 個」を検証するため、</text>
+<text x="20" y="282" class="small">wire 上の \ は必ず xrev 生成の \uXXXX の一部になり、復号が一意に定まる。</text>
+</svg>
+<figcaption>図: wire の構造。未知の ENCODING 値は拒否される。根拠となる実測は <a href="../cmux-behavior.md">cmux-behavior.md</a> 4 節。</figcaption>
+</figure>

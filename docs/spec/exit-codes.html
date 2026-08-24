@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xrev 詳細仕様 — 終了コード設計</title>
+<style>
+  :root {
+    --bg: #faf9f7; --fg: #24292e; --muted: #6a737d; --card: #ffffff;
+    --line: #d4d0c8; --accent: #3b5bdb; --accent-soft: #e7ecfb;
+    --ok: #2f7d32; --ok-soft: #e5f2e6; --warn: #b26a00; --warn-soft: #f8edda;
+    --err: #c02f2f; --err-soft: #f9e5e5; --ref: #7048a8; --ref-soft: #efe7f8;
+    --box: #f2f0ec; --code: #eceae5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #d8dde3; --muted: #8b949e; --card: #1c2026;
+      --line: #3a4048; --accent: #7c96f0; --accent-soft: #232c45;
+      --ok: #6dbb71; --ok-soft: #1d2f1e; --warn: #d9a04f; --warn-soft: #33281a;
+      --err: #e07575; --err-soft: #382020; --ref: #b394e8; --ref-soft: #2a2138;
+      --box: #232830; --code: #262b33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif;
+    line-height: 1.8; font-size: 16px; }
+  main { max-width: 900px; margin: 0 auto; padding: 0 20px 80px; }
+  header.top { border-bottom: 1px solid var(--line); padding: 22px 0 14px; margin-bottom: 8px;
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+  header.top .crumbs { font-size: 0.9rem; }
+  header.top .crumbs a { color: var(--accent); text-decoration: none; }
+  header.top .src { font-size: 0.8rem; color: var(--muted); }
+  header.top .src a { color: var(--accent); }
+  .gen-note { background: var(--accent-soft); border-radius: 8px; padding: 8px 14px;
+    font-size: 0.82rem; margin: 14px 0; color: var(--fg); }
+  h1 { font-size: 1.55rem; line-height: 1.4; margin: 20px 0 12px; }
+  h2 { font-size: 1.25rem; margin: 44px 0 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 32px 0 8px; }
+  p { margin: 10px 0; }
+  a { color: var(--accent); }
+  code { background: var(--code); padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em;
+    overflow-wrap: anywhere; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; line-height: 1.55; }
+  pre code { background: none; padding: 0; font-size: 0.82rem; }
+  .tablewrap { overflow-x: auto; margin: 14px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  th, td { border: 1px solid var(--line); padding: 7px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--box); white-space: nowrap; }
+  td:first-child code { overflow-wrap: normal; }
+  blockquote { margin: 14px 0; padding: 4px 16px; border-left: 3px solid var(--accent);
+    background: var(--box); border-radius: 0 8px 8px 0; color: var(--muted); }
+  ul, ol { margin: 10px 0; padding-left: 26px; }
+  li { margin: 5px 0; }
+  li p { margin: 8px 0; }
+  nav.pager { display: flex; justify-content: space-between; gap: 12px; margin-top: 48px;
+    border-top: 1px solid var(--line); padding-top: 14px; font-size: 0.9rem; }
+  nav.pager a { color: var(--accent); text-decoration: none; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px; margin: 18px 0; padding: 0; list-style: none; }
+  .cards li { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; margin: 0; }
+  .cards a { font-weight: 600; text-decoration: none; }
+  .cards p { color: var(--muted); font-size: 0.85rem; margin: 6px 0 0; }
+  img { max-width: 100%; vertical-align: middle; }
+
+  /* 図（tools/spec-figures/ からの注入フラグメント用） */
+  .fig { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px; margin: 18px 0; overflow-x: auto; }
+  .fig svg { display: block; min-width: 820px; width: 100%; height: auto; }
+  .fig figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 8px; }
+  figure { margin: 0; }
+  svg text { font-family: "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif; fill: var(--fg); }
+  svg .small { font-size: 11px; fill: var(--muted); }
+  svg .label { font-size: 13px; }
+  svg .strong { font-size: 13px; font-weight: 600; }
+  svg .boxtitle { font-size: 14px; font-weight: 700; }
+  svg .mono { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  svg .mono-strong { font-family: ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700; }
+  svg .frame { fill: none; stroke: var(--line); stroke-width: 1.5; rx: 10; }
+  svg .box { fill: var(--box); stroke: var(--line); stroke-width: 1; rx: 8; }
+  svg .box-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; rx: 8; }
+  svg .box-ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.2; rx: 8; }
+  svg .box-warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; rx: 8; }
+  svg .box-err { fill: var(--err-soft); stroke: var(--err); stroke-width: 1.2; rx: 8; }
+  svg .box-ref { fill: var(--ref-soft); stroke: var(--ref); stroke-width: 1.2; rx: 8; }
+  svg .arrow { stroke: var(--fg); stroke-width: 1.4; fill: none; }
+  svg .arrow-dash { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 4; fill: none; }
+</style>
+</head>
+<body>
+<main>
+<header class="top"><span class="crumbs"><a href="../overview.html">技術概観</a> / <a href="index.html">詳細仕様</a> / exit-codes</span><span class="src"><a href="../../references/protocol/exit-codes.md">正典（md）を見る</a></span></header><p class="gen-note">本ページは <code>references/protocol/exit-codes.md</code>（正典・エージェント向け）から <code>tools/render-spec.sh</code> で自動生成されている。内容の修正は md 側で行い、再生成すること。</p><h1 id="終了コード設計">終了コード設計</h1><p><a href="../../references/protocol.md"><code>../protocol.md</code></a>（索引）から分割された正典の一部。</p><p><strong>この文書で分かること</strong>:</p><ul><li>review-loop の decision 6 種と exit code の対応（分岐は stdout JSON の decision で行う）</li><li>transport_reason の安定文字列一覧</li><li>round_state 安全弁の契約（渡し忘れ・巻き戻しは escalate）</li><li>parse-review（0/1）と transport（10〜31）の内部終了コードの意味</li></ul><h2 id="4-終了コード設計">4. 終了コード設計</h2><h3 id="scriptsreview-loopsh"><code>scripts/review-loop.sh</code></h3><figure class="fig">
+<svg viewBox="0 0 880 480" role="img" aria-labelledby="fig-ec1">
+<title id="fig-ec1">review-loop.sh の decision 決定フロー: transport の成否と blocker 件数から 6 種の decision が決まり、exit code は完了系 0、invalid 21、transport_error 22 の 3 通りに写像される。round_state 安全弁の違反はレビュー結果に関わらず escalate になる。</title>
+<defs>
+<marker id="m-ec1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+</marker>
+</defs>
+<rect x="330" y="24" width="220" height="52" class="box-accent"/>
+<text x="440" y="46" class="strong" text-anchor="middle">review-loop.sh 1 ラウンド</text>
+<text x="440" y="66" class="small" text-anchor="middle">送信 → 応答検出 → parse → 集計</text>
+
+<path class="arrow" d="M 360 76 L 120 130" marker-end="url(#m-ec1)"/>
+<path class="arrow" d="M 420 76 L 340 130" marker-end="url(#m-ec1)"/>
+<path class="arrow" d="M 460 76 L 550 130" marker-end="url(#m-ec1)"/>
+<path class="arrow" d="M 520 76 L 770 130" marker-end="url(#m-ec1)"/>
+
+<rect x="30" y="130" width="180" height="76" class="box-ok"/>
+<text x="120" y="152" class="strong" text-anchor="middle">converged（exit 0）</text>
+<text x="120" y="172" class="small" text-anchor="middle">レビュー取得成功・blocker 0 件</text>
+<text x="120" y="192" class="small" text-anchor="middle">→ 完了アクションへ</text>
+
+<rect x="250" y="130" width="180" height="76" class="box-accent"/>
+<text x="340" y="152" class="strong" text-anchor="middle">continue（exit 0）</text>
+<text x="340" y="172" class="small" text-anchor="middle">blocker 残・iter 上限未満</text>
+<text x="340" y="192" class="small" text-anchor="middle">→ primary が反映し ITER+1</text>
+
+<rect x="470" y="130" width="180" height="76" class="box-warn"/>
+<text x="560" y="152" class="strong" text-anchor="middle">escalate（exit 0）</text>
+<text x="560" y="172" class="small" text-anchor="middle">上限到達でも blocker 残、</text>
+<text x="560" y="192" class="small" text-anchor="middle">または round_state 違反 → 人間へ</text>
+
+<rect x="690" y="130" width="170" height="76" class="box-ref"/>
+<text x="775" y="152" class="strong" text-anchor="middle">reference_unverified</text>
+<text x="775" y="172" class="small" text-anchor="middle">（exit 0）参照照合の不一致</text>
+<text x="775" y="192" class="small" text-anchor="middle">→ 同一 ITER を再試行</text>
+
+<rect x="120" y="250" width="300" height="76" class="box-err"/>
+<text x="270" y="274" class="strong" text-anchor="middle">invalid（exit 21）</text>
+<text x="270" y="294" class="small" text-anchor="middle">契約違反: スキーマ不一致・壊れた JSON・</text>
+<text x="270" y="312" class="small" text-anchor="middle">transport exit 24（完成応答が不正 JSON）の写像</text>
+
+<rect x="460" y="250" width="300" height="76" class="box-err"/>
+<text x="610" y="274" class="strong" text-anchor="middle">transport_error（exit 22）</text>
+<text x="610" y="294" class="small" text-anchor="middle">送受信失敗。transport_exit_code と安定文字列</text>
+<text x="610" y="312" class="small" text-anchor="middle">transport_reason（timeout / truncated / …）を同梱</text>
+
+<rect x="30" y="356" width="830" height="104" class="box-warn"/>
+<text x="44" y="380" class="strong">round_state 安全弁（レビュー結果より優先して escalate に倒す）</text>
+<text x="44" y="402" class="small">decision JSON の round_state {iter, transport_attempts, reference_fallbacks} を、primary は次回呼び出しの XREV_ROUND_STATE へ</text>
+<text x="44" y="418" class="small">そのまま渡す契約。通算 transport_attempts が max_transport_attempts を超過、または iter の巻き戻しを検知したら、レビュー取得に</text>
+<text x="44" y="434" class="small">成功していても decision=escalate（state_violation に記録）。transport / parse 失敗（レビュー取得不可）はそれ自体の扱いを優先する。</text>
+<text x="44" y="452" class="small">exit code は「レビューを綺麗に完了できたか」だけを表す — 分岐は必ず stdout JSON の decision で行う。</text>
+</svg>
+<figcaption>図: decision と exit code の対応。正常系の continue を exit 0 にすることで「非ゼロ = 一律エラー」の誤判定を避けている。</figcaption>
+</figure>
+<p><strong>分岐は必ず stdout の JSON の <code>decision</code> で行う</strong>（exit code ではない）。exit code は
+「レビューを綺麗に完了できたか」だけを表す。これにより「<code>continue</code> は正常なのに非ゼロで
+エラー扱いされる」誤判定（非ゼロを一律エラーとみなす Bash 呼び出し等）を避ける。</p><div class="tablewrap"><table><thead><tr><th>decision</th><th>exit</th><th>意味</th></tr></thead><tbody><tr><td><code>converged</code></td><td>0</td><td>blocker 0 件。収束。</td></tr><tr><td><code>continue</code></td><td>0</td><td>blocker 残・上限未満。primary が修正して <code>ITER+1</code> で再実行（正常系）。</td></tr><tr><td><code>reference_unverified</code></td><td>0</td><td>参照モードで reviewer の diff_hash が期待値と不一致/未取得。レビューを採用せず、primary が同一 ITER で再試行（正常系）。<strong>回復手段は reviewer 種別依存</strong>（codex=inline へ切替 / claude=参照モードのまま再試行。状態機械自体は種別非依存。詳細は<a href="reference-mode.html">参照モード</a>）。通算が <code>max_reference_fallbacks</code> 超で <code>escalate</code>。</td></tr><tr><td><code>escalate</code></td><td>0</td><td>上限到達でも blocker 残。人間へエスカレーション（レビューは完了）。</td></tr><tr><td><code>invalid</code></td><td>21</td><td>reviewer 出力が契約違反（スキーマ不一致 / 壊れた JSON / transport <code>exit 24</code>）→ レビュー取得できず。</td></tr><tr><td><code>transport_error</code></td><td>22</td><td>送受信失敗（ペイン解決不可・タイムアウト等）→ レビュー取得できず。</td></tr></tbody></table></div><p><code>transport_error</code> の決定 JSON には <code>transport_exit_code</code>（transport の生終了コード）と <code>transport_reason</code>
+（安定文字列）を含める。外部 exit は 22 のままだが、primary はこの reason で利用者向け修正案を機械的に選べる:
+<code>cmux_unavailable</code>/<code>resolve_failed</code>/<code>send_failed</code>/<code>timeout</code>/<code>truncated</code>/<code>non_terminal</code>/<code>ws_mismatch</code>/
+<code>ambiguous</code>/<code>process_mismatch</code>/<code>reviewer_policy_mismatch</code>/<code>autocreate_failed</code>/<code>reviewer_contention</code>/
+<code>encode_failed</code>/<code>payload_too_large</code>/<code>submit_failed</code>/<code>cmux_not_found</code>/<code>not_in_pane</code>/<code>integrity_unverifiable</code>/
+<code>reviewer_config_conflict</code>（D1。新設 <code>exit 29</code>）。</p><p><code>transport_exit_code=24</code>（<code>invalid_response</code>。センチネルで完成した応答はあるが妥当な review JSON
+を含まない契約違反。<code>timeout</code> と区別され primary は再出力を促す）は <code>transport_error</code> ではなく
+<code>decision=invalid</code> に写像される特例。<code>transport_reason</code> は従来どおり <code>decision=transport_error</code>
+のときだけ埋まる（<code>decision=invalid</code> では <code>null</code>）が、<code>transport_exit_code</code> 自体は透明性のため
+<code>decision=invalid</code> でも決定 JSON に残る（<code>=24</code>）。</p><p><strong>ループ安全弁（round_state・Phase1b）</strong>: review-loop は決定 JSON に <code>round_state</code>
+（<code>{iter, transport_attempts, reference_fallbacks}</code>。<code>reference_fallbacks</code> は Phase2 で追加）
+を含める。primary は<strong>この round_state を次回呼び出しの <code>XREV_ROUND_STATE</code>(JSON) にそのまま渡す契約</strong>。
+review-loop は受け取った状態から通算 <code>transport_attempts</code> を1つ進め、<code>max_transport_attempts</code> 超過、または
+<code>iter</code> の巻戻し（前回より小さい）を検知したら、レビュー取得に成功していても <code>decision=escalate</code> に倒し
+（<code>state_violation</code> に <code>max_transport_attempts</code>/<code>rollback</code> を記録）人間へ委ねる。中間ファイルは作らず状態は
+呼び出し連鎖で授受するため、巻戻しの完全強制は不可能で「primary 信頼＋欠落/巻戻し時 fail closed」を
+プロトコル限界として明記する。transport/parse 失敗（レビュー取得不可）はそれ自体の扱いを優先し上書きしない。</p><h3 id="scriptsparse-reviewsh"><code>scripts/parse-review.sh</code></h3><div class="tablewrap"><table><thead><tr><th>exit</th><th>意味</th></tr></thead><tbody><tr><td>0</td><td>パース成功（<code>valid: true</code>）。集計を stdout に出力。</td></tr><tr><td>1</td><td>JSON 不正・スキーマ不一致（<code>valid: false</code>）。</td></tr></tbody></table></div><h3 id="scriptstransportsh内部の代表的な失敗コード"><code>scripts/transport.sh</code>（内部の代表的な失敗コード）</h3><div class="tablewrap"><table><thead><tr><th>exit</th><th>意味</th></tr></thead><tbody><tr><td>10</td><td>reviewer ペイン解決失敗（同一WS内にタイトル一致なし / 一覧取得不可）</td></tr><tr><td>11</td><td>送信失敗</td></tr><tr><td>12</td><td>応答タイムアウト（round_id 一致の新着なし）</td></tr><tr><td>13</td><td>切り詰め検出（ペースト文字数が送信長と不一致）</td></tr><tr><td>14</td><td>reviewer surface が実ターミナルでない（read-screen 不可。cmux エージェント統合パネル等）</td></tr><tr><td>15</td><td>ワークスペース不整合（caller WS 特定不能 / 解決後に WS が変化 / 明示が別WS）</td></tr><tr><td>16</td><td>同一WS内で reviewer タイトルが複数一致（曖昧）</td></tr><tr><td>17</td><td>プロセス証明失敗（対象 surface の前景プロセスが許可名でない / top・ps 取得不可 / 各送信ゲート（早期棄却・本文送信直前・Enter直前・Enter再送前）のいずれかで前景が変化）</td></tr><tr><td>18</td><td>参照モードなのに同一WS解決でない（reference モードを拒否し inline へ切替を促す）</td></tr><tr><td>19</td><td>reviewer 自動生成は試みたが codex の起動を確認できなかった。launch 引数（read-only 強制）の決定失敗・起動未確認・実効未確認のいずれも含む（autocreate_failed）</td></tr><tr><td>20</td><td>reviewer 生成の競合で期限切れ（別 primary が生成中 or 残留ロック→人間。reviewer_contention）</td></tr><tr><td>23</td><td>payload のエンコードに失敗（cmux へは未送信。encode_failed。round_id/content_type 不正・不変条件違反等）</td></tr><tr><td>24</td><td>センチネルで完成した応答はあるが妥当な review JSON を含まない（契約違反。invalid_response）。<code>timeout</code>(12) と区別され、primary は再出力を促す。</td></tr><tr><td>25</td><td>Enter 送信(プロンプト確定)に失敗（最大2回まで再試行しても失敗）。本文は入力欄に残存。<code>timeout</code>(12) と区別される（submit_failed）。</td></tr><tr><td>26</td><td>wire（1物理行）の文字数が上限(<code>wire_max_chars</code>)を超過（cmux へは未送信。payload_too_large）</td></tr><tr><td>27</td><td>reviewer が安全ポリシー（sandbox=read-only かつ承認=never）で起動していない（最終 argv の意味検証に不合格。reviewer_policy_mismatch）。<code>xrev_transport_review</code> では各送信ゲート（早期棄却・本文送信直前・Enter直前・Enter再送前）でプロセス証明と同じゲートで毎回再検証される（不具合Bへの対処。TOCTOU防止）。<code>XREV_ALLOW_UNVERIFIED_REVIEWER=1</code> で opt-out 可（<a href="reviewer-lifecycle.html">reviewer ペインのライフサイクル</a>の「reviewer read-only 強制」参照）</td></tr><tr><td>28</td><td>reviewer 種別（semantic kind。D1: 解決済み <code>reviewer</code> 名。旧来は <code>reviewer_process</code> の basename だったが置き換わった）に応じた送信完全性の検証手段が確立できない（integrity_unverifiable）。codex/claude 以外の未知種別、または claude・inline（claude は参照モード専用のため inline は wire 長に関わらず無条件）。claude は参照モード（<code>XREV_REFERENCE_MODE=1</code>）を使うこと（参照モードはこの検査自体をスキップする）。いずれも cmux へは一切送信していない</td></tr><tr><td>29</td><td>reviewer 設定に矛盾がある（reviewer_config_conflict。D1）。<code>reviewer_process</code> の明示値の basename が <code>codex</code>/<code>claude</code> のどちらかで解決済み <code>reviewer</code> と異なる、または <code>reviewer=claude</code> で <code>reviewer_reads_workspace</code> が明示 <code>false</code>。<code>xrev_transport_review</code>（resolve すら試みず送信前に拒否）・<code>xrev_ensure_reviewer</code>（<code>_xrev_classify_reviewer</code> を呼ぶ前）・<code>start-reviewer.sh</code>（タイトル変更・exec の前）の3経路すべてで、副作用の前に共有ゲート <code>_xrev_guard_reviewer_conflicts</code> により一貫して返る（指摘3・2巡目）。詳細は<a href="config.html">設定</a>の「reviewer の auto 解決と semantic kind」節</td></tr><tr><td>30</td><td>cmux CLI が見つからない</td></tr><tr><td>31</td><td>cmux 接続不可（preflight 失敗・ペイン外実行）</td></tr></tbody></table></div><nav class="pager"><span><a href="review-contract.html">&larr; review-contract</a></span><span><a href="config.html">config &rarr;</a></span></nav>
+</main>
+</body>
+</html>

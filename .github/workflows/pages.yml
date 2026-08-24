@@ -1,0 +1,54 @@
+name: Pages
+
+# 人間向けドキュメント（docs/ の HTML と全 md）を GitHub Pages へ公開する。
+# main が更新されるたびに tools/render-spec.sh --site で組み立て直すため、
+# 正典 md を直せばサイトも自動で追随する（生成物をコミットする必要は無い）。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# デプロイに要る最小限。contents は checkout のための読み取りのみ。
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 公開は 1 本ずつ。実行中のデプロイは打ち切らない（中途半端な公開状態を作らない）。
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pages が未設定でもここで有効化される（設定を手作業に依存させない）。
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      # 式を run に直接埋めず env 経由で渡す（ref 名に任意の文字が入りうるため）。
+      - name: サイトを組み立てる
+        env:
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          REPO_REF: ${{ github.ref_name }}
+        run: bash tools/render-spec.sh --site _site --repo-url "$REPO_URL" --ref "$REPO_REF"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

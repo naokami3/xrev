@@ -178,7 +178,7 @@ cmux send --workspace "$WS" --surface "$SF" "$(cat /tmp/repro.txt)"; echo "rc=$?
   （失敗直後の小送信が成功することを確認済み）。
 
 xrev 側の回避策は wire を ASCII に閉じること（`XREV-ASCII-V1`）。仕様は
-[`../references/protocol.md`](../references/protocol.md)。**上流が修正されたら削除可否を判断する。**
+[`../references/protocol/message-format.md`](../references/protocol/message-format.md)。**上流が修正されたら削除可否を判断する。**
 
 > **提案（実測ではない）**: 上流の修正方向は「各チャンクを独立に decode せず、raw bytes のまま
 > 行終端まで蓄積し、完成した1行を一度だけ UTF-8 decode する」。完成行自体が不正 UTF-8 なら
@@ -245,10 +245,10 @@ Codex の `[Pasted Content N chars]` と異なり、Claude Code は長い貼り�
 **`[Pasted text #N]`**（N はセッション内の貼り付けイベント連番。貼り付け文字数とは無関係）に
 畳む。「paste again to expand」という展開ヒントが付くのみで、**文字数は一切表示されない**。
 このため Codex と同じ「表示文字数と送信長の一致」による切り詰め検出は claude では成立しない
-（`references/protocol.md` の C2 が inline 向けの全文一致照合を検討した根拠。ただし全文一致照合は
+（`references/protocol/message-format.md` の C2 が inline 向けの全文一致照合を検討した根拠。ただし全文一致照合は
 「空白の削除と挿入が相殺すれば比較・frame 検証のどちらもすり抜ける」という2巡目クロスレビューの
-指摘で完全性証明にならないと判断され撤去済み。詳細・経緯は `references/protocol.md` の
-「切り詰め検出」節。claude reviewer は現在、参照モード専用— inline は無条件で送信前拒否）。
+指摘で完全性証明にならないと判断され撤去済み。詳細・経緯は `references/protocol/message-format.md` の
+「切り詰め検出」。claude reviewer は現在、参照モード専用— inline は無条件で送信前拒否）。
 
 ### 8-2. チップ化は文字数に対して非単調に畳まる
 
@@ -298,7 +298,7 @@ bash へ戻す実装が残っていたため、argv 要素自体に生の改行�
 「PID受領 → KERN_PROCARGS2 での argv 取得 → 安全ポリシー判定」までを単一の python プロセス内で
 完結させ、argv を区切り文字ベースの形で bash に戻さない構成（`_xrev_verify_foreground_policy` /
 `_verify_reviewer_launch_args`）へ変更した。
-詳細は [`../references/protocol.md`](../references/protocol.md) の「reviewer read-only 強制」節。
+詳細は [`../references/protocol/reviewer-lifecycle.md`](../references/protocol/reviewer-lifecycle.md) の「reviewer read-only 強制」節。
 
 ### 8-6. 応答画面の de-wrap 互換性
 

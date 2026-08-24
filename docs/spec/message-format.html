@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xrev 詳細仕様 — メッセージ書式と送信プロトコル</title>
+<style>
+  :root {
+    --bg: #faf9f7; --fg: #24292e; --muted: #6a737d; --card: #ffffff;
+    --line: #d4d0c8; --accent: #3b5bdb; --accent-soft: #e7ecfb;
+    --ok: #2f7d32; --ok-soft: #e5f2e6; --warn: #b26a00; --warn-soft: #f8edda;
+    --err: #c02f2f; --err-soft: #f9e5e5; --ref: #7048a8; --ref-soft: #efe7f8;
+    --box: #f2f0ec; --code: #eceae5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #d8dde3; --muted: #8b949e; --card: #1c2026;
+      --line: #3a4048; --accent: #7c96f0; --accent-soft: #232c45;
+      --ok: #6dbb71; --ok-soft: #1d2f1e; --warn: #d9a04f; --warn-soft: #33281a;
+      --err: #e07575; --err-soft: #382020; --ref: #b394e8; --ref-soft: #2a2138;
+      --box: #232830; --code: #262b33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif;
+    line-height: 1.8; font-size: 16px; }
+  main { max-width: 900px; margin: 0 auto; padding: 0 20px 80px; }
+  header.top { border-bottom: 1px solid var(--line); padding: 22px 0 14px; margin-bottom: 8px;
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+  header.top .crumbs { font-size: 0.9rem; }
+  header.top .crumbs a { color: var(--accent); text-decoration: none; }
+  header.top .src { font-size: 0.8rem; color: var(--muted); }
+  header.top .src a { color: var(--accent); }
+  .gen-note { background: var(--accent-soft); border-radius: 8px; padding: 8px 14px;
+    font-size: 0.82rem; margin: 14px 0; color: var(--fg); }
+  h1 { font-size: 1.55rem; line-height: 1.4; margin: 20px 0 12px; }
+  h2 { font-size: 1.25rem; margin: 44px 0 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 32px 0 8px; }
+  p { margin: 10px 0; }
+  a { color: var(--accent); }
+  code { background: var(--code); padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em;
+    overflow-wrap: anywhere; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; line-height: 1.55; }
+  pre code { background: none; padding: 0; font-size: 0.82rem; }
+  .tablewrap { overflow-x: auto; margin: 14px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  th, td { border: 1px solid var(--line); padding: 7px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--box); white-space: nowrap; }
+  td:first-child code { overflow-wrap: normal; }
+  blockquote { margin: 14px 0; padding: 4px 16px; border-left: 3px solid var(--accent);
+    background: var(--box); border-radius: 0 8px 8px 0; color: var(--muted); }
+  ul, ol { margin: 10px 0; padding-left: 26px; }
+  li { margin: 5px 0; }
+  li p { margin: 8px 0; }
+  nav.pager { display: flex; justify-content: space-between; gap: 12px; margin-top: 48px;
+    border-top: 1px solid var(--line); padding-top: 14px; font-size: 0.9rem; }
+  nav.pager a { color: var(--accent); text-decoration: none; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px; margin: 18px 0; padding: 0; list-style: none; }
+  .cards li { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; margin: 0; }
+  .cards a { font-weight: 600; text-decoration: none; }
+  .cards p { color: var(--muted); font-size: 0.85rem; margin: 6px 0 0; }
+  img { max-width: 100%; vertical-align: middle; }
+
+  /* 図（tools/spec-figures/ からの注入フラグメント用） */
+  .fig { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px; margin: 18px 0; overflow-x: auto; }
+  .fig svg { display: block; min-width: 820px; width: 100%; height: auto; }
+  .fig figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 8px; }
+  figure { margin: 0; }
+  svg text { font-family: "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif; fill: var(--fg); }
+  svg .small { font-size: 11px; fill: var(--muted); }
+  svg .label { font-size: 13px; }
+  svg .strong { font-size: 13px; font-weight: 600; }
+  svg .boxtitle { font-size: 14px; font-weight: 700; }
+  svg .mono { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  svg .mono-strong { font-family: ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700; }
+  svg .frame { fill: none; stroke: var(--line); stroke-width: 1.5; rx: 10; }
+  svg .box { fill: var(--box); stroke: var(--line); stroke-width: 1; rx: 8; }
+  svg .box-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; rx: 8; }
+  svg .box-ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.2; rx: 8; }
+  svg .box-warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; rx: 8; }
+  svg .box-err { fill: var(--err-soft); stroke: var(--err); stroke-width: 1.2; rx: 8; }
+  svg .box-ref { fill: var(--ref-soft); stroke: var(--ref); stroke-width: 1.2; rx: 8; }
+  svg .arrow { stroke: var(--fg); stroke-width: 1.4; fill: none; }
+  svg .arrow-dash { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 4; fill: none; }
+</style>
+</head>
+<body>
+<main>
+<header class="top"><span class="crumbs"><a href="../overview.html">技術概観</a> / <a href="index.html">詳細仕様</a> / message-format</span><span class="src"><a href="../../references/protocol/message-format.md">正典（md）を見る</a></span></header><p class="gen-note">本ページは <code>references/protocol/message-format.md</code>（正典・エージェント向け）から <code>tools/render-spec.sh</code> で自動生成されている。内容の修正は md 側で行い、再生成すること。</p><h1 id="メッセージ書式と送信プロトコル">メッセージ書式と送信プロトコル</h1><p><a href="../../references/protocol.md"><code>../protocol.md</code></a>（索引）から分割された正典の一部。</p><p><strong>この文書で分かること</strong>:</p><ul><li>reviewer への依頼と応答の書式（センチネル・1 行コンパクト JSON・de-wrap）</li><li>複数行 payload を 1 物理行で送る理由と方式（ADR-001・content_type 二段構え）</li><li>wire encoding <code>XREV-ASCII-V1</code> の形式・escape 規則・復号手順（正典）</li><li>wire 長の上限と、巨大データを stdin で受け渡す理由</li><li>切り詰め検出の reviewer 種別ごとの手段（codex=文字数照合 / claude=参照モード専用）</li></ul><h2 id="1-メッセージ書式reviewer-への依頼と応答">1. メッセージ書式（reviewer への依頼と応答）</h2><p><code>scripts/transport.sh</code> は payload に続けて、reviewer へ次を要求する:</p><ul><li>レビュー結果を <strong>2 行のセンチネルで挟んだ JSON</strong> として返すこと。<ul><li>開始: <code>===XREV-JSON-BEGIN===</code></li><li>終了: <code>===XREV-JSON-END===</code></li></ul></li><li>センチネルの外には何も書かない。</li><li>JSON は <strong>1 行コンパクト形式</strong>（改行・インデントなし）で出力すること。</li><li>JSON は <code>references/review-schema.json</code> に準拠（<code>verdict</code> + <code>findings[]</code>）。</li><li><strong>JSON 文字列値の中の二重引用符は必ず <code>\"</code> とエスケープし、生の二重引用符を含めないこと。</strong>
+実機で「センチネルは正しいが JSON 文字列値に生の二重引用符が混じり不正 JSON になる」契約違反が
+観測されている（<code>_scan_broken_blocks</code> が検出し <code>exit 24</code> に区別する。<a href="exit-codes.html">終了コード設計</a> 参照）。</li></ul><p>センチネル方式の理由: 対話モードの Codex 画面はプロンプトやエコーでノイズが多い。
+固定マーカーで挟むことで <code>cmux read-screen</code> の出力から機械的かつ確実に JSON を切り出せる。
+往復で複数回出力された場合は<strong>最後のブロック</strong>を採用する。</p><p><strong>TUI 折り返しへの対応（実機知見）</strong>: 対話型 TUI（Codex 等）は長い行を物理的に折り返し、
+各行にガター字下げを付ける。そのため <code>read-screen</code> で得たセンチネル間テキストは JSON 文字列の
+途中に生の改行が入り、そのままでは <code>json.loads</code> に失敗する。<code>_scan_review_blocks</code> は
+「素のままパース → 失敗時は各行の前後空白を除去して連結（de-wrap）」で復元し、検出時は
+正規化したクリーンな JSON を下流へ渡す。JSON を 1 行で出させるのはこの復元を確実にするため。</p><h3 id="送信プロトコル1物理行エンコードadr-001">送信プロトコル（1物理行エンコード・ADR-001）</h3><p>完全自動 submit のため、送信本文は「画面上は1物理行・意味上は複数行」にエンコードする
+（<code>_build_framed_line</code>）。背景・決定は <a href="../adr/ADR-001.md">ADR-001</a>。</p><ul><li><strong>不変条件</strong>: cmux に実改行を渡さない（常に1物理行）／<code>round_id</code> 相関で完了判定／クォート済み引数で送る。</li><li><strong>理由</strong>: <code>cmux send</code> は引数中の <code>\n</code>/<code>\t</code> を実改行/実タブへ自動展開する（実機確認済み）。
+そのため本文の <code>\</code>→<code>&lt;XREV-BS&gt;</code>、tab→<code>&lt;XREV-TAB&gt;</code>、改行は下記方式で畳む。</li><li><strong>content_type で二段構え</strong>:<ul><li><code>plain</code>（散文）: 改行を <code>&lt;XREV-NL&gt;</code> に置換したコンパクト1行（<code>PAYLOAD_PLAIN || …</code>）。</li><li><code>unified_diff</code>/<code>code</code> 等: 番号付き line framing（<code>PAYLOAD_FRAMED … || L0001: … || L0002: …</code>）。
+<code>|| L[0-9]+:</code> だけが行境界。行頭 <code>+/-</code> とインデントを保持し diff 精度を落とさない。</li></ul></li><li><strong>末尾 <code>END_ROUND_&lt;id&gt;</code></strong> で切り詰めを検出可能にする。</li><li><strong>送信手順</strong>: 1物理行を <code>cmux send</code> → 描画待ち（本文長に比例・上限8s）→ <code>send-key enter</code> 1回。</li><li><strong>応答検出</strong>: reviewer の JSON にトップレベル <code>round_id</code> を返させ、<code>_scan_review_blocks</code> は
+<strong>全画面を de-wrap → JSON を raw_decode 走査 → round_id 一致の妥当ブロックだけ</strong>を採用する
+（マーカー折り返し・前ラウンド残存・未完成JSONに強い。走査サイズ/件数に上限あり）。</li><li><strong>壊れた完成応答の検出</strong>（<code>_scan_broken_blocks</code>）: <code>_scan_review_blocks</code> は parse に成功した
+ブロックだけを採用するため、センチネルで完成しているが JSON として不正な応答（例: 文字列値に
+生の二重引用符が混入）は永遠に検出できず、本来 <code>invalid</code>（契約違反）であるべきものが応答
+タイムアウト（<code>exit 12</code>）と誤診断され、タイムアウト全時間を無駄に待つ実機バグが観測された。
+<code>_scan_broken_blocks</code> は SENTINEL_BEGIN/END が両方揃った完成領域のうち、期待 <code>round_id</code> を
+含みながら妥当な review JSON を1つも取り出せない領域を数える。応答待ちループはこれをポーリング
+ごとに確認し、新規に増えていればタイムアウトを待たず即座に <code>exit 24</code> で返す。END が無い領域
+（ストリーミング途中）は数えない。</li><li>reviewer 側はトークン（<code>&lt;XREV-NL&gt;</code>/<code>|| LNNNN:</code>/<code>&lt;XREV-BS&gt;</code>/<code>&lt;XREV-TAB&gt;</code>）を元の複数行へ復元して読む。</li><li><strong>トークン衝突回避</strong>: 本文に制御トークンが元から含まれても区切りと誤解されないよう、導入子
+<code>XREVQ</code> で始まるリテラル表記へ可逆エスケープする（例: 本文の <code>&lt;XREV-NL&gt;</code>→<code>XREVQnl</code>）。</li><li><strong>round_id</strong> は高エントロピー（<code>secrets</code> 由来）。スクロールバックの過去応答との衝突を避ける。</li><li><strong>切り詰め検出（reviewer 種別対応・C2）</strong>: 照合手段は <code>reviewer_process</code> の basename で分岐する。<ul><li><code>codex</code>: TUI が長いペーストを <code>[Pasted Content N chars]</code> に畳むため、その文字数 N が送信長と
+一致するかで欠落を検出する（不一致=<code>exit 13</code>、確認不能=警告して続行という縮退は codex に限定）。
+スクロールバックには過去ラウンドの表示も残るため、<strong>最後の一致</strong>を今回の分とみなす。</li><li><code>claude</code>（<strong>参照モード専用</strong>）: ペーストチップに文字数が表示されないため（実測。
+docs/cmux-behavior.md 参照）codex と同じ照合は成立しない。inline（本文を wire に直接載せる
+方式）向けに、composer 上で wire 文字列と de-wrap 後の画面テキストを空白非依存で全文一致
+照合する方式を実装したことがあったが、空白の位置がずれる改変を比較・decoder のどちらも
+検出できず完全性証明にならないと 2 巡目のクロスレビューで指摘され、不採用として撤去した
+（経緯は下記コラム参照）。現在は <strong>inline は wire 長に関わらず無条件で <code>exit 28</code>
+（<code>integrity_unverifiable</code>）で送信前拒否になる</strong>。<strong>このため claude reviewer は参照モード
+（<code>XREV_REFERENCE_MODE=1</code>）が必須</strong>であり、参照モードは本節の切り詰め検出自体を行わない。
+根拠: レビュー対象の完全性は diff_hash + 基底 HEAD の端到端照合（<a href="reference-mode.html">参照モード</a>参照）が
+機械保証する。reviewer が実際にハッシュした range と返却 hash/head が一致した応答しか
+採用されないため、見ていない対象への approve は成立しない。指示部が壊れた場合も
+decode_error / hash 不一致 / timeout のいずれかの失敗系に落ちる（fail closed 維持）。</li><li>それ以外の未知種別: 検証手段が確立していないため、送信前に <code>exit 28</code> で拒否する（fail closed）。</li></ul></li></ul><blockquote><p><strong>経緯（不採用になった全文一致照合方式）</strong>: claude inline 向けに、wire と de-wrap 後の画面
+テキストの両辺から ASCII スペースと改行を<strong>すべて</strong>除去してから部分文字列一致を見る比較
+（<code>_xrev_check_full_match</code>。行単位 strip では TUI の折り返し位置が wire 内の意味のある空白と
+重なると誤判定する問題への対処として空白非依存化していた）を、wire 長が一定の上限
+（<code>integrity_full_match_max_chars</code>）以下のときだけ試みる設計を採用していた。しかし
+「LEN_\* はフィールド全体長であり、空白の削除と挿入が相殺すれば比較・canonical frame
+構文の検証のどちらもすり抜ける」という指摘（2巡目クロスレビュー・medium）を受け、完全性の
+証明にはならない可用性ヒューリスティックにすぎないと判断し撤去した。claude reviewer は
+参照モードの diff_hash + 基底 HEAD 端到端照合のみを完全性の根拠とする。</p></blockquote><h3 id="wire-encoding-xrev-ascii-v1ascii-only暫定措置">wire encoding <code>XREV-ASCII-V1</code>（ASCII-only・暫定措置）</h3><figure class="fig">
+<svg viewBox="0 0 880 300" role="img" aria-labelledby="fig-mf1">
+<title id="fig-mf1">wire（1 物理行）の構造: ヘッダ・ASCII ヒント・長さ付きフィールド群・終端マーカーがそれぞれ「スペース :: スペース」で連結され、instr・out・payload の 3 フィールドは区切り文字なしで直接連結される（長さで切り出す）。</title>
+<text x="20" y="28" class="boxtitle">wire（1 物理行）の構造 — 全文字が印字可能 ASCII（0x20–0x7E）</text>
+
+<rect x="20" y="48" width="240" height="64" class="box-accent"/>
+<text x="32" y="70" class="mono-strong">XREV_REVIEW round_id=&lt;rid&gt;</text>
+<text x="32" y="88" class="mono">ENCODING=XREV-ASCII-V1</text>
+<text x="32" y="104" class="mono">LEN_INSTR=a LEN_OUT=b LEN_PAYLOAD=c</text>
+
+<rect x="268" y="48" width="110" height="64" class="box"/>
+<text x="280" y="76" class="mono">:: &lt;hint&gt; ::</text>
+<text x="280" y="96" class="small">reviewer 向け補助</text>
+
+<rect x="386" y="48" width="130" height="64" class="box-warn"/>
+<text x="398" y="76" class="mono">&lt;instr&gt;</text>
+<text x="398" y="96" class="small">長さ a で切り出し</text>
+
+<rect x="524" y="48" width="100" height="64" class="box-warn"/>
+<text x="536" y="76" class="mono">&lt;out&gt;</text>
+<text x="536" y="96" class="small">長さ b</text>
+
+<rect x="632" y="48" width="120" height="64" class="box-err"/>
+<text x="644" y="76" class="mono">&lt;payload&gt;</text>
+<text x="644" y="96" class="small">長さ c・frame 解析対象</text>
+
+<rect x="760" y="48" width="100" height="64" class="box-ok"/>
+<text x="772" y="76" class="mono">:: END_</text>
+<text x="772" y="92" class="mono">ROUND_&lt;rid&gt;</text>
+<text x="772" y="108" class="small">切り詰め検出</text>
+
+<text x="20" y="132" class="small">※ ブロック間は「 :: 」で連結。instr・out・payload の 3 フィールド間には区切りが無く、LEN_* の長さだけで切り出す。</text>
+<text x="20" y="158" class="strong">なぜ長さ付きフィールドか</text>
+<text x="20" y="180" class="small">instr には || LNNNN: や &lt;XREV-NL&gt; が「説明文として」含まれるため、区切り文字の探索では領域を分離できない。</text>
+<text x="20" y="198" class="small">長さは wire 上の文字数で数え、不足・末尾マーカー不一致は復号側が拒否する（fail closed）。</text>
+
+<text x="20" y="224" class="strong">なぜ ASCII だけか</text>
+<text x="20" y="246" class="small">cmux のソケット受信は UTF-8 チャンク欠陥（未修正バグ）を持ち、多バイト文字が読み取り境界で分断されると最大 4095 バイト消える。</text>
+<text x="20" y="264" class="small">非 ASCII は \uXXXX に畳む（非 BMP はサロゲート対）。encode 直前に「\・改行・CR・TAB が 0 個」を検証するため、</text>
+<text x="20" y="282" class="small">wire 上の \ は必ず xrev 生成の \uXXXX の一部になり、復号が一意に定まる。</text>
+</svg>
+<figcaption>図: wire の構造。未知の ENCODING 値は拒否される。根拠となる実測は <a href="../cmux-behavior.md">cmux-behavior.md</a> 4 節。</figcaption>
+</figure>
+<figure class="fig">
+<svg viewBox="0 0 880 430" role="img" aria-labelledby="fig-mf2">
+<title id="fig-mf2">エンコードと復号の対応図: 送信側の 4 段（トークン退避、改行の畳み込み、ASCII 化、ヘッダ付与）と、受信側の復号手順 1 から 5 が逆順に対応する。</title>
+<defs>
+<marker id="m-mf2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+</marker>
+</defs>
+<text x="30" y="28" class="boxtitle">encode（primary 側・_build_framed_line）</text>
+<text x="490" y="28" class="boxtitle">decode（reviewer 側・_xrev_decode_line が正典）</text>
+
+<rect x="30" y="44" width="380" height="58" class="box"/>
+<text x="44" y="66" class="strong">① 制御トークンの退避と衝突回避</text>
+<text x="44" y="84" class="mono">\ → &lt;XREV-BS&gt; ／ tab → &lt;XREV-TAB&gt; ／ 本文中の</text>
+<text x="44" y="98" class="mono">トークンは XREVQ… へ可逆エスケープ</text>
+
+<rect x="30" y="116" width="380" height="58" class="box"/>
+<text x="44" y="138" class="strong">② 改行を 1 物理行へ畳む（content_type で二段構え）</text>
+<text x="44" y="156" class="mono">plain: &lt;XREV-NL&gt; ／ diff・code: || L0001: 番号付き</text>
+<text x="44" y="170" class="small">canonical %04d のみ。行番号は 1..n 連続</text>
+
+<rect x="30" y="188" width="380" height="58" class="box"/>
+<text x="44" y="210" class="strong">③ ASCII 化（XREV-ASCII-V1）と検証</text>
+<text x="44" y="228" class="mono">非 ASCII → \uXXXX（非 BMP はサロゲート対）</text>
+<text x="44" y="242" class="small">直前:「\・改行・CR・TAB 0 個」／ 直後:「全文字 0x20–0x7E」</text>
+
+<rect x="30" y="260" width="380" height="58" class="box"/>
+<text x="44" y="282" class="strong">④ ヘッダ・長さ・終端マーカーの付与</text>
+<text x="44" y="300" class="mono">round_id / ENCODING / LEN_* / END_ROUND_&lt;rid&gt;</text>
+<text x="44" y="314" class="small">失敗したら送信せず中止（cmux へは未送信）</text>
+
+<rect x="470" y="44" width="390" height="58" class="box"/>
+<text x="484" y="66" class="strong">手順 1: ヘッダ検証と長さでの切り出し</text>
+<text x="484" y="84" class="small">ENCODING 検証・フィールド不足・末尾マーカー不一致は拒否</text>
+
+<rect x="470" y="116" width="390" height="58" class="box"/>
+<text x="484" y="138" class="strong">手順 2: \uXXXX の復号（厳密）</text>
+<text x="484" y="156" class="small">正しいサロゲート対のみ統合。孤立サロゲート・桁不足・</text>
+<text x="484" y="170" class="small">\u 以外の \・印字可能 ASCII の escape はすべて拒否</text>
+
+<rect x="470" y="188" width="390" height="58" class="box"/>
+<text x="484" y="210" class="strong">手順 3: payload 領域だけに frame 解析</text>
+<text x="484" y="228" class="small">行番号 1..n の欠番・重複・順序変更なしを検証。</text>
+<text x="484" y="242" class="small">instr / out は Unicode 復号のみ</text>
+
+<rect x="470" y="260" width="390" height="58" class="box"/>
+<text x="484" y="282" class="strong">手順 4–5: トークン復元 → XREVQ 復元</text>
+<text x="484" y="300" class="mono">&lt;XREV-BS&gt;→\ ／ &lt;XREV-TAB&gt;→tab</text>
+<text x="484" y="314" class="small">XREVQ は最長一致・左→右の単一走査（出力を再走査しない）</text>
+
+<path class="arrow" d="M 220 102 V 116" marker-end="url(#m-mf2)"/>
+<path class="arrow" d="M 220 174 V 188" marker-end="url(#m-mf2)"/>
+<path class="arrow" d="M 220 246 V 260" marker-end="url(#m-mf2)"/>
+<path class="arrow" d="M 665 102 V 116" marker-end="url(#m-mf2)"/>
+<path class="arrow" d="M 665 174 V 188" marker-end="url(#m-mf2)"/>
+<path class="arrow" d="M 665 246 V 260" marker-end="url(#m-mf2)"/>
+<path class="arrow" d="M 410 289 H 440 V 73 H 470" marker-end="url(#m-mf2)"/>
+<text x="418" y="180" class="small" transform="rotate(-90 424 180)" text-anchor="middle">cmux send</text>
+
+<rect x="30" y="342" width="830 " height="72" class="box-err"/>
+<text x="44" y="366" class="strong">復号失敗時の契約（fail closed）</text>
+<text x="44" y="386" class="small">reviewer はレビューを行わず decode_error の finding を 1 件だけ返す。この finding は severity や severity_blockers の設定に</text>
+<text x="44" y="402" class="small">関わらず常に blocker として集計される（誤収束防止）。inline への再フォールバックはしない（同じ ASCII wire を通るため回避にならない）。</text>
+</svg>
+<figcaption>図: エンコード各段と復号手順の対応。エンコードの逆操作を厳密に検証しながら辿るのが復号手順 1〜5。</figcaption>
+</figure>
+<p><strong>これは cmux 側の不具合に対する暫定回避策</strong>である。上流が修正され普及したら削除可否を判断できるよう、
+encoding にバージョンを付けている。上流の状況: 報告 issue
+<a href="https://github.com/manaflow-ai/cmux/issues/8924">manaflow-ai/cmux#8924</a> は PR #8962 として
+2026-07-26 に main へマージ済み（安定版 v0.64.20 には未収載）。削除判断の具体的な手順は
+<a href="../roadmap.md">../../docs/roadmap.md</a> の「将来の検討事項」を参照。</p><ul><li><strong>なぜ必要か</strong>: cmux 0.64.20 の受信側 <code>ControlClientLineReader</code> は最大 4095 バイトずつ <code>read(2)</code> し、
+<strong>各チャンクを独立に UTF-8 変換して、失敗したチャンクを丸ごと捨てる</strong>。Unix domain socket の
+<code>read(2)</code> は write 境界を保存しないため、多バイト文字が読み取り境界で分断されると最大 4095 バイトが
+消え、残った断片が V1 コマンドとして解釈されて <code>ERROR: Unknown command '&lt;断片&gt;'</code> になる。
+ASCII は各バイトが単独で正しい UTF-8 なのでこの欠陥の影響を受けない。
+実測（各5回）: ASCII 100KB=0失敗 / 日本語 30KB=3失敗 / 日本語 36KB=5失敗 /
+同一本文を ASCII 化した 62KB=0失敗。<strong>長さではなく非ASCIIの有無で分離する。</strong></li><li><strong>wire 形式</strong>（機械処理は <code>ENCODING</code> の値だけで版を判定する。後続の HINT は reviewer 向けの補助）:<pre><code>XREV_REVIEW round_id=&lt;rid&gt; ENCODING=XREV-ASCII-V1 LEN_INSTR=&lt;a&gt; LEN_OUT=&lt;b&gt; LEN_PAYLOAD=&lt;c&gt;
+  :: &lt;ASCII hint&gt; :: &lt;instr&gt;&lt;out&gt;&lt;payload&gt; :: END_ROUND_&lt;rid&gt;</code></pre><p>ヘッダーの正規表現:
+<code>^XREV_REVIEW round_id=([A-Za-z0-9_-]{1,64}) ENCODING=([A-Za-z0-9_.-]{1,32}) LEN_INSTR=(\d+) LEN_OUT=(\d+) LEN_PAYLOAD=(\d+) :: </code>
+未知の <code>ENCODING</code> 値は<strong>拒否</strong>する。長さは wire 上の文字数で数える。</p></li><li><strong>長さ付きフィールドにする理由</strong>: <code>instr</code> には <code>'|| LNNNN:'</code> や <code>&lt;XREV-NL&gt;</code> が<strong>説明文として</strong>
+含まれる。区切り探索では領域を分離できないため、長さで切り出す。</li><li><strong>escape 規則</strong>: 印字可能 ASCII（0x20–0x7E）以外のコードポイントをすべて <code>\uXXXX</code> にする。
+非BMP はサロゲート対（<code>\uXXXX\uXXXX</code>）。DEL や制御文字も生では出さない。
+encode 直前に「バックスラッシュ・改行・CR・TAB が 0 個」、直後に「全文字が 0x20–0x7E」を検証する。
+前者が成り立つので <strong>wire 上の <code>\</code> は必ず xrev が生成した <code>\uXXXX</code> の一部</strong>になり、復号が一意に定まる。</li><li><strong>復号手順（正典）</strong>。実装は <code>_xrev_decode_line</code>。<ol><li>ヘッダーを解釈し <code>ENCODING</code> を検証、長さでフィールドを切り出す（不足・末尾マーカー不一致は拒否）</li><li>各フィールドの <code>\uXXXX</code> を復号する。<code>\u[0-9A-Fa-f]{4}</code> <strong>のみ</strong>を認識し、正しい high+low
+サロゲート対だけを非BMP文字へ統合する。孤立サロゲート・桁不足・非16進・<code>\u</code> 以外の
+バックスラッシュは<strong>すべて拒否</strong>（リテラル維持にしない）</li><li><strong><code>payload</code> 領域だけ</strong>に frame 解析を適用する。<code>instr</code>/<code>out</code> は Unicode 復号のみ。
+<code>PAYLOAD_FRAMED</code> は行番号が 1..n で欠番・重複・順序変更なく並ぶことを検証する
+（桁数は 10000 行以降 5 桁になるので <code>\d{4,}</code> で受ける）<p><strong>frame の字句仕様</strong>: レコードは <code>|| L&lt;NNNN&gt;: &lt;行本文&gt;</code> で、<code>%04d</code> の canonical 表現のみ受理する
+（<code>L00001</code> のような先頭ゼロ付きは拒否）。レコード同士は<strong>単一の空白1文字</strong>で連結されるため、
+decoder は<strong>最終行以外の末尾から空白をちょうど1つだけ</strong>取り除く。本文が行境界で始まらない場合と、
+非最終行の末尾に連結空白が無い場合は拒否する。<code>\uXXXX</code> 復号では<strong>印字可能 ASCII（0x20–0x7E）の
+escape も拒否する</strong> — encoder は生成しないため、受理すると復号後に <code>|| L0002: </code> や <code>&lt;XREV-BS&gt;</code> を
+合成でき、payload の衝突退避を経由せず frame/token 解析へ流し込めてしまう。</p></li><li>生成トークンを戻す（<code>&lt;XREV-BS&gt;</code>→<code>\</code> / <code>&lt;XREV-TAB&gt;</code>→tab）</li><li><code>XREVQ</code> 列を<strong>最長一致・左から右へ単一走査・出力を再走査しない</strong>で復元する</li></ol></li></ul><p>  手順5が単一走査でなければならない理由: 原文 <code>XREVQnl</code> は encode で <code>XREVQXREVQnl</code> になる。
+  <code>XREVQnl</code> を先に置換しても <code>XREVQXREVQ</code> を先に置換しても、反復置換では制御トークンへ誤変換される。</p><ul><li><strong>失敗時の契約</strong>: 送信側は encode/検証に失敗したら<strong>送信せず</strong>中止する。
+reviewer 側は復号に失敗したらレビューを行わず、<code>verdict="request_changes"</code> と
+<code>category="bug"</code> / <code>message="decode_error"</code> の finding を1件だけ返す。
+inline へのフォールバックは<strong>しない</strong>（同じ ASCII wire を通るので回避にならない）。
+<code>message="decode_error"</code> の finding は、その severity や config の <code>severity_blockers</code>
+設定に関わらず、常に blocker として集計される（誤収束防止）。</li></ul><h3 id="wire-長の上限fail-closed">wire 長の上限（fail closed）</h3><p><code>_build_framed_line</code> が生成した wire（1物理行）の文字数が <code>wire_max_chars</code>（既定 <code>64000</code>。
+<code>XREV_WIRE_MAX_CHARS</code> / config の <code>wire_max_chars</code>。1000〜1000000 の範囲外、または
+<code>_xrev_uint</code> の検証（後述）を満たさなければ既定値へフォールバック）を超えたら、
+<code>xrev_transport_review</code> は エンコード後・送信前に <strong>cmux へ一切送らず</strong> <code>exit 26</code> で中止する。</p><p>根拠: <a href="../cmux-behavior.md">docs/cmux-behavior.md</a> の実測で ASCII 100KB の送信が 5/5
+成功しているが、Linux の env/argv 1本あたり上限（<code>MAX_ARG_STRLEN</code> 約128KiB）や巨大 payload
+が想定外に混入するリスクを踏まえ、実測より保守的な値を既定にして早期に fail closed する。</p><h3 id="巨大な-payload-の受け渡しstdin-経由envargv-上限の回避">巨大な payload の受け渡し（stdin 経由・env/argv 上限の回避）</h3><p><code>_build_framed_line</code> / <code>_xrev_decode_line</code> / <code>_scan_review_blocks</code> / <code>_xrev_redact_diag</code>（送信本文側）
+や <code>parse-review.sh</code>（reviewer JSON）は、巨大になり得るデータを <strong>環境変数や argv ではなく stdin</strong>
+で python3 へ渡す。Linux は env/argv 1本あたり <code>MAX_ARG_STRLEN</code>（約128KiB）の上限があり、これを
+超えるとシェルやプロセス起動が失敗するため（macOS の <code>ARG_MAX</code> も合計約1MBで同種の制約がある）。</p><p>実装上の注意（bash 3.2 対策）: プログラム本文を <code>prog="$(cat &lt;&lt;'PY' ... PY)"</code> のように command
+substitution で変数化する書き方は使わない。bash 3.2（macOS 既定）は <code>$(...)</code> の対応する閉じ括弧を
+探す処理がヒアドキュメント本文の中身（括弧・引用符の個数）まで数えてしまう既知の癖があり、本文中に
+不均衡な括弧を含む行（Python の複数行文字列連結など）があると <code>unexpected EOF while looking for
+matching</code> という構文エラーになる。代わりに <code>read -r -d '' prog &lt;&lt;'PY' ... PY</code> でヒアドキュメントを
+変数へ読み込む（command substitution を経由しないため影響を受けない）。</p><h3 id="reviewer-出力の例">reviewer 出力の例</h3><p>実際は1行コンパクトで返させる（読みやすさのため整形して例示）。トップレベルに依頼の
+<code>round_id</code> を含めること（応答検出の相関に使う）:</p><pre><code>===XREV-JSON-BEGIN===
+{
+  "round_id": "r3c98be8691dfd20",
+  "verdict": "request_changes",
+  "summary": "宛先解決が再起動で壊れる懸念",
+  "findings": [
+    {
+      "file": "scripts/transport.sh",
+      "line": 60,
+      "severity": "high",
+      "category": "design",
+      "message": "surface ID 直指定は Codex 再起動で無効化する",
+      "suggested_fix": "タイトルから surface を動的解決する"
+    }
+  ]
+}
+===XREV-JSON-END===</code></pre><nav class="pager"><span></span><span><a href="review-contract.html">review-contract &rarr;</a></span></nav>
+</main>
+</body>
+</html>

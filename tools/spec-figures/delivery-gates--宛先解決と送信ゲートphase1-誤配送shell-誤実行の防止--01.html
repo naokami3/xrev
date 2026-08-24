@@ -1,0 +1,61 @@
+<figure class="fig">
+<svg viewBox="0 0 880 600" role="img" aria-labelledby="fig-dg1">
+<title id="fig-dg1">送信ゲートの多段フィルタ: 宛先解決から UUID 再検証、端末性プリフライト、プロセス証明と安全ポリシー検証、本文送信、切り詰め検出、Enter 直前の最終ゲートまで、各段の終了コード付きで payload が通過する関門を示す。</title>
+<defs>
+<marker id="m-dg1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+</marker>
+</defs>
+<rect x="40" y="20" width="420" height="58" class="box"/>
+<text x="54" y="42" class="strong">宛先解決（_cmux_resolve_surface）</text>
+<text x="54" y="62" class="small">明示 XREV_REVIEWER_SURFACE → 同一 WS 内タイトル一致 → (opt-in) グローバル</text>
+<text x="500" y="42" class="small">0 件 = exit 10 ／ 複数一致 = exit 16（曖昧）</text>
+<text x="500" y="60" class="small">WS 不整合・別 WS = exit 15</text>
+
+<path class="arrow" d="M 250 78 V 96" marker-end="url(#m-dg1)"/>
+<rect x="40" y="96" width="420" height="52" class="box"/>
+<text x="54" y="118" class="strong">① UUID 同一性・WS 所属の再検証（送信直前に tree を取り直す）</text>
+<text x="54" y="138" class="small">ref 再利用・WS 移動・surface 差し替えを検出</text>
+<text x="500" y="122" class="small">不一致 = exit 15</text>
+
+<path class="arrow" d="M 250 148 V 166" marker-end="url(#m-dg1)"/>
+<rect x="40" y="166" width="420" height="52" class="box"/>
+<text x="54" y="188" class="strong">② 端末性プリフライト（read-screen probe）</text>
+<text x="54" y="208" class="small">エージェント統合パネル（PTY 無し）を reviewer にしない</text>
+<text x="500" y="192" class="small">読めない = exit 14</text>
+
+<path class="arrow" d="M 250 218 V 236" marker-end="url(#m-dg1)"/>
+<rect x="40" y="236" width="420" height="70" class="box-err"/>
+<text x="54" y="258" class="strong">③ プロセス証明 + 安全ポリシー実効検証（_xrev_gate_reviewer）</text>
+<text x="54" y="276" class="small">前景プロセスグループ（pgid == tpgid）の comm が reviewer と一致し、</text>
+<text x="54" y="292" class="small">実 argv が sandbox=read-only かつ承認=never を実効に満たすこと</text>
+<text x="500" y="266" class="small">前景不一致 = exit 17</text>
+<text x="500" y="288" class="small">ポリシー不成立 = exit 27</text>
+
+<path class="arrow" d="M 250 306 V 324" marker-end="url(#m-dg1)"/>
+<rect x="40" y="324" width="420" height="52" class="box"/>
+<text x="54" y="346" class="strong">本文送信（cmux send・1 物理行）</text>
+<text x="54" y="366" class="small">失敗時: 待機 → 入力欄クリア → 再送（既定 5 回）</text>
+<text x="500" y="340" class="small">encode 失敗 = exit 23 ／ wire 超過 = exit 26</text>
+<text x="500" y="358" class="small">送信失敗 = exit 11</text>
+
+<path class="arrow" d="M 250 376 V 394" marker-end="url(#m-dg1)"/>
+<rect x="40" y="394" width="420" height="52" class="box"/>
+<text x="54" y="416" class="strong">切り詰め検出（ペーストチップ N chars と送信長の照合）</text>
+<text x="54" y="436" class="small">rc=0 でも部分到達する実測への対処。最後の一致を今回分とみなす</text>
+<text x="500" y="420" class="small">不一致 = exit 13（truncated）</text>
+
+<path class="arrow" d="M 250 446 V 464" marker-end="url(#m-dg1)"/>
+<rect x="40" y="464" width="420" height="70" class="box-err"/>
+<text x="54" y="486" class="strong">Enter 直前の最終ゲート（③ と同一の検査を再実行）</text>
+<text x="54" y="504" class="small">検査 3 点: 早期棄却 / 本文送信直前 / Enter 直前（再送前も同様）。</text>
+<text x="54" y="520" class="small">不一致なら Enter を送らず中止（本文は入力行に残る → ペインは汚染扱い）</text>
+<text x="500" y="490" class="small">exit 17 / 27</text>
+<text x="500" y="508" class="small">Enter 失敗 = exit 25</text>
+
+<text x="40" y="554" class="small">通過後: 応答待ち（タイムアウト = exit 12 ／ 完成応答が不正 JSON = exit 24）。TOCTOU の残余窓は原理的に排除できない（本文参照）。</text>
+<text x="40" y="578" class="small">※ この図より前（宛先解決の前）に事前検査がある: reviewer 設定の矛盾 = exit 29 ／ reviewer 種別に応じた送信完全性の検証手段が</text>
+<text x="40" y="594" class="small">　確立できない（未知種別・claude への inline）= exit 28（integrity_unverifiable）。いずれも cmux へは一切送信しない。</text>
+</svg>
+<figcaption>図: 全段を通過して初めて Enter が送られる。プロセス証明と安全ポリシー検証は常に同じゲートで行う（どちらか一方だけの再検証を許さない）。</figcaption>
+</figure>

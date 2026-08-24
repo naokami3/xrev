@@ -1,0 +1,38 @@
+# xrev
+
+設計段階からのクロスレビュー往復を、人間の操作なしで AI コーディングエージェント同士に行わせる
+Claude Code プラグイン。既定は primary=Claude（設計・実装・修正反映）/ reviewer=Codex
+（レビュー専用・read-only）で、cmux のペイン間通信を介して critical/high の指摘が 0 件になるまで往復する。
+
+ドキュメントは二層構成: **人間向けは HTML**（`docs/overview.html`・`docs/spec/`）、
+**エージェント向けは Markdown**（以下の一覧が正典）。エージェントは md 側を読むこと
+（HTML は md からの自動生成物で内容は同一）。
+
+## エージェント向け正典・手順書（md）
+
+- [references/protocol.md](references/protocol.md): プロトコル正典の索引（互換アンカー付き）
+- [references/protocol/message-format.md](references/protocol/message-format.md): メッセージ書式・1物理行エンコード・XREV-ASCII-V1・切り詰め検出
+- [references/protocol/review-contract.md](references/protocol/review-contract.md): severity / verdict・act ラベル
+- [references/protocol/exit-codes.md](references/protocol/exit-codes.md): decision と終了コード・round_state 安全弁
+- [references/protocol/config.md](references/protocol/config.md): 設定キー・auto 解決（D1）・実行コンテキスト・解決順
+- [references/protocol/delivery-gates.md](references/protocol/delivery-gates.md): 宛先解決と送信ゲート・送信の堅牢化
+- [references/protocol/reviewer-lifecycle.md](references/protocol/reviewer-lifecycle.md): reviewer 自動生成・read-only 強制・グローバル導入
+- [references/protocol/reference-mode.md](references/protocol/reference-mode.md): 参照モード（diff 本文を送らない）
+- [references/protocol/doctor.md](references/protocol/doctor.md): 外部ツール契約の一括診断
+- [references/review-schema.json](references/review-schema.json): reviewer 出力契約（JSON Schema）
+- [skills/xrev/SKILL.md](skills/xrev/SKILL.md): 往復手順そのもの（primary=Claude 向けプレイブック）
+- [references/codex-primary-playbook.md](references/codex-primary-playbook.md): 主従反転（primary=Codex / reviewer=Claude）向け手順書
+- [AGENTS.md](AGENTS.md): このリポジトリで作業するエージェントへの指示
+- [docs/architecture.md](docs/architecture.md): ディレクトリ構造・設計原則
+- [docs/cmux-behavior.md](docs/cmux-behavior.md): cmux の実挙動（実測・設計前提）
+- [docs/cmux-integration.md](docs/cmux-integration.md): cmux 依存と対処の対応マップ
+- [docs/security-design.md](docs/security-design.md): 脅威モデル（何を守り何を守らないか）
+- [docs/setup-codex.md](docs/setup-codex.md): codex 主のセットアップガイド
+- [docs/roadmap.md](docs/roadmap.md): フェーズと進捗
+- [CONTRIBUTING.md](CONTRIBUTING.md): 開発規約（テスト強制）
+
+## 人間向け（HTML）
+
+- [docs/overview.html](docs/overview.html): 図付きの技術概観
+- [docs/cmux.html](docs/cmux.html): cmux 詳細解説（エージェント×cmux の対比・プロンプトの一生）
+- [docs/spec/index.html](docs/spec/index.html): 詳細仕様（references/protocol/ から tools/render-spec.sh で自動生成。図付き）
