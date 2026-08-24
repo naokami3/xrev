@@ -292,10 +292,7 @@ reviewer では現状非対応**（設計フェーズは常に inline になる�
 ドキュメントは二層構成: **人間向けは HTML**、**エージェント向けは md**（正典。地図は
 [`llms.txt`](llms.txt)）。HTML は正典 md から `tools/render-spec.sh` で自動生成され、内容は同一。
 
-ブラウザで読むなら **[naokami3.github.io/xrev](https://naokami3.github.io/xrev/)**（main の更新ごとに
-自動で再公開）。GitHub 上で `.html` を開くとソース表示になるため、以下のリンク先と同じ内容を
-読むだけなら公開サイト側が読みやすい。
-
+ブラウザで読むなら **[naokami3.github.io/xrev](https://naokami3.github.io/xrev/)**
 - **図付きの技術概観（まずここから）** → [`docs/overview.html`](docs/overview.html)
 - **詳細仕様（人間向け HTML・図付き）** → [`docs/spec/index.html`](docs/spec/index.html)
 - **cmux 詳細解説（エージェント×cmux の対比・プロンプトの一生）** → [`docs/cmux.html`](docs/cmux.html)
