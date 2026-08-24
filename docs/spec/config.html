@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xrev 詳細仕様 — 設定（キー一覧・解決順・実行コンテキスト）</title>
+<style>
+  :root {
+    --bg: #faf9f7; --fg: #24292e; --muted: #6a737d; --card: #ffffff;
+    --line: #d4d0c8; --accent: #3b5bdb; --accent-soft: #e7ecfb;
+    --ok: #2f7d32; --ok-soft: #e5f2e6; --warn: #b26a00; --warn-soft: #f8edda;
+    --err: #c02f2f; --err-soft: #f9e5e5; --ref: #7048a8; --ref-soft: #efe7f8;
+    --box: #f2f0ec; --code: #eceae5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #d8dde3; --muted: #8b949e; --card: #1c2026;
+      --line: #3a4048; --accent: #7c96f0; --accent-soft: #232c45;
+      --ok: #6dbb71; --ok-soft: #1d2f1e; --warn: #d9a04f; --warn-soft: #33281a;
+      --err: #e07575; --err-soft: #382020; --ref: #b394e8; --ref-soft: #2a2138;
+      --box: #232830; --code: #262b33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif;
+    line-height: 1.8; font-size: 16px; }
+  main { max-width: 900px; margin: 0 auto; padding: 0 20px 80px; }
+  header.top { border-bottom: 1px solid var(--line); padding: 22px 0 14px; margin-bottom: 8px;
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+  header.top .crumbs { font-size: 0.9rem; }
+  header.top .crumbs a { color: var(--accent); text-decoration: none; }
+  header.top .src { font-size: 0.8rem; color: var(--muted); }
+  header.top .src a { color: var(--accent); }
+  .gen-note { background: var(--accent-soft); border-radius: 8px; padding: 8px 14px;
+    font-size: 0.82rem; margin: 14px 0; color: var(--fg); }
+  h1 { font-size: 1.55rem; line-height: 1.4; margin: 20px 0 12px; }
+  h2 { font-size: 1.25rem; margin: 44px 0 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 32px 0 8px; }
+  p { margin: 10px 0; }
+  a { color: var(--accent); }
+  code { background: var(--code); padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em;
+    overflow-wrap: anywhere; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; line-height: 1.55; }
+  pre code { background: none; padding: 0; font-size: 0.82rem; }
+  .tablewrap { overflow-x: auto; margin: 14px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  th, td { border: 1px solid var(--line); padding: 7px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--box); white-space: nowrap; }
+  td:first-child code { overflow-wrap: normal; }
+  blockquote { margin: 14px 0; padding: 4px 16px; border-left: 3px solid var(--accent);
+    background: var(--box); border-radius: 0 8px 8px 0; color: var(--muted); }
+  ul, ol { margin: 10px 0; padding-left: 26px; }
+  li { margin: 5px 0; }
+  li p { margin: 8px 0; }
+  nav.pager { display: flex; justify-content: space-between; gap: 12px; margin-top: 48px;
+    border-top: 1px solid var(--line); padding-top: 14px; font-size: 0.9rem; }
+  nav.pager a { color: var(--accent); text-decoration: none; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px; margin: 18px 0; padding: 0; list-style: none; }
+  .cards li { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; margin: 0; }
+  .cards a { font-weight: 600; text-decoration: none; }
+  .cards p { color: var(--muted); font-size: 0.85rem; margin: 6px 0 0; }
+  img { max-width: 100%; vertical-align: middle; }
+
+  /* 図（tools/spec-figures/ からの注入フラグメント用） */
+  .fig { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px; margin: 18px 0; overflow-x: auto; }
+  .fig svg { display: block; min-width: 820px; width: 100%; height: auto; }
+  .fig figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 8px; }
+  figure { margin: 0; }
+  svg text { font-family: "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif; fill: var(--fg); }
+  svg .small { font-size: 11px; fill: var(--muted); }
+  svg .label { font-size: 13px; }
+  svg .strong { font-size: 13px; font-weight: 600; }
+  svg .boxtitle { font-size: 14px; font-weight: 700; }
+  svg .mono { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  svg .mono-strong { font-family: ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700; }
+  svg .frame { fill: none; stroke: var(--line); stroke-width: 1.5; rx: 10; }
+  svg .box { fill: var(--box); stroke: var(--line); stroke-width: 1; rx: 8; }
+  svg .box-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; rx: 8; }
+  svg .box-ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.2; rx: 8; }
+  svg .box-warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; rx: 8; }
+  svg .box-err { fill: var(--err-soft); stroke: var(--err); stroke-width: 1.2; rx: 8; }
+  svg .box-ref { fill: var(--ref-soft); stroke: var(--ref); stroke-width: 1.2; rx: 8; }
+  svg .arrow { stroke: var(--fg); stroke-width: 1.4; fill: none; }
+  svg .arrow-dash { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 4; fill: none; }
+</style>
+</head>
+<body>
+<main>
+<header class="top"><span class="crumbs"><a href="../overview.html">技術概観</a> / <a href="index.html">詳細仕様</a> / config</span><span class="src"><a href="../../references/protocol/config.md">正典（md）を見る</a></span></header><p class="gen-note">本ページは <code>references/protocol/config.md</code>（正典・エージェント向け）から <code>tools/render-spec.sh</code> で自動生成されている。内容の修正は md 側で行い、再生成すること。</p><h1 id="設定キー一覧解決順実行コンテキスト">設定（キー一覧・解決順・実行コンテキスト）</h1><p><a href="../../references/protocol.md"><code>../protocol.md</code></a>（索引）から分割された正典の一部。</p><p><strong>この文書で分かること</strong>:</p><ul><li>設定キー一覧（既定値・範囲）と環境変数での上書き</li><li>reviewer の auto 解決（D1）・semantic kind・設定矛盾の検査（exit 29）</li><li>数値設定の共通バリデータ <code>_xrev_uint</code> と bash 算術インジェクション対策</li><li>実行コンテキスト（primary を cmux ペイン内で起動する必要がある理由）</li><li>ADR と完了アクション（stop_at）の解決順</li></ul><h2 id="5-設定キー一覧configxrevdefaultjson">5. 設定キー一覧（<code>config/xrev.default.json</code>）</h2><figure class="fig">
+<svg viewBox="0 0 880 380" role="img" aria-labelledby="fig-cf1">
+<title id="fig-cf1">設定の解決優先順位と auto 導出チェーン: 環境変数が config ファイルより優先し、どちらも無ければ既定値。reviewer が auto のときは primary の相手方が導出され、pane_title・process・reads_workspace が連動して決まる。</title>
+<defs>
+<marker id="m-cf1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+</marker>
+</defs>
+<text x="20" y="28" class="boxtitle">解決の優先順位（高 → 低）</text>
+<rect x="20" y="44" width="250" height="52" class="box-accent"/>
+<text x="34" y="66" class="strong">1. 環境変数（XREV_*）</text>
+<text x="34" y="86" class="small">明示指定は常に config より優先・質問しない</text>
+<path class="arrow" d="M 270 70 H 310" marker-end="url(#m-cf1)"/>
+<rect x="310" y="44" width="250" height="52" class="box"/>
+<text x="324" y="66" class="strong">2. config ファイル</text>
+<text x="324" y="86" class="small">XREV_CONFIG（既定 xrev.default.json）</text>
+<path class="arrow" d="M 560 70 H 600" marker-end="url(#m-cf1)"/>
+<rect x="600" y="44" width="260" height="52" class="box"/>
+<text x="614" y="66" class="strong">3. 既定値</text>
+<text x="614" y="86" class="small">数値は _xrev_uint で検証してからフォールバック</text>
+
+<text x="20" y="140" class="boxtitle">auto 導出チェーン（D1: semantic kind = 解決済み reviewer 名）</text>
+<rect x="20" y="156" width="200" height="56" class="box-accent"/>
+<text x="34" y="178" class="strong">primary の決定</text>
+<text x="34" y="198" class="mono">XREV_PRIMARY &gt; config</text>
+<path class="arrow" d="M 220 184 H 260" marker-end="url(#m-cf1)"/>
+<rect x="260" y="156" width="240" height="56" class="box"/>
+<text x="274" y="178" class="strong">reviewer = 「primary の相手方」</text>
+<text x="274" y="198" class="mono">claude→codex ／ codex→claude</text>
+<path class="arrow" d="M 500 184 H 540" marker-end="url(#m-cf1)"/>
+<rect x="540" y="146" width="320" height="150" class="box"/>
+<text x="554" y="170" class="strong">派生 3 キー（解決済み reviewer から導出）</text>
+<text x="554" y="194" class="mono">reviewer_pane_title:</text>
+<text x="554" y="210" class="mono">  codex→"Review Codex" / claude→"Review Claude"</text>
+<text x="554" y="230" class="mono">reviewer_process: reviewer と同名</text>
+<text x="554" y="250" class="mono">reviewer_reads_workspace:</text>
+<text x="554" y="266" class="mono">  claude→true（参照モード専用）/ codex→false</text>
+<text x="554" y="286" class="small">いずれも明示値があればそれが優先</text>
+
+<rect x="20" y="228" width="480" height="68" class="box-err"/>
+<text x="34" y="250" class="strong">矛盾検査（exit 29・副作用の前・fail closed）</text>
+<text x="34" y="270" class="small">reviewer_process の明示値（codex/claude）が解決済み reviewer と不一致、</text>
+<text x="34" y="286" class="small">または reviewer=claude で reads_workspace 明示 false → 3 経路共有の 1 関数で拒否</text>
+
+<text x="20" y="330" class="small">後方互換: XREV_PRIMARY 未設定・既定 config（reviewer=auto）なら primary=claude から reviewer=codex に解決され、</text>
+<text x="20" y="348" class="small">派生 3 キーも旧来の既定値と完全同値。XREV_PRIMARY=codex の自己申告だけで主従反転プリセットと等価な状態になる。</text>
+</svg>
+<figcaption>図: 設定解決の優先順位と D1 の auto 導出。数値設定は共通バリデータ <code>_xrev_uint</code> を通ってから bash 算術式に入る。</figcaption>
+</figure>
+<div class="tablewrap"><table><thead><tr><th>キー</th><th>既定</th><th>説明</th></tr></thead><tbody><tr><td><code>primary</code></td><td><code>claude</code></td><td>設計・生成・修正反映を担う側。<code>XREV_PRIMARY</code>（env）&gt; config の <code>primary</code> &gt; 既定 <code>claude</code> の順で解決する</td></tr><tr><td><code>reviewer</code></td><td><code>auto</code>（D1）</td><td>レビュー専用（read-only）の側。解決順: 1) <code>XREV_REVIEWER</code>（env・明示最優先） 2) config の値が <code>auto</code> 以外ならその値 3) <code>auto</code>: 「primary の相手方」（<code>{claude→codex, codex→claude}</code>。primary が claude/codex のどちらでもなければ fail closed）。既定 config（primary=claude・reviewer=auto）は解決結果 <code>codex</code> で従来と完全同値（後方互換）</td></tr><tr><td><code>reviewer_pane_title</code></td><td><code>auto</code>（D1）</td><td>宛先解決に使う cmux ペインタイトル。明示値（<code>XREV_REVIEWER_PANE_TITLE</code> env、または config の値が <code>auto</code> 以外）があればそれを使う。<code>auto</code> は解決済み <code>reviewer</code> から導出（<code>codex</code>→<code>Review Codex</code> / <code>claude</code>→<code>Review Claude</code>）。誤 title の検査はしない（既存の process 証明 <code>exit 17</code> が送信前に止めるため。下記「reviewer 設定の矛盾検査」参照）</td></tr><tr><td><code>keyword</code></td><td><code>@xrev</code></td><td>発火キーワード</td></tr><tr><td><code>max_iterations</code></td><td><code>5</code></td><td>往復の安全弁（論理ラウンドの上限）。範囲 1..50</td></tr><tr><td><code>max_transport_attempts</code></td><td><code>12</code></td><td>通算 transport 試行の上限（論理ラウンドとは別の総量安全弁。超過で escalate）。範囲 1..100</td></tr><tr><td><code>reviewer_reads_workspace</code></td><td><code>auto</code>（D1）</td><td>参照モード(Phase2)を許可するか。<code>true</code> かつ同一WS解決時のみ、diff 本文の代わりにファイル参照を送る。明示値（config の値が <code>auto</code> 以外。env 上書きは無い）があればそれを使う。<code>auto</code> は解決済み <code>reviewer</code> から導出（<code>claude</code>→<code>true</code> / <code>codex</code>→<code>false</code>）。<strong>reviewer=claude で明示 <code>false</code> は設定エラー</strong>（claude は参照モード専用のため。下記「reviewer 設定の矛盾検査」参照）</td></tr><tr><td><code>max_reference_fallbacks</code></td><td><code>3</code></td><td>参照モード検証失敗時の再試行・フォールバック通算上限（超過で escalate。無限往復を防ぐ）。名称は「参照→inline フォールバック」由来だが、意味は reviewer 種別非依存に一般化されている（codex=inline へのフォールバック回数 / claude=参照モードのままの再試行回数）。範囲 0..10</td></tr><tr><td><code>stop_at</code></td><td><code>review</code></td><td>完了アクション（review / commit / pr）</td></tr><tr><td><code>adr</code></td><td><code>false</code></td><td>ADR 生成の既定（必要有無）</td></tr><tr><td><code>adr_dir</code></td><td><code>docs/adr</code></td><td>ADR の出力ディレクトリ（相対は対象リポジトリ基準 / 絶対パス可）</td></tr><tr><td><code>transport</code></td><td><code>cmux</code></td><td>通信層実装の選択（将来の差し替え点）</td></tr><tr><td><code>reviewer_process</code></td><td><code>auto</code>（D1）</td><td>送信前プロセス証明で対象 surface の直下に在るべきプロセス名（前景 comm 名の照合専用。安全ポリシー種別・送信完全性方式等の semantic kind 判定には使わない。下記参照）。明示値（<code>XREV_REVIEWER_PROCESS</code> env、または config の値が <code>auto</code> 以外）があればそれを使う。<code>auto</code> は解決済み <code>reviewer</code> をそのまま使う。明示値の basename が <code>codex</code>/<code>claude</code> のどちらかで解決済み <code>reviewer</code> と異なる場合は設定エラー（それ以外の明示値＝ラッパ名等は前景照合にのみ使い種別判定に影響させない）</td></tr><tr><td><code>reviewer_launch_args</code></td><td><code>{"codex":["--sandbox","read-only","--ask-for-approval","never"],"claude":["--permission-mode","plan"]}</code></td><td>reviewer バイナリ名をキーに持つ object。起動経路（<code>start-reviewer.sh</code> / <code>ensure-reviewer</code> の自動生成）で機械的に付与する read-only 相当の起動引数。値そのものが安全ポリシー（sandbox=read-only かつ承認=never）を満たすことを意味検証する（満たさなければ fail closed）。既存ペインを採用する経路では launch 引数の付与はしないが、前景プロセスの実効ポリシーは既定で検証する（<code>XREV_ALLOW_UNVERIFIED_REVIEWER=1</code> で opt-out 可）</td></tr><tr><td><code>reviewer_autocreate</code></td><td><code>ask</code></td><td>reviewer ペインの自動生成方針。<code>ask</code>(スキルが一拍確認で確認後生成)/<code>auto</code>(無確認で生成)/<code>off</code>(生成せず案内)</td></tr><tr><td><code>reviewer_create_timeout_seconds</code></td><td><code>30</code></td><td>自動生成時の codex 起動確認・競合待ちの上限秒。範囲 1..600</td></tr><tr><td><code>allow_global_resolve</code></td><td><code>false</code></td><td><code>CMUX_SURFACE_ID</code> 未注入時のグローバル解決を許すか（危険・opt-in）</td></tr><tr><td><code>allow_cross_ws</code></td><td><code>false</code></td><td>明示サーフェスが呼び出し元と別WSでも送信を許すか（危険・opt-in）</td></tr><tr><td><code>severity_blockers</code></td><td><code>["critical","high"]</code></td><td>収束を妨げる severity</td></tr><tr><td><code>medium_low_max_rounds</code></td><td><code>2</code></td><td>medium 以下の指摘に付き合う上限周回（助言値。収束は blocker 0 件で機械判定するためスクリプトは消費せず、スキルが運用指針として参照する）</td></tr><tr><td><code>read_screen_lines</code></td><td><code>400</code></td><td>read-screen で読む行数。範囲 10..10000</td></tr><tr><td><code>send_settle_seconds</code></td><td><code>2</code></td><td>送信（submit）後の反映待ち秒。範囲 0..60</td></tr><tr><td><code>submit_settle_seconds</code></td><td><code>1</code></td><td>submit 前のペースト描画待ちの基準秒（本文長に比例・上限8s）。範囲 0..8</td></tr><tr><td><code>chunk_size</code></td><td><code>0</code></td><td>1物理行の分割送信サイズ（0=分割なし・一括送信）</td></tr><tr><td><code>response_timeout_seconds</code></td><td><code>600</code></td><td>応答待ちタイムアウト秒。範囲 1..3600。既定を 180 から 600 へ変更（実測: 拡張思考する claude reviewer や大きい diff の参照モードレビューで 180〜420 秒超過が頻発。応答は到着次第ポーリングが検出するため、長い既定のコストは「応答が永遠に来ないラウンドの見切りの遅さ」のみ）</td></tr><tr><td><code>response_poll_seconds</code></td><td><code>3</code></td><td>応答ポーリング間隔秒。範囲 1..60（<strong>最小1</strong>。0 だと応答待ちが busy-loop 化するため許可しない）</td></tr><tr><td><code>wire_max_chars</code></td><td><code>64000</code></td><td>送信直前の wire（1物理行）文字数の上限。超過は送信せず fail closed（<code>exit 26</code>）。範囲 1000..1000000</td></tr></tbody></table></div><p>上記の数値設定と <code>XREV_SEND_RETRIES</code>（範囲 1..20、既定 <code>5</code>）は、すべて <code>transport.sh</code> の
+共通バリデータ <code>_xrev_uint &lt;値&gt; &lt;最小&gt; &lt;最大&gt; &lt;既定&gt; &lt;名前&gt;</code> を経由してから bash の算術式
+<code>(( ))</code> に入る。<code>_xrev_uint</code> は「正整数（<code>^[0-9]{1,10}$</code>。桁数上限で 64bit 算術オーバーフローを
+regex 段階で排除する）+ キー別の範囲」を検証し、範囲外・非数値な値は既定値へフォールバックして
+stderr に1行警告する（可用性優先。stdout は汚さない）。生の値が検証前に算術式へ渡ることはない
+— bash 算術は <code>x[$(コマンド)]</code> のような値でコマンド実行を許すため、env/config 由来の数値を
+無検証で <code>(( ))</code> に渡すとインジェクションが成立してしまう。<code>review-loop.sh</code> の <code>max_iterations</code> /
+<code>max_transport_attempts</code> / <code>max_reference_fallbacks</code> も同じ <code>_xrev_uint</code> を通す。</p><p>環境変数で個別上書き可: <code>XREV_CONFIG</code>, <code>XREV_PRIMARY</code>（primary の明示指定。D1。入口の自己申告に使う。
+config の <code>primary</code> より優先）, <code>XREV_REVIEWER</code>（reviewer の明示指定。D1。新設・最優先。config の
+<code>reviewer</code> 固定値との差も含め、明示指定は常に優先し質問しない）, <code>XREV_REVIEWER_PANE_TITLE</code>,
+<code>XREV_REVIEWER_SURFACE</code>,
+<code>XREV_CMUX_BIN</code>, <code>XREV_MAX_ITERATIONS</code>, <code>XREV_STOP_AT</code>, <code>XREV_ADR</code>, <code>XREV_ADR_DIR</code>,
+<code>XREV_READ_SCREEN_LINES</code>, <code>XREV_SEND_SETTLE_SECONDS</code>, <code>XREV_SUBMIT_SETTLE_SECONDS</code>,
+<code>XREV_CHUNK_SIZE</code>, <code>XREV_CONTENT_TYPE</code>, <code>XREV_ROUND_ID</code>, <code>XREV_SEND_RETRIES</code>,
+<code>XREV_RESPONSE_TIMEOUT_SECONDS</code>, <code>XREV_RESPONSE_POLL_SECONDS</code>,
+<code>XREV_REVIEWER_PROCESS</code>, <code>XREV_ALLOW_GLOBAL_RESOLVE</code>, <code>XREV_ALLOW_CROSS_WS</code>,
+<code>XREV_MAX_TRANSPORT_ATTEMPTS</code>, <code>XREV_ROUND_STATE</code>,
+<code>XREV_REVIEWER_BIN</code>（reviewer バイナリ名の明示指定。最優先。C1）,
+<code>XREV_CODEX_BIN</code>（reviewer バイナリ名の後方互換エイリアス。config の <code>reviewer</code> が <code>codex</code> の
+ときのみ有効。それ以外の reviewer で指定されていたら警告のうえ無視する）,
+<code>XREV_REFERENCE_MODE</code>, <code>XREV_EXPECT_DIFF_HASH</code>, <code>XREV_EXPECT_HEAD</code>, <code>XREV_MAX_REFERENCE_FALLBACKS</code>,
+<code>XREV_REVIEWER_AUTOCREATE</code>, <code>XREV_REVIEWER_CREATE_TIMEOUT_SECONDS</code>, <code>XREV_WIRE_MAX_CHARS</code>,
+<code>XREV_REVIEWER_LAUNCH_ARGS</code>（JSON 配列文字列。<code>reviewer_launch_args</code> の該当 reviewer 分を上書きする。
+文字列のみの配列・印字可能ASCIIのみという型検証は config 由来の値と同じ。さらに決定した引数列
+そのものを安全ポリシーの意味検証に通すため、安全ポリシーを満たさない上書きは fail closed で拒否される
+—詳細は<a href="reviewer-lifecycle.html">reviewer ペインのライフサイクル</a>の「reviewer read-only 強制」参照）、
+<code>XREV_ALLOW_UNVERIFIED_REVIEWER</code>（<code>1</code> で「既存 reviewer 採用時の安全ポリシー実効検証」を明示 opt-out
+する。手動で用意した reviewer を使う運用を壊さないための後方互換フラグ。既定は検証する
+=fail closed。詳細は<a href="reviewer-lifecycle.html">reviewer ペインのライフサイクル</a>の「reviewer read-only 強制」参照）。
+<code>XREV_CONTENT_TYPE</code>/<code>XREV_ROUND_ID</code> は通常自動決定で、テスト・デバッグ時のみ明示する。</p><h3 id="reviewer-の-auto-解決と-semantic-kindd1">reviewer の auto 解決と semantic kind（D1）</h3><p><strong>semantic kind = 解決済み reviewer 名（<code>codex</code>/<code>claude</code>）を唯一の種別判定源とする。</strong> 安全ポリシー
+検証（<code>_xrev_check_policy</code> の kind）・送信完全性方式（<code>_xrev_integrity_kind</code>）・launch 引数選択
+（<code>_xrev_reviewer_launch_args</code>）・composer クリア方式（<code>_cmux_clear_input</code>）はすべてこの semantic
+kind（<code>transport.sh</code> の <code>REVIEWER</code> 変数。<code>_xrev_resolve_reviewer</code> が解決）で決まる。旧来の
+「kind = 前景プロセス名（<code>reviewer_process</code>）の basename」という定義は D1 で置き換わった。
+<code>reviewer_process</code> はバイナリがラッパ（例 <code>my-codex-wrapper</code>）であっても前景 comm 名の照合専用
+であり続け、種別判定には一切影響しない。</p><p><strong>reviewer 設定の矛盾検査（副作用の前・fail closed。<code>_xrev_check_reviewer_conflicts</code>）</strong>:</p><ul><li><code>reviewer_process</code> の明示値（<code>auto</code> 由来でない値）の basename が <code>codex</code>/<code>claude</code> のどちらかで、
+解決済み <code>reviewer</code> と異なる場合 → 設定エラー（新設 <code>exit 29</code>＝<code>reviewer_config_conflict</code> で
+拒否する）。それ以外の明示値（ラッパ名等）は前景照合にのみ使われ、矛盾として扱わない。</li><li><code>reviewer=claude</code> で <code>reviewer_reads_workspace</code> が明示 <code>false</code> の場合 → 設定エラー（同じく
+<code>exit 29</code>）。claude reviewer は参照モード専用のため、参照モードを禁止する組み合わせは矛盾。</li><li><code>reviewer_pane_title</code> は検査しない（誤 title のまま送信しても、既存の process 証明
+（<code>exit 17</code>）が送信前に止めるため。宛先解決自体は解決済み <code>reviewer</code> のタイトルだけを
+resolve し、両タイトルのペインが共存していても曖昧判定はしない）。</li></ul><p><strong>共有ゲート（<code>_xrev_guard_reviewer_conflicts</code>。指摘3・2巡目）</strong>: この矛盾検査は
+<code>xrev_transport_review</code>（送信直前）だけでなく、<code>xrev_ensure_reviewer</code>（reviewer ペインの自動生成。
+<code>_xrev_classify_reviewer</code> を呼ぶ<strong>前</strong>）と <code>start-reviewer.sh</code>（タイトル変更・codex の exec 起動の
+<strong>前</strong>）でも同じ1関数を通す。従来は <code>xrev_transport_review</code> にしか組み込まれておらず、
+<code>ensure-reviewer</code>／<code>start-reviewer.sh</code> は矛盾があってもペイン生成・タイトル変更まで進んでから
+（reviewer=claude + reads_workspace 明示 false では使用不能なペインを生成後の送信時に、
+reviewer_process 矛盾では生成後の起動確認が別理由で失敗する形で）気づいていた。既知の矛盾を
+検出できるのに副作用の大きい操作（ペイン生成・exec）へ進めてしまう事故を避けるため、3経路すべてが
+副作用の直前にこの1関数を呼び、判定リストを二重管理しない。</p><p><strong>後方互換</strong>: <code>XREV_PRIMARY</code> 未設定・既定 config（<code>reviewer=auto</code>）のとき、<code>primary</code>（既定
+<code>claude</code>）から <code>reviewer=codex</code> に解決され、派生3キーも旧来の既定値（<code>Review Codex</code>/<code>codex</code>/
+<code>false</code>）と完全同値になる。<strong>主従反転プリセット（<code>config/xrev.codex-primary.json</code>）と等価な状態</strong>
+は、既定 config のまま <code>XREV_PRIMARY=codex</code> を自己申告するだけで得られる（<code>reviewer=claude</code>・
+<code>reviewer_pane_title=Review Claude</code>・<code>reviewer_process=claude</code>・<code>reviewer_reads_workspace=true</code>
+が auto 解決される）。プリセットファイルは値を config へ明示的に固定しておきたい場合にのみ使う
+（挙動は等価）。</p><h3 id="実行コンテキスト重要">実行コンテキスト（重要）</h3><p>cmux ソケットは認証が要る。認証情報（<code>CMUX_SOCKET_PASSWORD</code> 等）・<code>CMUX_SOCKET_PATH</code>・<code>CMUX_SURFACE_ID</code>
+は <strong>cmux ペイン内のシェルにのみ自動注入</strong>される。よって xrev（primary）は cmux ペイン内で動かす。
+cmux の外（通常ターミナル）からは接続できず <code>transport.sh</code> は preflight で <code>exit 31</code> を返す。
+<code>transport.sh ping</code> で接続コンテキストを確認できる。<code>cmux</code> バイナリは PATH 優先、無ければアプリ同梱
+（<code>/Applications/cmux.app/Contents/Resources/bin/cmux</code>）を使う。<code>XREV_CMUX_BIN</code> で明示指定も可。</p><h3 id="adr必要有無出力先の解決順">ADR（必要有無・出力先）の解決順</h3><ul><li>必要有無: 一拍確認の明示指定 → <code>XREV_ADR</code>（<code>true</code>/<code>false</code>）→ <code>config</code> の <code>adr</code> → <code>false</code></li><li>出力先: <code>make-adr.sh</code> の引数 → <code>XREV_ADR_DIR</code> → <code>config</code> の <code>adr_dir</code> → <code>docs/adr</code>
+（相対は対象リポジトリ基準、絶対パスはそのまま）</li></ul><h3 id="完了アクションstop_atの解決順">完了アクション（stop_at）の解決順</h3><p><code>scripts/finalize.sh</code> は完了アクションを次の優先順で決める（高 → 低）:</p><ol><li>引数（その場指定。依頼文 / <code>/xrev</code> 引数 / 一拍確認の回答を Claude が渡す）</li><li>環境変数 <code>XREV_STOP_AT</code>（シェル / プロジェクト単位の既定上書き）</li><li><code>config</code> の <code>stop_at</code>（プロジェクト全体の既定）</li><li><code>review</code>（最終フォールバック・最も安全）</li></ol><nav class="pager"><span><a href="exit-codes.html">&larr; exit-codes</a></span><span><a href="delivery-gates.html">delivery-gates &rarr;</a></span></nav>
+</main>
+</body>
+</html>

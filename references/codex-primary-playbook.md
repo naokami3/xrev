@@ -84,7 +84,7 @@ Claude` / `reviewer_process=claude` / `reviewer_reads_workspace=true` も連動�
 解決する。`xrev.codex-primary.json` は**この主従反転を明示的に固定したい場合にのみ**使うプリセットと
 して残っている（例: auto 解決に頼らず値を config ファイルへ書き切っておきたい運用）。使う場合は
 `XREV_CONFIG="$XREV_ROOT/config/xrev.codex-primary.json"` を各コマンドに前置する（挙動は
-等価）。詳細・派生規則の正典は [protocol.md](protocol.md) の「設定キー一覧」を参照。
+等価）。詳細・派生規則の正典は [protocol/config.md](protocol/config.md) の「設定キー一覧」を参照。
 
 reviewer の有無確認・自動生成の契約詳細（`reviewer_autocreate` の ask/auto/off・競合ロック・
 終了コード）は [`../skills/xrev/SKILL.md`](../skills/xrev/SKILL.md) の 2 章と同一
@@ -116,7 +116,7 @@ printf '%s' "$payload" | XREV_PRIMARY=codex XREV_ROUND_STATE="$prev_round_state"
   （参照モード時のみ。回復手順は reviewer 種別依存— 6章「claude reviewer 固有の注意」参照）。
 - 各分岐の詳細な扱い・終端判定・参照モードの手順は
   [`../skills/xrev/SKILL.md`](../skills/xrev/SKILL.md) の 3〜5 章、終了コードと `decision` の
-  対応は [protocol.md](protocol.md) の「終了コード設計」節を正典として参照する（ここでは複製しない）。
+  対応は [protocol/exit-codes.md](protocol/exit-codes.md) の「終了コード設計」を正典として参照する（ここでは複製しない）。
 
 ## 4. 収束後
 
@@ -158,13 +158,14 @@ reviewer にする既定構成とは送信完全性検証・復号契約が異�
   `../docs/cmux-behavior.md` 参照）ため codex 向けの文字数照合が成立しない。全文一致照合（wire
   文字列そのものが composer に完全一致部分文字列として存在するかの空白非依存比較）を使う案も
   検討したが、空白の位置がずれる改変を比較・decoder のどちらも検出できず完全性証明にならないため
-  不採用となった（2巡目クロスレビューで棄却。詳細は [protocol.md](protocol.md) 参照）。よって
+  不採用となった（2巡目クロスレビューで棄却。詳細は
+  [protocol/message-format.md](protocol/message-format.md) の「切り詰め検出」参照）。よって
   **claude reviewer への inline 送信（本文を wire にそのまま載せる方式）は wire 長に関わらず
   無条件で `exit 28`（`integrity_unverifiable`）になり送信前に拒否される**。
   `XREV_PRIMARY=codex`（既定 config・auto 解決）でも `config/xrev.codex-primary.json`（明示プリセット）
   でも、reviewer=claude のときは `reviewer_reads_workspace=true` になる（D1: reviewer=claude での
   明示 false は設定エラーとして拒否される）。**実装フェーズは必ず下記の参照モード手順を使うこと**。
-  詳細・根拠は [protocol.md](protocol.md)「参照モード」節を参照。
+  詳細・根拠は [protocol/reference-mode.md](protocol/reference-mode.md) を参照。
 - **設計フェーズのクロスレビューは claude reviewer では現状非対応**: 設計フェーズはコードが無く
   diff を持たないため常に inline になり、上記の理由で送信自体が成立しない。設計段階のレビューが
   必要な場合は、人間レビューに切り替えるか、既定構成（primary=Claude・reviewer=Codex）を使うこと。

@@ -12,6 +12,7 @@ reviewer=Codex（レビュー専用・read-only）。往復は cmux のペイン
 
 ```bash
 bash tests/run.sh                         # ユニットテスト（cmux 不要・変更後は必ず実行）
+tools/render-spec.sh                      # docs/spec/ の HTML を正典 md から再生成
 bash -n scripts/*.sh hooks/*.sh           # 構文チェック
 scripts/transport.sh ping                 # cmux 接続確認（cmux ペイン内で実行）
 scripts/transport.sh resolve              # reviewer ペインの宛先解決確認
@@ -34,7 +35,8 @@ scripts/transport.sh review "<payload>"   # 1 往復の手動テスト（実機�
 ## 絶対に守るルール
 
 1. **中間ファイルをリポジトリに生成しない** — エージェント間のやり取りはファイルを介さない。
-   唯一の例外は ADR（`docs/adr/`、意図して残す成果物）。
+   意図して残す成果物だけが例外: ADR（`docs/adr/`）と、docs/spec/ の生成 HTML
+   （`tools/render-spec.sh` が正典 md から生成。最新性は `tools/verify.sh` が検査）。
 2. **cmux 依存を `scripts/transport.sh` の外へ漏らさない** — スキル・他スクリプトから
    cmux を直接叩かない。通信層の差し替え可能性を壊さないため。
 3. **`@xrev`（設定の `keyword`）や明示指示が無いのに発火しない** — 暴発防止。

@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xrev 技術概観 — 仕組みと cmux 依存の実現方法</title>
+<style>
+  :root {
+    --bg: #faf9f7; --fg: #24292e; --muted: #6a737d; --card: #ffffff;
+    --line: #d4d0c8; --accent: #3b5bdb; --accent-soft: #e7ecfb;
+    --ok: #2f7d32; --ok-soft: #e5f2e6; --warn: #b26a00; --warn-soft: #f8edda;
+    --err: #c02f2f; --err-soft: #f9e5e5; --ref: #7048a8; --ref-soft: #efe7f8;
+    --box: #f2f0ec; --code: #eceae5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #d8dde3; --muted: #8b949e; --card: #1c2026;
+      --line: #3a4048; --accent: #7c96f0; --accent-soft: #232c45;
+      --ok: #6dbb71; --ok-soft: #1d2f1e; --warn: #d9a04f; --warn-soft: #33281a;
+      --err: #e07575; --err-soft: #382020; --ref: #b394e8; --ref-soft: #2a2138;
+      --box: #232830; --code: #262b33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif;
+    line-height: 1.75; font-size: 16px;
+  }
+  main { max-width: 980px; margin: 0 auto; padding: 0 20px 80px; }
+  header.hero { border-bottom: 1px solid var(--line); padding: 48px 0 28px; margin-bottom: 36px; }
+  h1 { font-size: 1.7rem; margin: 0 0 10px; }
+  .sub { color: var(--muted); margin: 0; }
+  nav.toc { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 8px; }
+  nav.toc a {
+    display: inline-block; padding: 4px 12px; border: 1px solid var(--line);
+    border-radius: 999px; text-decoration: none; color: var(--fg); font-size: 0.85rem;
+    background: var(--card);
+  }
+  nav.toc a:hover { border-color: var(--accent); color: var(--accent); }
+  h2 { font-size: 1.3rem; margin: 56px 0 8px; padding-top: 8px; }
+  h2 .no { color: var(--accent); margin-right: 8px; font-variant-numeric: tabular-nums; }
+  h3 { font-size: 1.05rem; margin: 28px 0 8px; }
+  p { margin: 10px 0; }
+  a { color: var(--accent); }
+  code {
+    background: var(--code); padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em;
+  }
+  .fig {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px; margin: 18px 0; overflow-x: auto;
+  }
+  .fig svg { display: block; min-width: 860px; width: 100%; height: auto; }
+  .fig figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 8px; min-width: 0; }
+  figure { margin: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 0.9rem; }
+  .tablewrap { overflow-x: auto; }
+  th, td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--box); white-space: nowrap; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin: 18px 0; padding: 0; list-style: none; }
+  .cards li { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .cards a { font-weight: 600; text-decoration: none; }
+  .cards a:hover { text-decoration: underline; }
+  .cards p { color: var(--muted); font-size: 0.85rem; margin: 6px 0 0; }
+  .note {
+    background: var(--accent-soft); border-radius: 8px; padding: 10px 14px;
+    font-size: 0.9rem; margin: 14px 0;
+  }
+  ul.tight { margin: 8px 0; padding-left: 22px; }
+  ul.tight li { margin: 4px 0; }
+  footer { color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--line); margin-top: 64px; padding-top: 16px; }
+
+  /* SVG 共通（CSS 変数でライト/ダーク両対応） */
+  svg text { font-family: "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif; fill: var(--fg); }
+  svg .small { font-size: 11px; fill: var(--muted); }
+  svg .label { font-size: 13px; }
+  svg .strong { font-size: 13px; font-weight: 600; }
+  svg .boxtitle { font-size: 14px; font-weight: 700; }
+  svg .mono { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  svg .frame { fill: none; stroke: var(--line); stroke-width: 1.5; rx: 10; }
+  svg .box { fill: var(--box); stroke: var(--line); stroke-width: 1; rx: 8; }
+  svg .box-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; rx: 8; }
+  svg .box-ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.2; rx: 8; }
+  svg .box-warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; rx: 8; }
+  svg .box-err { fill: var(--err-soft); stroke: var(--err); stroke-width: 1.2; rx: 8; }
+  svg .box-ref { fill: var(--ref-soft); stroke: var(--ref); stroke-width: 1.2; rx: 8; }
+  svg .arrow { stroke: var(--fg); stroke-width: 1.4; fill: none; marker-end: url(#ah); }
+  svg .arrow-dash { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 4; fill: none; marker-end: url(#ah); }
+  svg .life { stroke: var(--line); stroke-width: 1; stroke-dasharray: 3 4; }
+</style>
+</head>
+<body>
+<main>
+
+<header class="hero">
+  <h1>xrev 技術概観</h1>
+  <p class="sub">AI エージェント同士のクロスレビュー往復を、cmux のペイン間通信の上で人間の操作なしに回す仕組み。
+  対象読者は xrev の内部構造を把握したい開発者。本ページは図で全体を掴むための概観で、
+  続きは<a href="spec/index.html">詳細仕様（人間向け HTML）</a>へ。事実の正典はエージェント向けの
+  Markdown（references/ 配下）にあり、HTML はそこから自動生成される。</p>
+  <nav class="toc" aria-label="ページ内目次">
+    <a href="#what">1. xrev とは</a>
+    <a href="#flow">2. 依頼が流れる道</a>
+    <a href="#cmux">3. cmux 上での実現</a>
+    <a href="#safety">4. 暴走させない仕組み</a>
+    <a href="#links">5. 詳細仕様リンク集</a>
+  </nav>
+</header>
+
+<section id="what">
+  <h2><span class="no">1</span>xrev とは — 全体構成</h2>
+  <p><strong>xrev</strong> は、<strong>primary</strong>（設計・実装・修正反映を担うエージェント）が書いたプランやコードを、
+  別ペインに常駐する <strong>reviewer</strong>（レビュー専用・read-only）へ自動送付し、
+  <code>critical</code>/<code>high</code> の指摘が 0 件になるまで往復させる Claude Code プラグイン。
+  役割は設定で決まり、既定は primary=Claude / reviewer=Codex（主従反転プリセットで逆転可能）。
+  エージェント間のやり取りに中間ファイルは使わず、cmux の制御ソケット経由でペイン間通信する。</p>
+
+  <figure class="fig">
+    <svg viewBox="0 0 920 560" role="img" aria-labelledby="fig1-title">
+      <title id="fig1-title">全体コンポーネント図: cmux ワークスペース内の primary ペインと reviewer ペインが、制御ソケットを介して send / read-screen で通信する。cmux 依存は transport.sh に閉じ込められている。</title>
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+        </marker>
+      </defs>
+      <rect x="10" y="36" width="900" height="424" class="frame"/>
+      <text x="28" y="26" class="boxtitle">cmux ワークスペース（macOS）</text>
+
+      <!-- primary ペイン -->
+      <rect x="34" y="62" width="392" height="374" class="box"/>
+      <text x="50" y="88" class="boxtitle">primary ペイン</text>
+      <text x="50" y="106" class="small">※ primary はこのペイン内で起動必須（ソケット認証情報の注入先）</text>
+
+      <rect x="54" y="122" width="352" height="64" class="box-accent"/>
+      <text x="70" y="147" class="strong">primary エージェント（LLM）</text>
+      <text x="70" y="166" class="small">設計・実装・レビュー指摘の反映・ループの駆動</text>
+
+      <rect x="54" y="200" width="352" height="46" class="box"/>
+      <text x="70" y="219" class="label">xrev スキル / @xrev 検知フック</text>
+      <text x="70" y="236" class="small">発火条件・一拍確認・往復手順のプレイブック</text>
+
+      <rect x="54" y="260" width="352" height="46" class="box"/>
+      <text x="70" y="279" class="mono">scripts/review-loop.sh</text>
+      <text x="70" y="296" class="small">1 ラウンド実行 + 終端の機械判定（decision を返す）</text>
+
+      <rect x="54" y="320" width="352" height="46" class="box"/>
+      <text x="70" y="339" class="mono">scripts/transport.sh</text>
+      <text x="70" y="356" class="small">通信層抽象。cmux 依存はこのファイルだけに局所化</text>
+
+      <rect x="54" y="380" width="352" height="42" class="box"/>
+      <text x="70" y="397" class="mono">config/xrev.default.json ・ review-schema.json</text>
+      <text x="70" y="414" class="small">主従・安全弁の設定と、reviewer 出力の JSON Schema 契約</text>
+
+      <!-- ソケット -->
+      <rect x="452" y="120" width="86" height="302" class="box-warn"/>
+      <text x="495" y="185" class="strong" transform="rotate(-90 495 185)" text-anchor="middle">cmux 制御ソケット</text>
+
+      <rect x="435" y="256" width="120" height="20" rx="4" fill="var(--card)" stroke="var(--line)"/>
+      <text x="495" y="270" class="small" text-anchor="middle">send / send-key</text>
+      <path class="arrow" d="M 406 288 H 452"/>
+      <path class="arrow" d="M 538 288 H 584"/>
+      <text x="495" y="308" class="small" text-anchor="middle">1物理行 wire</text>
+
+      <rect x="435" y="330" width="120" height="20" rx="4" fill="var(--card)" stroke="var(--line)"/>
+      <text x="495" y="344" class="small" text-anchor="middle">read-screen</text>
+      <path class="arrow-dash" d="M 584 362 H 538"/>
+      <path class="arrow-dash" d="M 452 362 H 406"/>
+      <text x="495" y="382" class="small" text-anchor="middle">応答ポーリング</text>
+
+      <text x="495" y="410" class="small" text-anchor="middle">認証必須</text>
+
+      <!-- reviewer ペイン -->
+      <rect x="584" y="62" width="302" height="374" class="box"/>
+      <text x="600" y="88" class="boxtitle">reviewer ペイン</text>
+      <text x="600" y="106" class="small">実ターミナル 1 枚・履歴ゼロで常駐</text>
+
+      <rect x="602" y="122" width="266" height="88" class="box-ok"/>
+      <text x="618" y="145" class="strong">reviewer エージェント（LLM）</text>
+      <text x="618" y="163" class="small">レビュー専用・read-only 起動を機械強制</text>
+      <text x="618" y="180" class="small">codex: sandbox=read-only ＋ 承認=never</text>
+      <text x="618" y="197" class="small">claude: permission-mode plan</text>
+
+      <rect x="602" y="216" width="266" height="62" class="box"/>
+      <text x="618" y="238" class="label">固定タイトル（宛先解決の鍵）</text>
+      <text x="618" y="257" class="mono">"Review Codex" / "Review Claude"</text>
+
+      <rect x="602" y="292" width="266" height="130" class="box"/>
+      <text x="618" y="314" class="label">応答: センチネルで挟んだ JSON</text>
+      <text x="618" y="335" class="mono">===XREV-JSON-BEGIN===</text>
+      <text x="618" y="353" class="mono">{"round_id":…,"verdict":…,</text>
+      <text x="618" y="371" class="mono"> "findings":[…]}</text>
+      <text x="618" y="389" class="mono">===XREV-JSON-END===</text>
+      <text x="618" y="410" class="small">severity 付きの構造化指摘（スキーマ準拠）</text>
+
+      <!-- 凡例 -->
+      <rect x="34" y="478" width="852" height="66" class="box"/>
+      <text x="50" y="500" class="strong">役割は設定で切替（コアは主従非依存）</text>
+      <text x="50" y="519" class="small">既定: primary=Claude / reviewer=Codex　｜　主従反転プリセット: primary=Codex / reviewer=Claude</text>
+      <text x="50" y="536" class="small">config の primary / reviewer、または XREV_PRIMARY の自己申告からの auto 解決で切り替える</text>
+    </svg>
+    <figcaption>図1: 全体コンポーネント図。詳細:
+      <a href="architecture.md">architecture.md</a> /
+      <a href="spec/config.html">詳細仕様: config</a>（auto 解決）</figcaption>
+  </figure>
+</section>
+
+<section id="flow">
+  <h2><span class="no">2</span>1 回の依頼が流れる道</h2>
+  <p>依頼文に <code>@xrev</code>（設定のキーワード）が含まれるか、明示指示があると発火する
+  （どちらも無ければ完全に沈黙）。往復は<strong>設計フェーズ</strong>
+  （実装前にプランを潰す）→<strong>実装フェーズ</strong>（diff をレビュー）の 2 段で、
+  どちらも同じループを回す。収束後の完了アクションは既定が最も安全な <code>review</code> で、
+  PR を作る場合も必ずドラフト — <strong>確定の最終トリガは常に人間</strong>が引く。</p>
+
+  <figure class="fig">
+    <svg viewBox="0 0 920 660" role="img" aria-labelledby="fig2-title">
+      <title id="fig2-title">シーケンス図: 人間の依頼から一拍確認、設計フェーズと実装フェーズのレビュー往復を経て、完了アクションと人間の最終確認に至る流れ。</title>
+      <!-- lifelines -->
+      <rect x="40" y="20" width="120" height="36" class="box"/>
+      <text x="100" y="43" class="strong" text-anchor="middle">人間</text>
+      <rect x="240" y="20" width="150" height="36" class="box-accent"/>
+      <text x="315" y="43" class="strong" text-anchor="middle">primary</text>
+      <rect x="480" y="20" width="200" height="36" class="box"/>
+      <text x="580" y="43" class="strong" text-anchor="middle">review-loop / transport</text>
+      <rect x="760" y="20" width="130" height="36" class="box-ok"/>
+      <text x="825" y="43" class="strong" text-anchor="middle">reviewer</text>
+      <line x1="100" y1="56" x2="100" y2="600" class="life"/>
+      <line x1="315" y1="56" x2="315" y2="600" class="life"/>
+      <line x1="580" y1="56" x2="580" y2="600" class="life"/>
+      <line x1="825" y1="56" x2="825" y2="600" class="life"/>
+
+      <path class="arrow" d="M 100 88 H 310"/>
+      <text x="110" y="80" class="label">「@xrev で〜して」（キーワードで発火）</text>
+      <path class="arrow-dash" d="M 315 122 H 105"/>
+      <text x="110" y="114" class="label">一拍確認: 完了アクション（review/commit/pr）と ADR 有無</text>
+
+      <!-- 設計フェーズ -->
+      <rect x="230" y="148" width="672" height="180" fill="none" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="6 4" rx="10"/>
+      <text x="248" y="172" class="strong">設計フェーズ（筋の悪いプランを実装前に潰す）</text>
+      <path class="arrow" d="M 315 200 H 575"/>
+      <text x="325" y="192" class="label">プラン全文 + 背景（payload・ITER）</text>
+      <path class="arrow" d="M 580 232 H 820"/>
+      <text x="590" y="224" class="label">1物理行 wire を送信 → Enter 確定</text>
+      <path class="arrow-dash" d="M 825 264 H 585"/>
+      <text x="590" y="256" class="label">センチネル付き review JSON（round_id 相関で検出）</text>
+      <path class="arrow-dash" d="M 580 296 H 320"/>
+      <text x="330" y="288" class="label">decision JSON（converged / continue / …）+ round_state</text>
+      <text x="330" y="318" class="small">continue の間: 指摘を反映 → 差分だけを payload に ITER+1 で再送（reviewer 側が履歴を保持）</text>
+
+      <!-- 実装フェーズ -->
+      <rect x="230" y="348" width="672" height="150" fill="none" stroke="var(--ok)" stroke-width="1.2" stroke-dasharray="6 4" rx="10"/>
+      <text x="248" y="372" class="strong">実装フェーズ（converged したプランを実装して diff をレビュー）</text>
+      <path class="arrow" d="M 315 400 H 575"/>
+      <text x="325" y="392" class="label">git diff + 実装要約（参照モード時は diff 本文なし・hash 照合）</text>
+      <path class="arrow" d="M 580 424 H 820"/>
+      <path class="arrow-dash" d="M 825 448 H 585"/>
+      <path class="arrow-dash" d="M 580 472 H 320"/>
+      <text x="330" y="490" class="small">blocker（critical/high）0 件になるまで同じループ。medium 以下は収束を妨げない</text>
+
+      <path class="arrow" d="M 315 532 H 575"/>
+      <text x="325" y="524" class="label">収束 → finalize.sh（review = 何もしない / commit / draft PR）</text>
+      <path class="arrow-dash" d="M 315 572 H 105"/>
+      <text x="110" y="564" class="label">最終確認は人間（PR の Ready 化・マージは人間だけが引ける）</text>
+
+      <text x="40" y="628" class="small">※ 途中で上限に達した場合（escalate）は完了アクションへ進まず、必ず人間へエスカレーションする（図4）。</text>
+      <text x="40" y="646" class="small">※ 主従反転（reviewer=Claude）では設計フェーズのクロスレビューは現状非対応（設計フェーズは常に inline 送信で、claude reviewer は参照モード専用のため）。</text>
+    </svg>
+    <figcaption>図2: 依頼から収束までのシーケンス。手順の正典:
+      <a href="../skills/xrev/SKILL.md">skills/xrev/SKILL.md</a> /
+      決定の契約: <a href="spec/exit-codes.html">詳細仕様: exit-codes</a></figcaption>
+  </figure>
+</section>
+
+<section id="cmux">
+  <h2><span class="no">3</span>cmux の何を使い、どう実現しているか</h2>
+  <p>xrev はエージェント間通信に <strong>cmux</strong>（macOS のターミナル）の制御ソケットと CLI
+  （<code>send</code> / <code>send-key</code> / <code>read-screen</code> / <code>tree</code> / <code>top</code> /
+  <code>new-pane</code> / <code>rename-tab</code>）を使う。ただし cmux には公式ドキュメントに無い実挙動が多数あり、
+  送信 1 回は下図のパイプラインでそれらに対処している。</p>
+
+  <figure class="fig">
+    <svg viewBox="0 0 920 700" role="img" aria-labelledby="fig3-title">
+      <title id="fig3-title">送信パイプライン図: payload がフレーミング、ASCII 化、送信ゲートを経て cmux send で送られ、切り詰め検出と Enter 確定、round_id 相関の応答検出に至る 8 段。各段に cmux のどの実挙動への対処かを注記。</title>
+      <text x="40" y="34" class="boxtitle">レビュー依頼 1 回の送信パイプライン</text>
+      <text x="500" y="34" class="strong" style="fill: var(--muted)">なぜ必要か（= cmux の実挙動）</text>
+
+      <rect x="40" y="52" width="420" height="52" class="box-accent"/>
+      <text x="58" y="74" class="strong">payload（レビュー依頼・複数行テキスト）</text>
+      <text x="58" y="92" class="small">プラン全文 / git diff + 要約 / 参照モードでは指示のみ</text>
+
+      <path class="arrow" d="M 250 104 V 122"/>
+      <rect x="40" y="122" width="420" height="52" class="box"/>
+      <text x="58" y="144" class="strong">① 1物理行フレーミング</text>
+      <text x="58" y="162" class="mono">改行→&lt;XREV-NL&gt; ／ diff・code→|| L0001: 番号付き</text>
+      <text x="500" y="144" class="small">cmux send は引数中の \n を実改行へ展開し、複数行を送ると</text>
+      <text x="500" y="160" class="small">途中で確定してしまう → 「画面上 1 行・意味上複数行」に畳む</text>
+
+      <path class="arrow" d="M 250 174 V 192"/>
+      <rect x="40" y="192" width="420" height="52" class="box"/>
+      <text x="58" y="214" class="strong">② ASCII 化（wire encoding XREV-ASCII-V1）</text>
+      <text x="58" y="232" class="mono">非 ASCII → \uXXXX ・長さ付きフィールドで構成</text>
+      <text x="500" y="214" class="small">ソケット受信側の UTF-8 チャンク欠陥（未修正の cmux バグ）:</text>
+      <text x="500" y="230" class="small">多バイト文字が読み取り境界で分断されると最大 4095 バイト消える</text>
+
+      <path class="arrow" d="M 250 244 V 262"/>
+      <rect x="40" y="262" width="420" height="70" class="box-err"/>
+      <text x="58" y="284" class="strong">③ 送信ゲート（全段通過で初めて送信）</text>
+      <text x="58" y="302" class="small">UUID・同一WS 再検証 → 端末性（read-screen probe）→</text>
+      <text x="58" y="319" class="small">プロセス証明（前景 = reviewer）→ 安全ポリシー実効検証</text>
+      <text x="500" y="284" class="small">タイトル同名ペインの別WS誤配送・shell への誤送信（コマンド</text>
+      <text x="500" y="300" class="small">実行事故）・read-only を失った reviewer を、送信前に遮断</text>
+
+      <path class="arrow" d="M 250 332 V 350"/>
+      <rect x="40" y="350" width="420" height="52" class="box"/>
+      <text x="58" y="372" class="strong">④ cmux send（1 物理行を送る）</text>
+      <text x="58" y="390" class="small">失敗時: 入力欄をクリアして待機 → 再試行（既定 5 回）</text>
+      <text x="500" y="372" class="small">reviewer がビジー・入力欄に残留があると send が非ゼロで失敗</text>
+      <text x="500" y="388" class="small">する（実測）</text>
+
+      <path class="arrow" d="M 250 402 V 420"/>
+      <rect x="40" y="420" width="420" height="52" class="box"/>
+      <text x="58" y="442" class="strong">⑤ 切り詰め検出</text>
+      <text x="58" y="460" class="small">[Pasted Content N chars] の N と送信長を照合（codex）</text>
+      <text x="500" y="442" class="small">rc=0 でも本文が部分到達する（特に生成直後ペインへの初回送信</text>
+      <text x="500" y="458" class="small">で高頻度・実測）→ 不一致なら確定せず同一 ITER を再試行</text>
+
+      <path class="arrow" d="M 250 472 V 490"/>
+      <rect x="40" y="490" width="420" height="52" class="box"/>
+      <text x="58" y="512" class="strong">⑥ Enter 確定（直前に最終ゲートを再検証）</text>
+      <text x="58" y="530" class="small">前景プロセス・安全ポリシーを毎回同一ゲートで再検査</text>
+      <text x="500" y="512" class="small">検査と送出の間にプロセスが入れ替わる競合（TOCTOU）窓への対処</text>
+      <text x="500" y="528" class="small">（例: セッション復元で read-only 引数が消えた codex を検出）</text>
+
+      <path class="arrow" d="M 250 542 V 560"/>
+      <rect x="40" y="560" width="420" height="52" class="box"/>
+      <text x="58" y="582" class="strong">⑦ 応答検出（read-screen ポーリング）</text>
+      <text x="58" y="600" class="small">画面全体を de-wrap → JSON 走査 → round_id 一致のみ採用</text>
+      <text x="500" y="582" class="small">TUI は長い行を折り返しガター字下げを付ける。過去ラウンドの</text>
+      <text x="500" y="598" class="small">応答もスクロールバックに残る → 相関 ID で今回の分だけ拾う</text>
+
+      <path class="arrow" d="M 250 612 V 630"/>
+      <rect x="40" y="630" width="420" height="46" class="box-ok"/>
+      <text x="58" y="650" class="strong">decision JSON（スキーマ検証・severity 集計済み）</text>
+      <text x="58" y="668" class="small">converged / continue / escalate / … → 図4 へ</text>
+    </svg>
+    <figcaption>図3: 送信パイプライン。詳細:
+      <a href="spec/message-format.html">詳細仕様: message-format</a> /
+      <a href="spec/delivery-gates.html">詳細仕様: delivery-gates</a></figcaption>
+  </figure>
+
+  <h3>cmux の実挙動 → xrev の対処（抜粋）</h3>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>cmux の実挙動（実測）</th><th>xrev の対処</th></tr></thead>
+    <tbody>
+      <tr><td>ペインをタイトルで直接宛先指定できない</td><td><code>tree</code> の JSON を辿り、呼び出し元と<strong>同一ワークスペース内</strong>でタイトル一致する surface を動的解決（複数一致は fail closed）</td></tr>
+      <tr><td>surface 直下プロセスは常に複数件（アプリ + sleep + シェル）</td><td>件数でなく<strong>前景プロセスグループ</strong>（<code>pgid == tpgid</code>）で「キー入力の受け手」を特定</td></tr>
+      <tr><td>エージェント統合パネルは PTY 無しで <code>read-screen</code> 不可</td><td>reviewer は「実ターミナル内の CLI」に限定し、read-screen probe で送信前に判定</td></tr>
+      <tr><td>セッション復元が cmux 自前の引数で codex を再起動（read-only 引数が消える）</td><td>毎送信ゲートで実 argv による安全ポリシー再検証（不合格なら Enter を送らず中止）</td></tr>
+      <tr><td>composer の一括消去はチップ表示のときしか効かない</td><td>最終ゲートで中止したペインは自動復旧せず「汚染扱いで閉じて作り直す」運用</td></tr>
+      <tr><td>認証情報は cmux ペイン内シェルにのみ注入される</td><td>primary はペイン内起動が必須。接続不可は preflight（ping）で検知し明示停止</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">エージェントの世界と cmux の世界の対応・プロンプトが一巡りする流れを図で深掘りするなら
+  <a href="cmux.html">cmux 詳細解説（cmux.html）</a>。全 20 項目超の対応マップは
+  <a href="cmux-integration.md">cmux-integration.md</a>、実測の生データと再現手順は
+  <a href="cmux-behavior.md">cmux-behavior.md</a> を参照。</p>
+</section>
+
+<section id="safety">
+  <h2><span class="no">4</span>暴走・誤配送させない仕組み</h2>
+  <p>「終わらせる判断」は LLM に任せず、スクリプトが決定論的に握る。<code>review-loop.sh</code> は
+  1 ラウンドごとに <strong>decision</strong> を返し、primary はその値だけで分岐する（終了コードでは判断しない）。</p>
+
+  <figure class="fig">
+    <svg viewBox="0 0 920 540" role="img" aria-labelledby="fig4-title">
+      <title id="fig4-title">decision 状態機械図: レビュー 1 ラウンドの結果が converged、continue、escalate、invalid、transport_error、reference_unverified の 6 種に分岐し、round_state 安全弁が通算試行を規制する。</title>
+      <rect x="330" y="30" width="260" height="60" class="box-accent"/>
+      <text x="460" y="55" class="strong" text-anchor="middle">review-loop.sh — 1 ラウンド実行</text>
+      <text x="460" y="76" class="small" text-anchor="middle">送信 → 応答検出 → スキーマ検証 → severity 集計</text>
+
+      <path class="arrow" d="M 400 90 L 150 150"/>
+      <path class="arrow" d="M 440 90 L 400 150"/>
+      <path class="arrow" d="M 480 90 L 610 150"/>
+      <path class="arrow" d="M 520 90 L 800 150"/>
+
+      <rect x="60" y="150" width="180" height="56" class="box-ok"/>
+      <text x="150" y="173" class="strong" text-anchor="middle">converged</text>
+      <text x="150" y="192" class="small" text-anchor="middle">blocker（critical/high）0 件</text>
+      <path class="arrow" d="M 150 206 V 250"/>
+      <rect x="60" y="250" width="180" height="56" class="box"/>
+      <text x="150" y="273" class="label" text-anchor="middle">完了アクションへ</text>
+      <text x="150" y="292" class="small" text-anchor="middle">既定 review / PR は必ずドラフト</text>
+
+      <rect x="310" y="150" width="180" height="56" class="box-accent"/>
+      <text x="400" y="173" class="strong" text-anchor="middle">continue（正常系）</text>
+      <text x="400" y="192" class="small" text-anchor="middle">blocker 残・上限未満</text>
+      <path class="arrow" d="M 400 206 V 250"/>
+      <rect x="310" y="250" width="180" height="56" class="box"/>
+      <text x="400" y="273" class="label" text-anchor="middle">primary が指摘を反映</text>
+      <text x="400" y="292" class="small" text-anchor="middle">差分のみ payload に ITER+1</text>
+      <path class="arrow" d="M 310 278 H 280 V 60 H 330"/>
+
+      <rect x="520" y="150" width="180" height="56" class="box-ref"/>
+      <text x="610" y="173" class="strong" text-anchor="middle">reference_unverified</text>
+      <text x="610" y="192" class="small" text-anchor="middle">参照モードのハッシュ不一致</text>
+      <path class="arrow" d="M 610 206 V 250"/>
+      <rect x="520" y="250" width="180" height="56" class="box"/>
+      <text x="610" y="273" class="label" text-anchor="middle">同一 ITER を再試行</text>
+      <text x="610" y="292" class="small" text-anchor="middle">codex=inline へ / claude=参照のまま</text>
+
+      <rect x="710" y="150" width="180" height="56" class="box-warn"/>
+      <text x="800" y="173" class="strong" text-anchor="middle">escalate</text>
+      <text x="800" y="192" class="small" text-anchor="middle">最大反復でも blocker 残</text>
+      <path class="arrow" d="M 800 206 V 250"/>
+      <rect x="710" y="250" width="180" height="56" class="box"/>
+      <text x="800" y="273" class="label" text-anchor="middle">人間へエスカレーション</text>
+      <text x="800" y="292" class="small" text-anchor="middle">勝手に完了アクションへ進まない</text>
+
+      <rect x="130" y="350" width="300" height="70" class="box-err"/>
+      <text x="280" y="374" class="strong" text-anchor="middle">invalid（契約違反・exit 21）</text>
+      <text x="280" y="393" class="small" text-anchor="middle">壊れた JSON・スキーマ不一致</text>
+      <text x="280" y="410" class="small" text-anchor="middle">→ スキーマ準拠を促し 1 回だけ再送</text>
+
+      <rect x="490" y="350" width="300" height="70" class="box-err"/>
+      <text x="640" y="374" class="strong" text-anchor="middle">transport_error（exit 22）</text>
+      <text x="640" y="393" class="small" text-anchor="middle">truncated / send_failed は既知の実測パターン</text>
+      <text x="640" y="410" class="small" text-anchor="middle">→ round_state を引き継ぎ同一 ITER を再試行</text>
+
+      <rect x="130" y="450" width="660" height="60" class="box-warn"/>
+      <text x="460" y="474" class="strong" text-anchor="middle">round_state 安全弁（ループの総量規制・fail closed）</text>
+      <text x="460" y="495" class="small" text-anchor="middle">通算 transport 試行が上限超過・ITER の巻き戻し・参照再試行の上限超過 → レビュー結果に関わらず強制 escalate</text>
+    </svg>
+    <figcaption>図4: decision 状態機械と安全弁。詳細:
+      <a href="spec/exit-codes.html">詳細仕様: exit-codes</a> /
+      <a href="spec/review-contract.html">詳細仕様: review-contract</a></figcaption>
+  </figure>
+
+  <p>このほか全体を貫く原則は <strong>fail closed</strong>（判定できないときは送らない・進めない）:</p>
+  <ul class="tight">
+    <li>収束は verdict（reviewer の自己申告）ではなく <strong>blocker 件数 0 の機械判定</strong>。</li>
+    <li>送信完全性を検証できない組み合わせ（未知の reviewer 種別、claude への inline 送信）は<strong>送信前に拒否</strong>。</li>
+    <li>reviewer の read-only は起動引数の付与だけでなく、<strong>実 argv の意味検証</strong>を毎送信ゲートで行って強制。</li>
+    <li>@xrev（キーワード）や明示指示が無ければ<strong>完全に沈黙</strong>し、既定では commit / pr に進まない。</li>
+  </ul>
+  <p>守れる範囲と限界（何を保証しないか）は <a href="security-design.md">security-design.md</a> に正直に書いてある。</p>
+</section>
+
+<section id="links">
+  <h2><span class="no">5</span>詳細仕様リンク集</h2>
+
+  <h3>プロトコル詳細仕様（人間向け HTML）</h3>
+  <p>ドキュメントは二層構成: <strong>人間は HTML</strong>（<a href="spec/index.html">docs/spec/ — 目次はこちら</a>）、
+  <strong>エージェントは md</strong>（references/protocol/ 配下が正典。地図は <code>llms.txt</code>）。
+  HTML は正典 md から <code>tools/render-spec.sh</code> で自動生成され、内容は同一。</p>
+  <ul class="cards">
+    <li><a href="spec/message-format.html">message-format</a>
+      <p>メッセージ書式・センチネル・1物理行エンコード・XREV-ASCII-V1・切り詰め検出 — <a href="../references/protocol/message-format.md">md（正典）</a></p></li>
+    <li><a href="spec/review-contract.html">review-contract</a>
+      <p>severity と verdict・act ラベル（会話終端の思想） — <a href="../references/protocol/review-contract.md">md（正典）</a></p></li>
+    <li><a href="spec/exit-codes.html">exit-codes</a>
+      <p>decision と終了コードの対応・round_state 安全弁 — <a href="../references/protocol/exit-codes.md">md（正典）</a></p></li>
+    <li><a href="spec/config.html">config</a>
+      <p>設定キー一覧・reviewer の auto 解決（D1）・実行コンテキスト・解決順 — <a href="../references/protocol/config.md">md（正典）</a></p></li>
+    <li><a href="spec/delivery-gates.html">delivery-gates</a>
+      <p>宛先解決（同一WSスコープ）と送信ゲート・送信の堅牢化 — <a href="../references/protocol/delivery-gates.md">md（正典）</a></p></li>
+    <li><a href="spec/reviewer-lifecycle.html">reviewer-lifecycle</a>
+      <p>reviewer 自動生成（ensure-reviewer）・read-only 強制・グローバル導入 — <a href="../references/protocol/reviewer-lifecycle.md">md（正典）</a></p></li>
+    <li><a href="spec/reference-mode.html">reference-mode</a>
+      <p>参照モード — diff 本文を送らず内容ハッシュで完全性を照合 — <a href="../references/protocol/reference-mode.md">md（正典）</a></p></li>
+    <li><a href="spec/doctor.html">doctor</a>
+      <p>外部ツール契約の一括診断（バージョンアップ後の切り分け） — <a href="../references/protocol/doctor.md">md（正典）</a></p></li>
+  </ul>
+
+  <h3>解説・運用（docs/ ほか）</h3>
+  <ul class="cards">
+    <li><a href="cmux.html">cmux.html</a>
+      <p>cmux 詳細解説 — エージェント×cmux の対比とプロンプトの一生（図・HTML）</p></li>
+    <li><a href="architecture.md">architecture.md</a>
+      <p>ディレクトリ構造・設計原則・正典への案内</p></li>
+    <li><a href="cmux-integration.md">cmux-integration.md</a>
+      <p>cmux の何を使いどう実現しているか — 全対応マップ</p></li>
+    <li><a href="cmux-behavior.md">cmux-behavior.md</a>
+      <p>cmux の実挙動メモ（実測データ・再現手順・調査の注意）</p></li>
+    <li><a href="security-design.md">security-design.md</a>
+      <p>脅威モデル — 何を守り、何を守らないか</p></li>
+    <li><a href="../skills/xrev/SKILL.md">skills/xrev/SKILL.md</a>
+      <p>往復手順そのもの（primary=Claude 向けプレイブック）</p></li>
+    <li><a href="../references/codex-primary-playbook.md">codex-primary-playbook.md</a>
+      <p>主従反転（primary=Codex / reviewer=Claude）向けの手順書</p></li>
+    <li><a href="setup-codex.md">setup-codex.md</a>
+      <p>codex 主のセットアップガイド（3 層構成）</p></li>
+    <li><a href="../README.md">README.md</a>
+      <p>利用者向け概要・インストール・使い方</p></li>
+  </ul>
+
+  <p class="note">詳細仕様は HTML 版（docs/spec/）があるためローカルでもそのまま読める。
+  md へのリンク（正典・解説 md）はローカルの <code>file://</code> では生テキスト表示になるので、
+  GitHub 上か Markdown をレンダリングできる環境での閲覧を推奨する。</p>
+</section>
+
+<footer>
+  <p>xrev 技術概観 — 本ページは概観であり、記述が正典（references/protocol/ 配下）と食い違う場合は正典が正しい。
+  乖離を見つけたら本ページを更新すること。</p>
+</footer>
+
+</main>
+</body>
+</html>

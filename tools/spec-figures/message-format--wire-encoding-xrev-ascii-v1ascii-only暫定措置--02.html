@@ -1,0 +1,66 @@
+<figure class="fig">
+<svg viewBox="0 0 880 430" role="img" aria-labelledby="fig-mf2">
+<title id="fig-mf2">エンコードと復号の対応図: 送信側の 4 段（トークン退避、改行の畳み込み、ASCII 化、ヘッダ付与）と、受信側の復号手順 1 から 5 が逆順に対応する。</title>
+<defs>
+<marker id="m-mf2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+</marker>
+</defs>
+<text x="30" y="28" class="boxtitle">encode（primary 側・_build_framed_line）</text>
+<text x="490" y="28" class="boxtitle">decode（reviewer 側・_xrev_decode_line が正典）</text>
+
+<rect x="30" y="44" width="380" height="58" class="box"/>
+<text x="44" y="66" class="strong">① 制御トークンの退避と衝突回避</text>
+<text x="44" y="84" class="mono">\ → &lt;XREV-BS&gt; ／ tab → &lt;XREV-TAB&gt; ／ 本文中の</text>
+<text x="44" y="98" class="mono">トークンは XREVQ… へ可逆エスケープ</text>
+
+<rect x="30" y="116" width="380" height="58" class="box"/>
+<text x="44" y="138" class="strong">② 改行を 1 物理行へ畳む（content_type で二段構え）</text>
+<text x="44" y="156" class="mono">plain: &lt;XREV-NL&gt; ／ diff・code: || L0001: 番号付き</text>
+<text x="44" y="170" class="small">canonical %04d のみ。行番号は 1..n 連続</text>
+
+<rect x="30" y="188" width="380" height="58" class="box"/>
+<text x="44" y="210" class="strong">③ ASCII 化（XREV-ASCII-V1）と検証</text>
+<text x="44" y="228" class="mono">非 ASCII → \uXXXX（非 BMP はサロゲート対）</text>
+<text x="44" y="242" class="small">直前:「\・改行・CR・TAB 0 個」／ 直後:「全文字 0x20–0x7E」</text>
+
+<rect x="30" y="260" width="380" height="58" class="box"/>
+<text x="44" y="282" class="strong">④ ヘッダ・長さ・終端マーカーの付与</text>
+<text x="44" y="300" class="mono">round_id / ENCODING / LEN_* / END_ROUND_&lt;rid&gt;</text>
+<text x="44" y="314" class="small">失敗したら送信せず中止（cmux へは未送信）</text>
+
+<rect x="470" y="44" width="390" height="58" class="box"/>
+<text x="484" y="66" class="strong">手順 1: ヘッダ検証と長さでの切り出し</text>
+<text x="484" y="84" class="small">ENCODING 検証・フィールド不足・末尾マーカー不一致は拒否</text>
+
+<rect x="470" y="116" width="390" height="58" class="box"/>
+<text x="484" y="138" class="strong">手順 2: \uXXXX の復号（厳密）</text>
+<text x="484" y="156" class="small">正しいサロゲート対のみ統合。孤立サロゲート・桁不足・</text>
+<text x="484" y="170" class="small">\u 以外の \・印字可能 ASCII の escape はすべて拒否</text>
+
+<rect x="470" y="188" width="390" height="58" class="box"/>
+<text x="484" y="210" class="strong">手順 3: payload 領域だけに frame 解析</text>
+<text x="484" y="228" class="small">行番号 1..n の欠番・重複・順序変更なしを検証。</text>
+<text x="484" y="242" class="small">instr / out は Unicode 復号のみ</text>
+
+<rect x="470" y="260" width="390" height="58" class="box"/>
+<text x="484" y="282" class="strong">手順 4–5: トークン復元 → XREVQ 復元</text>
+<text x="484" y="300" class="mono">&lt;XREV-BS&gt;→\ ／ &lt;XREV-TAB&gt;→tab</text>
+<text x="484" y="314" class="small">XREVQ は最長一致・左→右の単一走査（出力を再走査しない）</text>
+
+<path class="arrow" d="M 220 102 V 116" marker-end="url(#m-mf2)"/>
+<path class="arrow" d="M 220 174 V 188" marker-end="url(#m-mf2)"/>
+<path class="arrow" d="M 220 246 V 260" marker-end="url(#m-mf2)"/>
+<path class="arrow" d="M 665 102 V 116" marker-end="url(#m-mf2)"/>
+<path class="arrow" d="M 665 174 V 188" marker-end="url(#m-mf2)"/>
+<path class="arrow" d="M 665 246 V 260" marker-end="url(#m-mf2)"/>
+<path class="arrow" d="M 410 289 H 440 V 73 H 470" marker-end="url(#m-mf2)"/>
+<text x="418" y="180" class="small" transform="rotate(-90 424 180)" text-anchor="middle">cmux send</text>
+
+<rect x="30" y="342" width="830 " height="72" class="box-err"/>
+<text x="44" y="366" class="strong">復号失敗時の契約（fail closed）</text>
+<text x="44" y="386" class="small">reviewer はレビューを行わず decode_error の finding を 1 件だけ返す。この finding は severity や severity_blockers の設定に</text>
+<text x="44" y="402" class="small">関わらず常に blocker として集計される（誤収束防止）。inline への再フォールバックはしない（同じ ASCII wire を通るため回避にならない）。</text>
+</svg>
+<figcaption>図: エンコード各段と復号手順の対応。エンコードの逆操作を厳密に検証しながら辿るのが復号手順 1〜5。</figcaption>
+</figure>

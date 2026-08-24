@@ -62,7 +62,8 @@ export XREV_CONFIG="${CLAUDE_PLUGIN_ROOT}/config/xrev.default.json"   # 既定�
 ### reviewer の指定と質問規則（一拍確認）
 
 reviewer は既定で auto 解決される（primary=claude なら reviewer=codex）。ユーザーの依頼文から
-reviewer の指定を読み取り、次の規則で扱う（詳細は [references/protocol.md](../../references/protocol.md)
+reviewer の指定を読み取り、次の規則で扱う（詳細は
+[references/protocol/config.md](../../references/protocol/config.md)
 「設定キー一覧」の auto 値・派生規則を参照）:
 
 - **ユーザーが依頼文で reviewer を明示した**（例:「claude をレビュアーにして」）→ それを正規の

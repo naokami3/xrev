@@ -1,0 +1,56 @@
+<figure class="fig">
+<svg viewBox="0 0 880 480" role="img" aria-labelledby="fig-ec1">
+<title id="fig-ec1">review-loop.sh の decision 決定フロー: transport の成否と blocker 件数から 6 種の decision が決まり、exit code は完了系 0、invalid 21、transport_error 22 の 3 通りに写像される。round_state 安全弁の違反はレビュー結果に関わらず escalate になる。</title>
+<defs>
+<marker id="m-ec1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+</marker>
+</defs>
+<rect x="330" y="24" width="220" height="52" class="box-accent"/>
+<text x="440" y="46" class="strong" text-anchor="middle">review-loop.sh 1 ラウンド</text>
+<text x="440" y="66" class="small" text-anchor="middle">送信 → 応答検出 → parse → 集計</text>
+
+<path class="arrow" d="M 360 76 L 120 130" marker-end="url(#m-ec1)"/>
+<path class="arrow" d="M 420 76 L 340 130" marker-end="url(#m-ec1)"/>
+<path class="arrow" d="M 460 76 L 550 130" marker-end="url(#m-ec1)"/>
+<path class="arrow" d="M 520 76 L 770 130" marker-end="url(#m-ec1)"/>
+
+<rect x="30" y="130" width="180" height="76" class="box-ok"/>
+<text x="120" y="152" class="strong" text-anchor="middle">converged（exit 0）</text>
+<text x="120" y="172" class="small" text-anchor="middle">レビュー取得成功・blocker 0 件</text>
+<text x="120" y="192" class="small" text-anchor="middle">→ 完了アクションへ</text>
+
+<rect x="250" y="130" width="180" height="76" class="box-accent"/>
+<text x="340" y="152" class="strong" text-anchor="middle">continue（exit 0）</text>
+<text x="340" y="172" class="small" text-anchor="middle">blocker 残・iter 上限未満</text>
+<text x="340" y="192" class="small" text-anchor="middle">→ primary が反映し ITER+1</text>
+
+<rect x="470" y="130" width="180" height="76" class="box-warn"/>
+<text x="560" y="152" class="strong" text-anchor="middle">escalate（exit 0）</text>
+<text x="560" y="172" class="small" text-anchor="middle">上限到達でも blocker 残、</text>
+<text x="560" y="192" class="small" text-anchor="middle">または round_state 違反 → 人間へ</text>
+
+<rect x="690" y="130" width="170" height="76" class="box-ref"/>
+<text x="775" y="152" class="strong" text-anchor="middle">reference_unverified</text>
+<text x="775" y="172" class="small" text-anchor="middle">（exit 0）参照照合の不一致</text>
+<text x="775" y="192" class="small" text-anchor="middle">→ 同一 ITER を再試行</text>
+
+<rect x="120" y="250" width="300" height="76" class="box-err"/>
+<text x="270" y="274" class="strong" text-anchor="middle">invalid（exit 21）</text>
+<text x="270" y="294" class="small" text-anchor="middle">契約違反: スキーマ不一致・壊れた JSON・</text>
+<text x="270" y="312" class="small" text-anchor="middle">transport exit 24（完成応答が不正 JSON）の写像</text>
+
+<rect x="460" y="250" width="300" height="76" class="box-err"/>
+<text x="610" y="274" class="strong" text-anchor="middle">transport_error（exit 22）</text>
+<text x="610" y="294" class="small" text-anchor="middle">送受信失敗。transport_exit_code と安定文字列</text>
+<text x="610" y="312" class="small" text-anchor="middle">transport_reason（timeout / truncated / …）を同梱</text>
+
+<rect x="30" y="356" width="830" height="104" class="box-warn"/>
+<text x="44" y="380" class="strong">round_state 安全弁（レビュー結果より優先して escalate に倒す）</text>
+<text x="44" y="402" class="small">decision JSON の round_state {iter, transport_attempts, reference_fallbacks} を、primary は次回呼び出しの XREV_ROUND_STATE へ</text>
+<text x="44" y="418" class="small">そのまま渡す契約。通算 transport_attempts が max_transport_attempts を超過、または iter の巻き戻しを検知したら、レビュー取得に</text>
+<text x="44" y="434" class="small">成功していても decision=escalate（state_violation に記録）。transport / parse 失敗（レビュー取得不可）はそれ自体の扱いを優先する。</text>
+<text x="44" y="452" class="small">exit code は「レビューを綺麗に完了できたか」だけを表す — 分岐は必ず stdout JSON の decision で行う。</text>
+</svg>
+<figcaption>図: decision と exit code の対応。正常系の continue を exit 0 にすることで「非ゼロ = 一律エラー」の誤判定を避けている。</figcaption>
+</figure>

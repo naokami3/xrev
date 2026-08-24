@@ -11,7 +11,7 @@ xrev の脅威モデルを正直に記述する。**何を守り、何を守ら�
 | 守るもの | 仕組み |
 |---------|--------|
 | 人間の最終確認 | PR は必ず `--draft`。Ready 化・マージ・確定の最終トリガは人間が引く。`finalize.sh` に非ドラフト PR を作る経路を持たせない。 |
-| リポジトリを汚さない | エージェント間のやり取りに中間ファイルを使わない。ファイル生成は ADR（`docs/adr/`）のみ。 |
+| リポジトリを汚さない | エージェント間のやり取りに中間ファイルを使わない。往復が生成するファイルは ADR（`docs/adr/`）のみ。開発時の意図した成果物である docs/spec/ の生成 HTML（`tools/render-spec.sh`）はこの制約の対象外。 |
 | 暴発防止 | `@xrev`（設定の `keyword`）や明示指示が無いときは完全に沈黙（フックは無出力）。既定の完了アクションは最も安全な `review`。 |
 | 無限ループ防止 | 終端は機械が握る。blocker（`critical`/`high`）0 件で収束、`max_iterations`（既定 5）の安全弁付き。 |
 | payload のコマンド実行**リスクの低減** | プロセス証明（`exit 17`）。reviewer ペインの tty で**前景プロセスグループ**を握るプロセスが `reviewer_process`（既定 `codex`）であることを確認し、**前景が一致しないときは Enter を送らない**。Codex 終了後に shell へ戻った端末へレビュー依頼文を送ってシェルコマンドとして実行される事故を減らす。ただし完全な防止ではない（下記「リスクと限界」参照）。 |
@@ -94,12 +94,13 @@ xrev の脅威モデルを正直に記述する。**何を守り、何を守ら�
   （**誤収束による見逃し**）。composer 上の wire 文字列を空白非依存で全文一致照合する方式を
   検討・実装したことがあったが、「空白の削除と挿入が相殺すれば比較・frame 検証のどちらもすり抜ける」
   という2巡目クロスレビューの指摘を受け、完全性の証明にはならない可用性ヒューリスティックにすぎない
-  と判断し撤去した（経緯は [`../references/protocol.md`](../references/protocol.md)
-  「切り詰め検出」節）。**したがって claude・inline は wire 長に関わらず無条件で `exit 28`
+  と判断し撤去した（経緯は
+  [`../references/protocol/message-format.md`](../references/protocol/message-format.md)
+  「切り詰め検出」）。**したがって claude・inline は wire 長に関わらず無条件で `exit 28`
   （送信前拒否）とし、claude reviewer は参照モード（`XREV_REFERENCE_MODE=1`）専用にした。**
   参照モードでは切り詰め検出自体を行わないが、これは安全性を緩めているのではなく、**別の仕組みで
   完全性を保証する経路に切り替えている**: レビュー対象の完全性は diff_hash + 基底 HEAD の端到端
-  照合（[`../references/protocol.md`](../references/protocol.md) 「参照モード」節）が機械保証する。
+  照合（[`../references/protocol/reference-mode.md`](../references/protocol/reference-mode.md)）が機械保証する。
   wire 切り詰めで補助文（実装要約等）が欠けても、reviewer が実際にハッシュした range と返却
   hash/head が一致した応答しか採用されないため、見ていない対象への approve は成立しない。
   指示部が壊れた場合も decode_error / hash 不一致 / timeout のいずれかの失敗系に落ちる
@@ -107,6 +108,6 @@ xrev の脅威モデルを正直に記述する。**何を守り、何を守ら�
 - **参照モードの残余リスク（既存前提の再掲）**: `reference_context` は「primary と reviewer が
   同一 diff を取得した」ことの**同一性検証**であり、reviewer がその diff を実際にレビューした
   こと・品質を保証するものではない（信頼済み reviewer 前提。詳細は
-  [`../references/protocol.md`](../references/protocol.md) 「参照モード」節）。claude reviewer が
+  [`../references/protocol/reference-mode.md`](../references/protocol/reference-mode.md)）。claude reviewer が
   参照モード必須になったことで、この既存の前提（同一性検証≠品質保証）に依存する場面が実装フェーズ
   では常態化する点に注意する。

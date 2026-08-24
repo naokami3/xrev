@@ -1,9 +1,9 @@
 # アーキテクチャ
 
-xrev のディレクトリ構造・設計原則・transport プロトコルの要約をまとめる。
+xrev のディレクトリ構造・設計原則と、transport プロトコル詳細への案内をまとめる。
 メッセージ書式・センチネル・act ラベル・終了コード・設定キーの**詳細仕様の正典**は
-[`../references/protocol.md`](../references/protocol.md) にあるので、ここでは重複させずに要約と
-リンクに留める。
+[`../references/protocol.md`](../references/protocol.md)（索引）配下の分割ファイルにあるので、
+ここでは重複させずに案内とリンクに留める。図で概観するなら [overview.html](overview.html) を参照。
 
 ## ディレクトリ構造
 
@@ -32,12 +32,21 @@ xrev/
 │   ├── xrev.default.json      # 既定設定（primary=claude/reviewer=codex。設定キー一覧は protocol.md）
 │   └── xrev.codex-primary.json # 主従反転プリセット（primary=codex/reviewer=claude）
 ├── references/
-│   ├── protocol.md                    # 送信プロトコル・act ラベル・終了コード・設定キーの正典
+│   ├── protocol.md                    # プロトコル正典の索引（旧見出しを互換アンカーとして保持）
+│   ├── protocol/                      # 正典の実体（message-format / review-contract / exit-codes /
+│   │                                  #   config / delivery-gates / reviewer-lifecycle / reference-mode / doctor）
 │   ├── codex-primary-playbook.md      # 主従反転プリセット向けの codex 主プレイブック
 │   └── review-schema.json             # reviewer 出力契約（JSON Schema）
-├── tools/                     # 開発用(テスト強制): verify.sh / claude-posttooluse.sh / claude-stop.sh / install-hooks.sh
+├── tools/                     # 開発用: verify.sh（テスト強制ゲート）/ render-spec.sh（詳細仕様 HTML 生成）/
+│                              #   claude-posttooluse.sh / claude-stop.sh / install-hooks.sh
 ├── tests/                     # ユニットテスト(cmux 不要・bash+python3): run.sh / lib.sh / test_*.sh
-├── docs/                      # architecture.md / roadmap.md / security-design.md / setup-codex.md / adr/（ADR-NNN）
+├── docs/                      # 人間向けドキュメント: overview.html（図付き概観）/ cmux.html（cmux 詳細解説）/
+│                              #   spec/（詳細仕様 HTML。references/protocol/ から render-spec.sh で自動生成。
+│                              #   図は tools/spec-figures/ のフラグメントを注入）/
+│                              #   architecture.md / cmux-integration.md（cmux 依存の対応マップ）/
+│                              #   cmux-behavior.md（実測）/ roadmap.md / security-design.md /
+│                              #   setup-codex.md / adr/（ADR-NNN）
+├── llms.txt                   # エージェント向けの主要ドキュメント地図（人間=HTML / エージェント=md）
 ├── .githooks/pre-commit       # コミット前にテストを強制（core.hooksPath）
 └── .github/workflows/ci.yml   # CI（push / PR で tools/verify.sh を実行）
 ```
@@ -46,8 +55,9 @@ xrev/
 
 1. **cmux 依存は `scripts/transport.sh` だけに閉じ込める** — 他スクリプト・スキル・フックから
    cmux を直接叩かない。`transport` 設定で将来別方式へ差し替え可能にする。
-2. **中間ファイルを生成しない** — エージェント間のやり取りはファイルを介さない。唯一の例外は ADR
-   （`docs/adr/`、意図して残す成果物）。
+2. **中間ファイルを生成しない** — エージェント間のやり取りはファイルを介さない。意図して残す
+   成果物だけが例外: ADR（`docs/adr/`）と、docs/spec/ の生成 HTML（`tools/render-spec.sh` が
+   正典 md から生成する人間向けレンダリング。最新性は `tools/verify.sh` が検査する）。
 3. **コアは主従非依存** — 特定エージェント名をコアやリポジトリ名に固定しない。主従は
    `config` の `primary`/`reviewer` プリセットで表現する。**Codex 主・Claude レビュー構成は対応済み**
    （`config/xrev.codex-primary.json`。[references/codex-primary-playbook.md](../references/codex-primary-playbook.md)
@@ -64,60 +74,24 @@ xrev/
 5. **暴発させない** — `@xrev`（設定の `keyword`）や明示指示が無いときは完全に沈黙する。
 6. **人間の最終確認を物理的に保証** — PR は必ずドラフト。既定の完了アクションは最も安全な `review`。
 
-## transport プロトコル要約
+## transport プロトコルの読み方（分割後の案内）
 
-詳細仕様は [`../references/protocol.md`](../references/protocol.md) と [ADR-001](adr/ADR-001.md) を
-正典とする。要点のみ:
+詳細仕様の正典は [`../references/protocol.md`](../references/protocol.md)（索引）配下の分割ファイルと
+[ADR-001](adr/ADR-001.md)。図で全体を概観するなら [overview.html](overview.html)、cmux の実挙動と
+対処の対応から入るなら [cmux-integration.md](cmux-integration.md) を先に読むとよい。
+**人間が正典を読む場合は HTML 版**（[spec/index.html](spec/index.html)。正典 md から
+`tools/render-spec.sh` で自動生成・内容同一）が読みやすい。
 
-- **送信は1物理行エンコード**（ADR-001）。完全自動 submit のため、複数行 payload を「画面上は1物理行・
-  意味上は複数行」に変換して送る（`content_type` で plain=`<XREV-NL>` / diff・code=番号付き line framing）。
-  cmux が `\n`/`\t` を実改行/実タブへ展開する事実への対処。本文の制御トークンは可逆エスケープする。
-- **応答検出は round_id 相関**: reviewer の JSON にトップレベル `round_id` を返させ、全画面を de-wrap
-  （TUI 折り返し除去）→ JSON を raw_decode 走査 → round_id 一致の妥当ブロックだけを採用する。
-  マーカー折り返し・前ラウンド残存・未完成 JSON に強い。
-- 宛先は **呼び出し元と同一ワークスペースにスコープ**して解決する（`cmux tree --all --json --id-format both`
-  を `CMUX_SURFACE_ID` で辿り、同一WS内でタイトル一致する surface を選ぶ）。複数WSに同名 `Review Codex` が
-  あっても別WSへ誤配送しない。`active`/`focused` は使わない。役割識別はタイトル一致 or 明示指定のみ。
-- read-screen/send/send-key は **`--workspace <ws_uuid> --surface <surface_uuid>` で指定**する（短縮 ref だと
-  別WS文脈で `Surface is not a terminal` になる実機知見）。`tty` フィールドは読み取り可否の指標ではなく、
-  唯一の受入条件は read-screen probe の成否。
-- 送信前ゲートで誤配送・shell 誤実行を防ぐ: ①送信直前の UUID 同一性・WS 所属の再検証 → ②端末性プリフライト
-  （read-screen 可否、`exit 14`）→ ③**プロセス証明**（`cmux top --processes` で対象 surface の直下プロセスが
-  `codex` か、`exit 17`）。詳細・終了コード(14-17)は [`../references/protocol.md`](../references/protocol.md)。
-- **送信完全性検証は reviewer 種別で手段が異なる（fail closed）**: `codex` はペーストチップの文字数照合、
-  `claude` は参照モード専用（inline は wire 長に関わらず無条件で送信前拒否）、それ以外の未知種別は
-  検証手段が確立していないため送信前に拒否する。いずれも不一致・確立不能なら `exit 28`
-  （`integrity_unverifiable`）で cmux へ一切送信しない。**claude reviewer は参照モード（下記）が
-  必須**（参照モードはこの検査自体をスキップする。根拠は diff_hash + 基底 HEAD の端到端照合が
-  完全性を別途保証するため。inline 向けの全文一致照合による受理経路はクロスレビュー2巡目で
-  完全性証明にならないと指摘され撤去した）。詳細は
-  [`../references/protocol.md`](../references/protocol.md) の「切り詰め検出」節を参照。
-- **ループ安全弁(round_state)**: review-loop が `round_state{iter,transport_attempts,reference_fallbacks}` を出し、
-  primary が次回へ渡す。通算 transport 上限超・iter 巻戻し・状態不正は送信前に `escalate`(fail closed)。
-- **reviewer 自動生成(Phase1c)**: `transport.sh ensure-reviewer` が「同一WSに使える reviewer があれば採用・無ければ
-  1枚だけ生成」する(冪等)。生成は caller の WS を明示した `new-pane --type terminal` ＋ 所有 surface UUID 固定 ＋
-  `exec codex` ＋ read-screen probe 起動確認。競合は ${TMPDIR} の mkdir ロックで直列化(回収しない=stale レース排除、
-  競合期限切れは exit20)。既定 `reviewer_autocreate=ask`。インストール利用者がスクリプトのパスを知らずとも reviewer が
-  用意される。
-- **参照モード(Phase2)**: `reviewer_reads_workspace` かつ同一WS解決時のみ、diff 本文の代わりにファイル参照を送り、
-  reviewer 取得 diff の**内容ハッシュ一致**を採用前に検証する（不一致は `reference_unverified`。再試行の手段は
-  reviewer 種別依存: codex=同一 ITER を inline で再試行 / claude=同一 ITER・参照モードのまま再試行。状態機械
-  自体は種別非依存で、分岐は primary 側の責務）。別WS/別worktreeの誤レビューはハッシュ不一致で自動的に弾く。
-  **claude reviewer では実装フェーズはこのモードが必須**（上記「送信完全性検証」参照。claude は参照モード専用
-  のため inline は常に拒否される）で、`config/xrev.codex-primary.json` は `reviewer_reads_workspace=true` を
-  既定にしている。設計フェーズは常に inline のため claude reviewer では現状非対応（人間レビューか既定構成を
-  使う）。詳細は [`../references/protocol.md`](../references/protocol.md)。
-- 接続不可は preflight（ping）で検知し `transport.sh` が `exit 31` を返して明示停止する。
-- **診断(doctor)**: `transport.sh doctor` が cmux/Codex/フックへの契約仮定（tree/top の形状、ps の
-  出力形式、フックの入出力契約 等）を一括検査し、`[ok]/[warn]/[fail]` の1行診断＋サマリを人間可読で
-  返す。検査はすべて非変更・再実行可能。バージョンアップ後の切り分けに使う。詳細は
-  [`../references/protocol.md`](../references/protocol.md)。
-- `review-loop.sh` の分岐は stdout の JSON の `decision` で行う。exit code は「レビュー完了か」だけ:
-  完了系（`converged`/`continue`/`escalate`）=0 / `invalid`=21 / `transport_error`=22
-  （`continue` 等の正常系を非ゼロにしないことで、Bash 呼び出し等での誤エラー判定を避ける）。
-
-severity（blocker の定義）・act ラベル・各スクリプトの内部終了コード・設定キー一覧は
-[`../references/protocol.md`](../references/protocol.md) を参照。
+| 知りたいこと | 正典 |
+|--------------|------|
+| 送信の仕組み（1物理行エンコード・ASCII wire `XREV-ASCII-V1`・round_id 相関の応答検出・切り詰め検出） | [protocol/message-format.md](../references/protocol/message-format.md) |
+| レビュー出力の契約（severity / verdict / act ラベル。収束は blocker 0 件の機械判定） | [protocol/review-contract.md](../references/protocol/review-contract.md) |
+| decision 分岐・終了コード・ループ安全弁 round_state（分岐は stdout JSON の `decision` で行う） | [protocol/exit-codes.md](../references/protocol/exit-codes.md) |
+| 設定キー一覧・reviewer の auto 解決（D1）・実行コンテキスト・stop_at / ADR の解決順 | [protocol/config.md](../references/protocol/config.md) |
+| 宛先解決（同一WSスコープ）と送信ゲート（UUID 再検証・端末性・プロセス証明・安全ポリシー実効検証） | [protocol/delivery-gates.md](../references/protocol/delivery-gates.md) |
+| reviewer ペインの自動生成（Phase1c）・read-only 強制・グローバル一度きり導入（D3） | [protocol/reviewer-lifecycle.md](../references/protocol/reviewer-lifecycle.md) |
+| 参照モード（Phase2: diff 本文を送らないコンテキスト削減） | [protocol/reference-mode.md](../references/protocol/reference-mode.md) |
+| バージョンアップ後の診断（doctor） | [protocol/doctor.md](../references/protocol/doctor.md) |
 
 ## 既知の制約
 
@@ -129,7 +103,8 @@ severity（blocker の定義）・act ラベル・各スクリプトの内部終
   通信層に手を入れる前に必ず読むこと。
 - **cmux の未修正バグに依存した回避策がある**: ソケット受信側の UTF-8 チャンク欠陥のため、送信 wire を
   ASCII に閉じている（`XREV-ASCII-V1`）。上流が修正されたら削除可否を判断する。詳細は
-  [cmux-behavior.md](cmux-behavior.md) の 4 と [`../references/protocol.md`](../references/protocol.md)。
+  [cmux-behavior.md](cmux-behavior.md) の 4 と
+  [`../references/protocol/message-format.md`](../references/protocol/message-format.md)。
 - **reviewer ペイン運用**: 固定タイトル `Review Codex` で 1 枚、履歴ゼロから開く。作業切替時は
   Codex を再起動し、cmux のセッション復元が前作業を復元しないよう注意する。
 - **reviewer は「実ターミナル内の codex CLI」であること**: cmux のエージェント統合パネル

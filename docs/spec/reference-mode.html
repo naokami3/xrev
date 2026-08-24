@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xrev 詳細仕様 — 参照モード（Phase2）</title>
+<style>
+  :root {
+    --bg: #faf9f7; --fg: #24292e; --muted: #6a737d; --card: #ffffff;
+    --line: #d4d0c8; --accent: #3b5bdb; --accent-soft: #e7ecfb;
+    --ok: #2f7d32; --ok-soft: #e5f2e6; --warn: #b26a00; --warn-soft: #f8edda;
+    --err: #c02f2f; --err-soft: #f9e5e5; --ref: #7048a8; --ref-soft: #efe7f8;
+    --box: #f2f0ec; --code: #eceae5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #d8dde3; --muted: #8b949e; --card: #1c2026;
+      --line: #3a4048; --accent: #7c96f0; --accent-soft: #232c45;
+      --ok: #6dbb71; --ok-soft: #1d2f1e; --warn: #d9a04f; --warn-soft: #33281a;
+      --err: #e07575; --err-soft: #382020; --ref: #b394e8; --ref-soft: #2a2138;
+      --box: #232830; --code: #262b33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif;
+    line-height: 1.8; font-size: 16px; }
+  main { max-width: 900px; margin: 0 auto; padding: 0 20px 80px; }
+  header.top { border-bottom: 1px solid var(--line); padding: 22px 0 14px; margin-bottom: 8px;
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+  header.top .crumbs { font-size: 0.9rem; }
+  header.top .crumbs a { color: var(--accent); text-decoration: none; }
+  header.top .src { font-size: 0.8rem; color: var(--muted); }
+  header.top .src a { color: var(--accent); }
+  .gen-note { background: var(--accent-soft); border-radius: 8px; padding: 8px 14px;
+    font-size: 0.82rem; margin: 14px 0; color: var(--fg); }
+  h1 { font-size: 1.55rem; line-height: 1.4; margin: 20px 0 12px; }
+  h2 { font-size: 1.25rem; margin: 44px 0 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 32px 0 8px; }
+  p { margin: 10px 0; }
+  a { color: var(--accent); }
+  code { background: var(--code); padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em;
+    overflow-wrap: anywhere; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; line-height: 1.55; }
+  pre code { background: none; padding: 0; font-size: 0.82rem; }
+  .tablewrap { overflow-x: auto; margin: 14px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  th, td { border: 1px solid var(--line); padding: 7px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--box); white-space: nowrap; }
+  td:first-child code { overflow-wrap: normal; }
+  blockquote { margin: 14px 0; padding: 4px 16px; border-left: 3px solid var(--accent);
+    background: var(--box); border-radius: 0 8px 8px 0; color: var(--muted); }
+  ul, ol { margin: 10px 0; padding-left: 26px; }
+  li { margin: 5px 0; }
+  li p { margin: 8px 0; }
+  nav.pager { display: flex; justify-content: space-between; gap: 12px; margin-top: 48px;
+    border-top: 1px solid var(--line); padding-top: 14px; font-size: 0.9rem; }
+  nav.pager a { color: var(--accent); text-decoration: none; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px; margin: 18px 0; padding: 0; list-style: none; }
+  .cards li { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; margin: 0; }
+  .cards a { font-weight: 600; text-decoration: none; }
+  .cards p { color: var(--muted); font-size: 0.85rem; margin: 6px 0 0; }
+  img { max-width: 100%; vertical-align: middle; }
+
+  /* 図（tools/spec-figures/ からの注入フラグメント用） */
+  .fig { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px; margin: 18px 0; overflow-x: auto; }
+  .fig svg { display: block; min-width: 820px; width: 100%; height: auto; }
+  .fig figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 8px; }
+  figure { margin: 0; }
+  svg text { font-family: "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif; fill: var(--fg); }
+  svg .small { font-size: 11px; fill: var(--muted); }
+  svg .label { font-size: 13px; }
+  svg .strong { font-size: 13px; font-weight: 600; }
+  svg .boxtitle { font-size: 14px; font-weight: 700; }
+  svg .mono { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  svg .mono-strong { font-family: ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700; }
+  svg .frame { fill: none; stroke: var(--line); stroke-width: 1.5; rx: 10; }
+  svg .box { fill: var(--box); stroke: var(--line); stroke-width: 1; rx: 8; }
+  svg .box-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; rx: 8; }
+  svg .box-ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.2; rx: 8; }
+  svg .box-warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; rx: 8; }
+  svg .box-err { fill: var(--err-soft); stroke: var(--err); stroke-width: 1.2; rx: 8; }
+  svg .box-ref { fill: var(--ref-soft); stroke: var(--ref); stroke-width: 1.2; rx: 8; }
+  svg .arrow { stroke: var(--fg); stroke-width: 1.4; fill: none; }
+  svg .arrow-dash { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 4; fill: none; }
+</style>
+</head>
+<body>
+<main>
+<header class="top"><span class="crumbs"><a href="../overview.html">技術概観</a> / <a href="index.html">詳細仕様</a> / reference-mode</span><span class="src"><a href="../../references/protocol/reference-mode.md">正典（md）を見る</a></span></header><p class="gen-note">本ページは <code>references/protocol/reference-mode.md</code>（正典・エージェント向け）から <code>tools/render-spec.sh</code> で自動生成されている。内容の修正は md 側で行い、再生成すること。</p><h1 id="参照モードphase2">参照モード（Phase2）</h1><figure class="fig">
+<svg viewBox="0 0 880 470" role="img" aria-labelledby="fig-rm1">
+<title id="fig-rm1">参照モードのシーケンス: primary が diff-hash と HEAD の期待値を添えて diff 本文なしの参照 payload を送り、reviewer が自分の作業ツリーで同じ diff-hash を実行して返し、全一致した応答だけが採用される。不一致は reference_unverified として再試行になる。</title>
+<defs>
+<marker id="m-rm1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+</marker>
+</defs>
+<rect x="40" y="20" width="180" height="36" class="box-accent"/>
+<text x="130" y="43" class="strong" text-anchor="middle">primary</text>
+<rect x="350" y="20" width="180" height="36" class="box"/>
+<text x="440" y="43" class="strong" text-anchor="middle">review-loop / transport</text>
+<rect x="660" y="20" width="180" height="36" class="box-ok"/>
+<text x="750" y="43" class="strong" text-anchor="middle">reviewer（read-only）</text>
+<path class="life" d="M 130 56 V 440"/>
+<path class="life" d="M 440 56 V 440"/>
+<path class="life" d="M 750 56 V 440"/>
+
+<text x="40" y="86" class="small">1. 期待値の確定（単一の真実源 = transport.sh diff-hash）</text>
+<rect x="40" y="94" width="330" height="40" class="box"/>
+<text x="54" y="110" class="mono">EXPECT_HASH = transport.sh diff-hash &lt;range&gt;</text>
+<text x="54" y="126" class="mono">EXPECT_HEAD = git rev-parse HEAD</text>
+
+<path class="arrow" d="M 130 150 H 435" marker-end="url(#m-rm1)"/>
+<text x="150" y="144" class="small">2. 参照 payload（diff 本文なし: 実装要約 + 変更ファイル一覧 + 実行指示）</text>
+
+<path class="arrow" d="M 440 186 H 745" marker-end="url(#m-rm1)"/>
+<text x="460" y="180" class="small">3. wire 送信（参照モードは切り詰め検出をスキップ — 完全性は 5. の照合が担う）</text>
+
+<rect x="600" y="204" width="264" height="56" class="box"/>
+<text x="614" y="224" class="small">4. reviewer が自分の作業ツリーで実行:</text>
+<text x="614" y="242" class="mono">同じ transport.sh diff-hash &lt;range&gt;</text>
+<text x="614" y="256" class="mono">git rev-parse HEAD</text>
+
+<path class="arrow-dash" d="M 745 286 H 445" marker-end="url(#m-rm1)"/>
+<text x="460" y="280" class="small">5. review JSON + reference_context {mode, status, head, diff_hash}</text>
+
+<rect x="350" y="304" width="260" height="64" class="box-err"/>
+<text x="480" y="326" class="strong" text-anchor="middle">全一致照合（採用前）</text>
+<text x="480" y="346" class="small" text-anchor="middle">mode / status / head==EXPECT_HEAD /</text>
+<text x="480" y="360" class="small" text-anchor="middle">diff_hash==EXPECT_HASH の 4 条件すべて</text>
+
+<path class="arrow" d="M 400 368 L 220 400" marker-end="url(#m-rm1)"/>
+<text x="240" y="388" class="small">一致</text>
+<rect x="80" y="400" width="220" height="40" class="box-ok"/>
+<text x="190" y="418" class="strong" text-anchor="middle">レビューを採用</text>
+<text x="190" y="434" class="small" text-anchor="middle">通常の decision 判定へ</text>
+
+<path class="arrow" d="M 560 368 L 680 400" marker-end="url(#m-rm1)"/>
+<text x="636" y="380" class="small">不一致 / 未取得</text>
+<rect x="580" y="400" width="280" height="40" class="box-ref"/>
+<text x="720" y="418" class="strong" text-anchor="middle">reference_unverified（exit 0）</text>
+<text x="720" y="434" class="small" text-anchor="middle">同一 ITER 再試行: codex=inline / claude=参照のまま</text>
+
+<text x="40" y="464" class="small">diff 一致だけでは基底相違を防げないため HEAD OID も照合する。安定窓: payload 送信〜応答受領まで primary は作業ツリーを編集しない。</text>
+</svg>
+<figcaption>図: 参照モードの往復。再試行の通算が max_reference_fallbacks を超えると escalate（無限往復防止）。</figcaption>
+</figure>
+<p><a href="../../references/protocol.md"><code>../protocol.md</code></a>（索引）から分割された正典の一部。</p><p><strong>この文書で分かること</strong>:</p><ul><li>参照モードが使える条件（reviewer_reads_workspace かつ同一 WS 解決）と目的</li><li>diff 内容ハッシュ + 基底 HEAD OID による同一性照合の仕組み（diff-hash が単一の真実源）</li><li>reference_unverified 時の回復手順（codex=inline 再試行 / claude=参照モードのまま再試行）</li><li>同一性検証が保証しないこと（レビュー品質は含まない）</li></ul><h3 id="参照モードphase2-コンテキスト削減diff-本文を送らない">参照モード（Phase2: コンテキスト削減・diff 本文を送らない）</h3><p><code>reviewer_reads_workspace=true</code> かつ<strong>同一WS解決(resolve_path=same_ws)</strong>のときのみ使える。diff 本文を
+cmux に流さず、reviewer に「自分で diff を取得してレビュー」させて送受信・reviewer 双方のコンテキストを削減する。
+別WS/別worktreeの誤レビューは <strong>diff 内容ハッシュの不一致</strong>で自動的に弾き、<code>reference_unverified</code> として
+再試行させる（再試行の手段は下記のとおり reviewer 種別依存）。設計は 7 ラウンドのクロスレビューで収束。</p><ul><li><strong>適用は実装フェーズのみ</strong>（設計フェーズはコードが無く常に inline）。</li><li><strong>claude reviewer はこの参照モードが必須（専用）</strong>: claude・inline は wire 長に関わらず常に
+<code>exit 28</code> になる（<a href="message-format.html">メッセージ書式</a>の「切り詰め検出」参照。全文一致照合による inline 受理経路はクロスレビュー
+2巡目で完全性証明にならないと指摘され撤去済み）。したがって主従反転プリセット
+（<code>config/xrev.codex-primary.json</code>）は <code>reviewer_reads_workspace=true</code> を既定にし、実装フェーズは
+必ずこの参照モードを使う。<strong>設計フェーズのクロスレビューは claude reviewer では現状非対応</strong>
+（設計フェーズはコードが無く常に inline になるため、上記の理由で送信自体が成立しない）。設計段階の
+レビューが必要な場合は人間レビューに切り替えるか、reviewer=codex の既定構成を使うこと。</li><li><strong>同一性照合 = diff 内容ハッシュ ＋ 基底 OID</strong>（パス比較=symlink/submodule に弱い、を避ける）。primary と reviewer は
+<strong>同一コード <code>scripts/transport.sh diff-hash &lt;range&gt;</code> を実行</strong>して diff_hash を得る（手書き invocation の同期ズレを
+無くす単一の真実源）。primary は参照 payload に「<code>transport.sh diff-hash &lt;range&gt;</code> の実行指示・range（解決済み OID
+推奨）・expected_diff_hash・expected_head(=<code>git rev-parse HEAD</code>)」を載せる（diff 本文は載せない）。reviewer は同じ
+<code>transport.sh diff-hash</code> を自分の作業ツリーで実行した sha256 を <code>reference_context.diff_hash</code>、自分の <code>git rev-parse HEAD</code>
+を <code>reference_context.head</code>、さらに <code>mode:"reference"</code> / <code>status:"verified"</code> を返す。</li><li><strong>diff_hash だけでなく基底 HEAD OID も照合する</strong>（同一 patch は別 HEAD・別基底でも作れるため。diff 一致＋HEAD 一致で
+「同一の基底・同一の変更を見た」を担保）。</li><li><strong><code>diff-hash</code> の内部 invocation</strong>（透明性のため。実体は <code>XREV_DIFF_HASH_DOC</code> と一字一句同一。非決定性を固定/除去）:
+<code>env -u GIT_EXTERNAL_DIFF -u GIT_PAGER -u GIT_CONFIG -u GIT_CONFIG_COUNT -u GIT_DIFF_OPTS -u GIT_DIR -u GIT_WORK_TREE
+-u GIT_INDEX_FILE GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 LC_ALL=C git --no-pager
+-c core.autocrlf=false -c core.quotepath=false -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.renames=false
+-c diff.external= -c diff.algorithm=myers diff --no-color --no-ext-diff --no-textconv --full-index --binary &lt;range&gt;</code>
+の生 stdout を sha256。system/global/XDG config と設定注入(GIT_CONFIG_KEY_/VALUE_*)を無効化する。</li><li><strong>検証と状態遷移</strong>: review-loop は <code>XREV_REFERENCE_MODE=1</code> のとき、採用前に reviewer の <code>reference_context</code> を
+<code>mode=reference</code> / <code>status=verified</code> / <code>head==XREV_EXPECT_HEAD</code> / <code>diff_hash==XREV_EXPECT_DIFF_HASH</code> の<strong>全一致</strong>で照合する。
+いずれか不一致/未取得/期待値未設定/同一WS外(transport が exit18 で拒否)なら <code>decision=reference_unverified</code>(exit0)で、
+primary は同一 ITER で再試行する。<strong>再試行の手段は reviewer 種別依存</strong>（review-loop.sh 自身は
+reviewer 種別を判別しない状態機械であり、分岐は primary 側の責務）: codex reviewer は従来どおり
+同一 ITER を inline で再試行してよいが、claude reviewer は inline が常に <code>exit 28</code> になるため
+<strong>同一 ITER・参照モードのまま再試行する</strong>（inline へは切り替えない。詳細は
+<a href="../../references/codex-primary-playbook.md"><code>../codex-primary-playbook.md</code></a> 6章）。フォールバック通算 <code>reference_fallbacks</code> が
+<code>max_reference_fallbacks</code> を超えたら <code>escalate</code>（無限往復防止）。<code>reference_fallbacks</code> は
+round_state に載り次回へ引き継ぐ（名称は「参照→inlineフォールバック」由来だが、意味は
+「参照検証失敗時の再試行回数」に一般化されている）。</li><li><strong>意味の限定</strong>: <code>reference_context</code> は「primary と reviewer が同一 diff を取得した」ことの同一性検証であり、
+reviewer がその diff を実際にレビューしたこと・品質を保証しない（信頼済み reviewer 前提）。</li><li><strong>read-only 不変・安定窓</strong>: reviewer は読むだけ。primary は参照 payload 送信〜応答受領まで作業ツリーを編集しない。</li><li>クロスホスト/別FSは参照モード非対応（inline 固定）。同一WSは必要条件、最終判定は diff ハッシュ一致。</li></ul><nav class="pager"><span><a href="reviewer-lifecycle.html">&larr; reviewer-lifecycle</a></span><span><a href="doctor.html">doctor &rarr;</a></span></nav>
+</main>
+</body>
+</html>

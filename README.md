@@ -287,7 +287,15 @@ reviewer では現状非対応**（設計フェーズは常に inline になる�
 
 ## 設計の詳細
 
-- メッセージ書式・センチネル・act ラベル・終了コード・設定キー一覧 → [`references/protocol.md`](references/protocol.md)
+ドキュメントは二層構成: **人間向けは HTML**、**エージェント向けは md**（正典。地図は
+[`llms.txt`](llms.txt)）。HTML は正典 md から `tools/render-spec.sh` で自動生成され、内容は同一。
+
+- **図付きの技術概観（まずここから）** → [`docs/overview.html`](docs/overview.html)
+- **詳細仕様（人間向け HTML・図付き）** → [`docs/spec/index.html`](docs/spec/index.html)
+- **cmux 詳細解説（エージェント×cmux の対比・プロンプトの一生）** → [`docs/cmux.html`](docs/cmux.html)
+- cmux の何を使いどう実現しているか（対応マップ） → [`docs/cmux-integration.md`](docs/cmux-integration.md)
+- メッセージ書式・センチネル・act ラベル・終了コード・設定キー一覧（エージェント向け正典）
+  → [`references/protocol.md`](references/protocol.md)（索引。実体は `references/protocol/` 配下）
 - reviewer の出力契約（JSON Schema） → [`references/review-schema.json`](references/review-schema.json)
 - 往復の手順そのもの → [`skills/xrev/SKILL.md`](skills/xrev/SKILL.md)
 

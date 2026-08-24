@@ -1,0 +1,60 @@
+<figure class="fig">
+<svg viewBox="0 0 880 540" role="img" aria-labelledby="fig-rl1">
+<title id="fig-rl1">ensure-reviewer のフローチャート: 矛盾検査の後に既存ペインを分類し、present なら採用、absent なら WS ロックを取って生成、壊れ・曖昧・別物なら作り直さず人間へ委ねる。</title>
+<defs>
+<marker id="m-rl1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+</marker>
+</defs>
+<rect x="330" y="20" width="220" height="48" class="box-accent"/>
+<text x="440" y="40" class="strong" text-anchor="middle">transport.sh ensure-reviewer</text>
+<text x="440" y="58" class="small" text-anchor="middle">冪等: あれば採用・無ければ 1 枚生成</text>
+
+<path class="arrow" d="M 440 68 V 88" marker-end="url(#m-rl1)"/>
+<rect x="330" y="88" width="220" height="48" class="box-err"/>
+<text x="440" y="108" class="strong" text-anchor="middle">矛盾検査（最優先）</text>
+<text x="440" y="126" class="small" text-anchor="middle">reviewer 設定の矛盾 → exit 29 で中止</text>
+
+<path class="arrow" d="M 440 136 V 156" marker-end="url(#m-rl1)"/>
+<rect x="330" y="156" width="220" height="48" class="box"/>
+<text x="440" y="176" class="strong" text-anchor="middle">分類（resolve + probe）</text>
+<text x="440" y="194" class="small" text-anchor="middle">_xrev_classify_reviewer</text>
+
+<path class="arrow" d="M 350 204 L 160 240" marker-end="url(#m-rl1)"/>
+<path class="arrow" d="M 440 204 V 240" marker-end="url(#m-rl1)"/>
+<path class="arrow" d="M 530 204 L 730 240" marker-end="url(#m-rl1)"/>
+
+<rect x="60" y="240" width="220" height="86" class="box-ok"/>
+<text x="170" y="262" class="strong" text-anchor="middle">present（使える既存あり）</text>
+<text x="170" y="282" class="small" text-anchor="middle">前景=reviewer + 安全ポリシー実効検証</text>
+<text x="170" y="298" class="small" text-anchor="middle">合格 → そのまま採用</text>
+<text x="170" y="316" class="small" text-anchor="middle">不合格 → policy_mismatch（exit 27）</text>
+
+<rect x="330" y="240" width="220" height="86" class="box-warn"/>
+<text x="440" y="262" class="strong" text-anchor="middle">absent（同一 WS に無い）</text>
+<text x="440" y="282" class="small" text-anchor="middle">reviewer_autocreate: ask（既定）=</text>
+<text x="440" y="298" class="small" text-anchor="middle">一拍確認で了承を得てから生成 /</text>
+<text x="440" y="316" class="small" text-anchor="middle">auto = 無確認生成 / off = 案内のみ</text>
+
+<rect x="620" y="240" width="220" height="86" class="box-err"/>
+<text x="730" y="262" class="strong" text-anchor="middle">壊れ / 曖昧 / 別物</text>
+<text x="730" y="282" class="small" text-anchor="middle">non_terminal=14 / ambiguous=16 /</text>
+<text x="730" y="298" class="small" text-anchor="middle">process_mismatch=17</text>
+<text x="730" y="316" class="small" text-anchor="middle">→ 作り直さず人間へ（二重生成しない）</text>
+
+<path class="arrow" d="M 440 326 V 350" marker-end="url(#m-rl1)"/>
+<rect x="280" y="350" width="320" height="56" class="box"/>
+<text x="440" y="372" class="strong" text-anchor="middle">WS 鍵ロック（mkdir 原子取得・回収しない）</text>
+<text x="440" y="392" class="small" text-anchor="middle">取れない側は present を deadline まで待つ → 期限切れ exit 20</text>
+
+<path class="arrow" d="M 440 406 V 430" marker-end="url(#m-rl1)"/>
+<rect x="120" y="430" width="640" height="66" class="box"/>
+<text x="440" y="452" class="strong" text-anchor="middle">生成シーケンス（すべて成功して初めて採用）</text>
+<text x="440" y="472" class="small" text-anchor="middle">new-pane --type terminal（caller WS 明示・返った surface UUID を所有物に固定）→ launch 引数の決定と意味検証</text>
+<text x="440" y="488" class="small" text-anchor="middle">→ exec reviewer → read-screen probe + 前景=reviewer 確認 → 実 argv の実効検証 → rename-tab（規約タイトル）</text>
+
+<text x="120" y="522" class="small">launch 引数の決定失敗・起動未確認・実効未確認はいずれも exit 19（autocreate_failed）。タブ名は起動の「後」に設定する</text>
+<text x="120" y="538" class="small">（codex は起動時に cwd 由来の名前でタイトルを上書きするため。rename が定着して次回の title 解決が当たる = 冪等性の要）。</text>
+</svg>
+<figcaption>図: ensure-reviewer の分岐。既存が壊れているときに「作り直す」選択肢を持たないのは、誤った二重生成を防ぐため。</figcaption>
+</figure>
