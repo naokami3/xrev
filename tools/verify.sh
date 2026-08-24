@@ -56,7 +56,17 @@ else
 fi
 rm -rf "$specdir"
 
-# 4) ユニットテスト
+# 4) 公開サイト（GitHub Pages）の組み立て可否
+#    md・HTML のリンク先が実在しないと --site は非ゼロで止まる。リンク切れのまま
+#    公開されるのを防ぐため、コミット前にここで組み立てを試す（作業ツリーには書かない）。
+sitedir="$(mktemp -d "${TMPDIR:-/tmp}/xrev-site-verify.XXXXXX")"
+if ! bash tools/render-spec.sh --site "$sitedir" >/dev/null; then
+  echo "[verify] 公開サイトの組み立てに失敗しました（上のリンク切れ等を修正してください）" >&2
+  fail=1
+fi
+rm -rf "$sitedir"
+
+# 5) ユニットテスト
 if ! bash tests/run.sh; then
   fail=1
 fi

@@ -13,6 +13,7 @@ reviewer=Codex（レビュー専用・read-only）。往復は cmux のペイン
 ```bash
 bash tests/run.sh                         # ユニットテスト（cmux 不要・変更後は必ず実行）
 tools/render-spec.sh                      # docs/spec/ の HTML を正典 md から再生成
+tools/render-spec.sh --site _site         # 公開サイトをローカルに組み立てて確認（_site は非追跡）
 bash -n scripts/*.sh hooks/*.sh           # 構文チェック
 scripts/transport.sh ping                 # cmux 接続確認（cmux ペイン内で実行）
 scripts/transport.sh resolve              # reviewer ペインの宛先解決確認

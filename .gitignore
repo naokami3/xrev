@@ -7,3 +7,6 @@
 
 # 個人ローカル設定（チーム共有しない）。.claude/settings.json は追跡する。
 .claude/settings.local.json
+
+# GitHub Pages のビルド成果物（CI が毎回組み立て直すためコミットしない）。
+_site/

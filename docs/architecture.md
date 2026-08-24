@@ -37,7 +37,8 @@ xrev/
 │   │                                  #   config / delivery-gates / reviewer-lifecycle / reference-mode / doctor）
 │   ├── codex-primary-playbook.md      # 主従反転プリセット向けの codex 主プレイブック
 │   └── review-schema.json             # reviewer 出力契約（JSON Schema）
-├── tools/                     # 開発用: verify.sh（テスト強制ゲート）/ render-spec.sh（詳細仕様 HTML 生成）/
+├── tools/                     # 開発用: verify.sh（テスト強制ゲート）/ render-spec.sh（詳細仕様 HTML 生成 +
+│                              #   --site で GitHub Pages 用サイトの組み立て）/
 │                              #   claude-posttooluse.sh / claude-stop.sh / install-hooks.sh
 ├── tests/                     # ユニットテスト(cmux 不要・bash+python3): run.sh / lib.sh / test_*.sh
 ├── docs/                      # 人間向けドキュメント: overview.html（図付き概観）/ cmux.html（cmux 詳細解説）/
@@ -48,8 +49,29 @@ xrev/
 │                              #   setup-codex.md / adr/（ADR-NNN）
 ├── llms.txt                   # エージェント向けの主要ドキュメント地図（人間=HTML / エージェント=md）
 ├── .githooks/pre-commit       # コミット前にテストを強制（core.hooksPath）
-└── .github/workflows/ci.yml   # CI（push / PR で tools/verify.sh を実行）
+└── .github/workflows/         # ci.yml（push / PR で tools/verify.sh）/ pages.yml（main 更新で
+                               #   render-spec.sh --site を組み立てて GitHub Pages へ公開）
 ```
+
+## 公開サイト（GitHub Pages）
+
+人間向けドキュメントは [naokami3.github.io/xrev](https://naokami3.github.io/xrev/) で公開している。GitHub の blob 表示は
+`.html` をソースとして見せてしまうため、ブラウザで読むための経路を別に用意している。
+
+サイトは `tools/render-spec.sh --site <DIR>` が組み立て、`.github/workflows/pages.yml` が main の
+更新ごとに実行する。要点は 3 つ。
+
+- **リポジトリと同じディレクトリ構造で並べる**（`docs/overview.html` → `<サイト>/docs/overview.html`）。
+  こうすると手書き HTML と md の既存の相対リンクがそのまま解決し、リポジトリ側のファイルを
+  書き換えずに済む。リンクの `.md` → `.html` 変換はビルド時にだけ行う。
+- **リポジトリ内の md はすべてページ化する**。ただし `references/protocol/*.md` は詳細仕様ページ
+  （`docs/spec/`）が人間向けの表現なのでそちらへ寄せ、二重のページを作らない。md 以外の
+  ファイル（スクリプト・JSON・LICENSE 等）へのリンクは GitHub 上のソースへ送る。
+- **リンク切れは fail closed**。リンク先がリポジトリに存在しなければ組み立てが非ゼロで止まる。
+  `tools/verify.sh` が一時ディレクトリへの組み立てを試すので、壊れたリンクはコミット前に落ちる。
+
+生成物はコミットしない（CI が毎回組み立て直す）。ローカルで確認するときは
+`tools/render-spec.sh --site _site` を実行して `_site/index.html` を開く。
 
 ## 設計原則
 
